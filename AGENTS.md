@@ -122,6 +122,8 @@ Use traits or equivalent injection seams around transport, persistence, browser 
 
 ## Testing and validation
 
+Testing is a first-class part of development, not an afterthought or a final cleanup phase. Design test seams and test cases alongside each feature, write tests before or with the implementation, and consider behavior-changing work incomplete until its relevant tests exist and pass. When practical, begin every bug fix with a regression test that demonstrates the failure.
+
 Design the core so most behavior can be tested without launching a terminal or signing in:
 
 - Unit-test slash-command parsing, including unknown commands.
