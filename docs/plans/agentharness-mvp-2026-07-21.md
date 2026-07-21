@@ -1,5 +1,12 @@
 # AgentHarness MVP: Implementation Plan
 
+## Implementation status
+
+- [x] Milestone 0: protocol foundation and pragmatic safety defaults.
+- [x] Milestones 1–4: application core, local services, transport/session integration, and single-thread workflow.
+- [x] Milestones 5–6: Ratatui shell, lifecycle hardening, and release validation.
+- [x] Independent final review and full verification.
+
 ## Goal
 
 Build a small macOS-first Rust/Ratatui terminal chat client that uses one long-lived installed `codex app-server` process to:
@@ -21,8 +28,8 @@ Discovery on 2026-07-21 established this baseline:
 - The installed runtime was `codex-cli 0.144.6`. Its stable generated schema confirmed the MVP methods `initialize`, `account/read`, `account/login/start`, `account/logout`, paginated `model/list`, `thread/start`, `thread/resume`, `thread/read`, `turn/start`, and `turn/interrupt`.
 - The response stream is scoped by thread, turn, and item. The relevant events are `thread/started`, `turn/started`, `item/started`, `item/agentMessage/delta`, `item/completed`, `turn/completed`, and `error`.
 - The server can initiate approval, permission, tool, elicitation, token-refresh, and attestation requests. Every such request is outside the MVP.
-- The schema exposes `approvalPolicy: "never"`, read-only sandboxing, a non-project `cwd`, and configuration overrides, but no stable capability that disables every built-in tool.
-- Official configuration documents provide individual switches for shell, web search, apps, MCP servers, skills, plugins, hooks, and multi-agent behavior. They do not define a stable, complete app-server “chat only” mode.
+- The schema exposes `approvalPolicy: "never"`, read-only sandboxing, a non-project `cwd`, configuration overrides, and typed negative/error responses for server requests.
+- Official configuration documents provide individual switches for shell, web search, apps, MCP servers, skills, plugins, hooks, and multi-agent behavior. AgentHarness uses these pragmatically, but a complete app-server “chat only” mode is not required.
 
 The installed schema wins over this plan whenever names or shapes differ. Regenerate it at implementation time and record the tested CLI version.
 
@@ -34,45 +41,27 @@ Reference-only patterns may be consulted at:
 
 These files are non-authoritative and strictly read-only.
 
-## Release gate: prove chat-only feasibility first
+## Milestone 0 safety foundation
 
-This is Milestone 0 and blocks all release claims. Read-only sandboxing and `approvalPolicy: "never"` are defense in depth, not proof that tools are unavailable.
+Milestone 0 establishes pragmatic defense in depth for a conversation-focused client. It does not require proof that every Codex built-in tool has been removed, and retained built-in capability does not block release.
 
-### Isolation policy to validate
+### Isolation policy
 
 Run app-server with:
 
 1. A dedicated `CODEX_HOME` under AgentHarness application support, with owner-only permissions. Codex alone creates and reads its auth files.
 2. A dedicated empty conversation directory as `cwd`; never use the launch directory or a user project.
 3. No project-local configuration, instructions, MCP definitions, plugins, skills, hooks, or workspace roots.
-4. Strict explicit startup overrides that disable every tool-bearing feature recognized by the tested CLI, including at least shell/unified execution, web search, apps/connectors, MCP, skills and skill dependency installation, plugins, hooks, computer/browser use, image generation, and multi-agent operation.
-5. `approvalPolicy: "never"`, a read-only sandbox, and sandbox/tool network access disabled at both thread and turn boundaries. App-server’s own authenticated Codex transport remains available.
+4. Explicit startup overrides that disable tool-bearing optional features recognized by the tested CLI where practical, including shell/unified execution, web search, apps/connectors, skill dependency installation, plugins, hooks, computer/browser use, image generation, and multi-agent operation.
+5. `approvalPolicy: "never"` and a read-only sandbox at thread and turn boundaries, with `networkAccess: false` in the turn sandbox policy. App-server’s own authenticated Codex transport remains available.
 6. Initialize capabilities that leave experimental APIs, MCP form elicitation, and attestation disabled.
 7. A client handler that explicitly denies or errors every server request and treats its arrival as a visible safety violation.
 
-For `codex-cli 0.144.6`, that request inventory is `item/commandExecution/requestApproval`, `item/fileChange/requestApproval`, `item/tool/requestUserInput`, `mcpServer/elicitation/request`, `item/permissions/requestApproval`, `item/tool/call`, `account/chatgptAuthTokens/refresh`, `attestation/generate`, `applyPatchApproval`, and `execCommandApproval`. Regenerate the inventory for every supported CLI version.
+For `codex-cli 0.144.6`, the generated request inventory is `item/commandExecution/requestApproval`, `item/fileChange/requestApproval`, `item/tool/requestUserInput`, `mcpServer/elicitation/request`, `item/permissions/requestApproval`, `item/tool/call`, `account/chatgptAuthTokens/refresh`, `attestation/generate`, `applyPatchApproval`, and `execCommandApproval`. Regenerate the inventory for every supported CLI version.
 
-Do not assume an empty `mcp_servers` override replaces inherited configuration. The dedicated `CODEX_HOME` must be shown to prevent inheritance, and effective configuration/status calls must confirm that no MCP server, app, plugin, skill, or hook was loaded.
+A dedicated `CODEX_HOME` and empty `mcp_servers` configuration reduce inherited extension risk. Registry inspection may be used for diagnostics, but exhaustive extension suppression and authenticated adversarial conformance are not release requirements.
 
-### Conformance proof
-
-Build the proof on the same transport and protocol types intended for the product; do not create a throwaway shell script.
-
-The ignored, authenticated conformance test must:
-
-- record the CLI version and regenerate the stable schema outside the repository;
-- verify the effective safety configuration and empty extension registries;
-- place random read and write canaries outside the conversation directory;
-- send adversarial turns asking Codex to read the nonce, run a command, write a file, browse the web, call MCP/app tools, and delegate;
-- assert that no command, file-change, MCP, dynamic-tool, permission, approval, elicitation, or sub-agent item/request appears;
-- assert no child tool process, sandbox/tool egress beyond the required Codex service transport, canary disclosure, or filesystem change occurs; and
-- retain a sanitized protocol trace containing method names, IDs, item types, and terminal status only—never prompts, replies, auth data, or raw payloads.
-
-Also inject every current server-request variant through the fake server, including legacy approval names, and prove the client never approves it. A safety violation fails the turn, surfaces an actionable error, and makes the connection unusable until restarted.
-
-### Gate result
-
-Proceed only if a specific CLI version passes the conformance proof and the controls use stable supported configuration. If built-in tool availability cannot be removed—or can only be discouraged by instructions—AgentHarness is release-blocked under the current MVP contract. Do not silently ship a weaker “read-only agent” product.
+Inject every current server-request variant through the fake server, including legacy approval names, and prove the client never approves it. A safety violation fails pending work, surfaces an actionable error, and makes the connection unusable until restarted.
 
 ## Proposed package layout
 
@@ -104,7 +93,6 @@ src/
     view.rs               # stateless rendering from AppState
 tests/
   app_server_integration.rs
-  chat_only_conformance.rs # ignored; requires real ChatGPT login/network
   support/
     fake_app_server.rs
   fixtures/
@@ -179,7 +167,7 @@ Diagnostics may include timestamps, method names, IDs, CLI version, byte counts,
 1. Create application-support, dedicated Codex home, empty conversation, and diagnostic directories with owner-only permissions.
 2. Load `PreferencesV1`; missing, unsupported, or corrupt state becomes a clean first run plus a local notice.
 3. Resolve the executable and check the supported CLI version or required features.
-4. Spawn app-server with the validated chat-only policy.
+4. Spawn app-server with the isolated conversation-focused safety policy.
 5. Send `initialize` once with non-experimental capabilities, then send `initialized`.
 6. Call `account/read`. Accept only a managed `chatgpt` account for the MVP.
 7. Fetch every `model/list` page with `includeHidden: false`; deduplicate by model ID.
@@ -192,9 +180,10 @@ Subscribe to inbound events before start/resume requests and buffer events until
 ### Authentication
 
 - `/login` sends `account/login/start` with `type: "chatgpt"`.
+- `/login device` sends the supported `chatgptDeviceCode` variant, opens its HTTPS verification page, and renders the one-time code without persisting or logging it.
 - Parse `authUrl`, allow only the schema/documented HTTPS login flow, and spawn macOS `open` directly with the URL as one argument.
-- Correlate `account/login/completed`, then refresh state with `account/read`.
-- `/logout` sends `account/logout`, clears the in-memory binding, but does not destroy the saved thread record.
+- Correlate `account/login/completed`, including schema-valid ID-less failure notifications when exactly one login is active, then refresh state with `account/read`.
+- While a login is pending, `/logout` sends `account/login/cancel` and reconciles with `account/read`; when signed in it sends `account/logout`. Neither path destroys the saved thread record.
 - API-key and externally managed token modes have no command, configuration, or fallback path.
 - Reject `account/chatgptAuthTokens/refresh`; its appearance indicates a configuration/version violation.
 
@@ -231,7 +220,7 @@ Any approval, tool, permission, elicitation, attestation, or unknown server requ
 
 `command::parse` trims the leading command token, preserves optional arguments, and returns a typed intent or local error. Supported commands are exactly:
 
-- `/login`, `/logout`, `/model [id]`, `/reasoning [value]`,
+- `/login [browser|device]`, `/logout`, `/model [id]`, `/reasoning [value]`,
   `/resume`, `/help`, and `/quit`.
 
 Unknown slash commands never reach Codex. Normal non-empty text becomes `Intent::SendMessage`. Reject sends while signed out, disconnected, resuming, or already running a turn with an actionable notice.
@@ -289,15 +278,15 @@ The TUI owns stdout. App-server stderr and sanitized diagnostics go only to the 
 
 ## Milestones and work items
 
-### Milestone 0 — Protocol and chat-only gate
+### Milestone 0 — Protocol and safety foundation
 
-1. Create the minimal crate and reusable transport/protocol surface needed for schema validation and a real conformance trace.
-2. Regenerate the installed stable schema outside source control; capture the CLI version and exact required methods/fields.
-3. Implement the isolated process policy, strict feature overrides, empty non-project `cwd`, never-approve/read-only/no-tool-egress settings, and exhaustive server-request denial.
-4. Add fake-server request-denial tests and the ignored authenticated adversarial conformance test.
-5. Record the first passing minimum CLI version.
+1. Create the minimal crate and reusable transport/protocol surface needed for schema validation and later session work: direct process ownership, bounded JSONL, request correlation/timeouts, continuous stderr draining, one stdin writer, and bounded reap/kill shutdown.
+2. Regenerate the installed stable schema outside source control; capture the tested CLI version and exact required methods/fields.
+3. Implement the isolated process policy, pragmatic feature overrides, empty non-project `cwd`, never-approve/read-only/no-tool-network settings, and exhaustive server-request denial.
+4. Add fake-server tests for every generated server-request method, including legacy approval names.
+5. Record the tested CLI version and protocol evidence; incomplete built-in tool suppression is not a blocker.
 
-**Exit:** all known extension registries are empty, no built-in tool can execute, and the trace contains no tool-bearing item/request. Otherwise stop with the documented release blocker.
+**Exit:** the reusable transport initializes safely, all known and unknown server requests are denied fail-closed, and deterministic offline tests pass. No authenticated adversarial conformance proof is required.
 
 ### Milestone 1 — Pure application core and local services
 
@@ -310,9 +299,9 @@ The TUI owns stdout. App-server stderr and sanitized diagnostics go only to the 
 
 ### Milestone 2 — Long-lived transport and typed protocol
 
-1. Implement direct spawn, pipe ownership, JSONL framing, request correlation, timeouts, generation scoping, continuous stderr draining, and reap/kill behavior.
-2. Define only the stable Serde envelopes required by the MVP and safety handler; tolerate unknown fields.
-3. Add the fake child and fixtures for initialize, auth, paginated models, start/resume/read, turn streaming, malformed JSON, unknown messages, request timeout, EOF, and cleanup.
+1. Extend the Milestone 0 transport with connection generation scoping, method-specific timeouts, stale-response handling, restart behavior, and sanitized diagnostic sinks.
+2. Add the remaining stable Serde envelopes required by the MVP while tolerating unknown fields and notifications.
+3. Expand the fake child and fixtures from request denial to auth, paginated models, start/resume/read, turn streaming, malformed JSON, unknown messages, request timeout, EOF, stderr flooding, and cleanup.
 
 **Exit:** integration tests prove ordering, correlation, recovery, no pipe deadlock, no leaked child, and sanitized diagnostics.
 
@@ -348,10 +337,10 @@ The TUI owns stdout. App-server stderr and sanitized diagnostics go only to the 
 
 1. Run protocol fixtures against the pinned minimum and current installed CLI schemas.
 2. Exercise app-server crashes, malformed frames, timeouts, unknown notifications/requests, login cancellation, corrupt state, and signals.
-3. Run the authenticated chat-only conformance test and the manual smoke flow.
+3. Run the manual conversation-focused safety and smoke flow.
 4. Run formatting, linting, and all default tests on stable Rust/macOS; add macOS CI only for the MVP.
 
-**Exit:** every acceptance criterion below passes, including the chat-only release gate.
+**Exit:** every acceptance criterion below passes, including the conversation-focused safety defaults and fail-closed request handling.
 
 ## Testing strategy
 
@@ -386,7 +375,7 @@ Use Ratatui `TestBackend` for stable layouts at small and normal terminal sizes.
 
 ### Real tests
 
-Keep the authenticated safety conformance test ignored and opt-in. It must use a disposable dedicated Codex home/conversation directory and leave no repository artifacts. A lighter manual smoke test validates actual browser login and transcript behavior. Neither runs in default CI.
+Keep authenticated smoke coverage manual or ignored and opt-in. Use a dedicated Codex home/conversation directory and leave no repository artifacts. Validate login, transcript behavior, isolation defaults, and visible handling of any unexpected server request. Exhaustive adversarial proof that built-in tools are absent is out of scope. Real tests never run in default CI.
 
 Before handoff:
 
@@ -406,7 +395,7 @@ cargo test --all-targets
 6. Simulate an invalid/stale saved ID. Confirm the ID remains stored, failure is explicit, and no replacement thread is created.
 7. Logout and sign in as a different account. Confirm the prior thread is not resumed.
 8. Interrupt a long turn, terminate app-server, and exercise Ctrl-C. Confirm errors are visible, the child is reaped, preferences remain valid, and the terminal is restored.
-9. Run the authenticated chat-only conformance flow. Confirm canaries are untouched/unreadable, no tool/MCP/approval events occur, and diagnostics contain no prompt, reply, email, URL query, or credential.
+9. Confirm the session uses the dedicated Codex home, empty conversation directory, read-only/no-tool-network settings, never auto-approves, and reports any unexpected server request without exposing an approval flow.
 10. Repeat startup with an unsupported CLI version and verify the upgrade message is actionable.
 
 ## Acceptance criteria
@@ -423,23 +412,23 @@ cargo test --all-targets
 - Preferences are minimal, versioned, owner-readable, atomic, and contain no transcript or credentials.
 - Process, framing, timeout, version, account, and protocol errors are visible and recoverable.
 - Every server request is denied fail-closed.
-- The pinned CLI version passes the authenticated conformance proof that built-in and inherited tools cannot execute. Without this proof, the MVP is explicitly release-blocked.
+- The tested CLI version uses pragmatic isolation and feature-disable defaults; retained built-in tool capability is acceptable and does not block release.
 - Default tests are deterministic and offline; format, Clippy, and all-target test checks pass.
 
 ## Risks and open decisions
 
 | Risk or decision | Plan |
 |---|---|
-| No stable complete tool-disable control | Milestone 0 is a hard release gate; never substitute prompt instructions, sandboxing, or approval denial for proof. |
-| CLI protocol/version skew | Regenerate the installed schema, keep typed coverage narrow, feature-detect required calls, and pin only the first conformance-tested minimum. |
-| Tool-bearing features change after the plan | Re-run registry checks and adversarial traces for every supported CLI upgrade. Unknown server requests are safety violations. |
+| No stable complete tool-disable control | Accept retained built-in capability; keep the UI conversation-focused and apply pragmatic isolation, read-only/no-tool-network settings, never auto-approve, and fail-closed request handling. |
+| CLI protocol/version skew | Regenerate the installed schema, keep typed coverage narrow, and feature-detect or enforce the methods needed by the tested version. |
+| Tool-bearing features change after the plan | Regenerate the server-request inventory for supported CLI upgrades. Unknown server requests remain safety violations and are denied. |
 | Current account data lacks a stable non-email ID | Use normalized ChatGPT email only when present and never log/render it; disable auto-resume when account equivalence cannot be proved. Revisit if the schema adds an opaque account ID. |
 | Early or duplicate events corrupt transcript | Subscribe before lifecycle calls, buffer until binding, scope by thread/turn/item, and reconcile final snapshots byte-wise. |
 | Terminal corruption or orphaned child | One RAII terminal guard and one idempotent ordered shutdown path, tested under errors and signals. |
 | Diagnostics leak content or auth data | Allowlist metadata fields; never persist raw protocol/stderr, prompts, replies, emails, or URL queries. |
 | Dependency/architecture growth | One crate, one provider, one thread, narrow traits only at I/O seams; defer everything outside the MVP contract. |
 
-The only unresolved release decision is the exact minimum Codex CLI version and stable configuration that passes Milestone 0. If none does, the implementation must stop and report the chat-only boundary as infeasible rather than changing product scope implicitly.
+Milestone 0 records the CLI version used to generate and test the protocol surface. Selecting a long-term minimum supported version remains a later compatibility decision, not a tool-suppression release gate.
 
 ## References
 

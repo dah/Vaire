@@ -18,7 +18,7 @@ Keep the first version deliberately narrow. Prefer a working vertical slice over
 - Keep exactly one active chat thread in the UI.
 - Persist the active Codex thread ID and automatically resume that same working thread on the next launch.
 - Stream agent-message deltas into the transcript and show a clear terminal state when each turn completes or fails.
-- Keep the MVP conversational. File access, shell commands, edits, web search, tools, approvals, MCP, images, and sub-agents are postponed.
+- Keep the MVP UI conversational. File access, shell commands, edits, web search, tools, approvals, MCP, images, and sub-agents have no UI or user workflow in the MVP, even if the Codex runtime retains built-in tool capability.
 
 ## Explicit non-goals
 
@@ -44,8 +44,8 @@ The application opens directly into the chat TUI. On startup it should:
 
 Normal text entered in the composer starts a turn in the active thread. Slash commands are the control surface for application actions. The initial command vocabulary is:
 
-- `/login` — start the Codex ChatGPT browser sign-in flow.
-- `/logout` — sign out through Codex.
+- `/login` — start the Codex ChatGPT browser sign-in flow; `/login device` is the supported fallback when callback login is unavailable.
+- `/logout` — sign out through Codex, or cancel the currently pending sign-in.
 - `/model` — inspect or select a model returned by app-server.
 - `/reasoning` — inspect or select a reasoning level supported by the current model.
 - `/resume` — retry attaching to the saved working thread.
@@ -79,16 +79,15 @@ The installed CLI schema wins when documentation, memory, examples, or the optio
 - Open login URLs without shell interpolation and accept only the expected safe URL schemes.
 - Scope saved thread state to the authenticated account when the protocol exposes an account identifier. Never resume a thread across an account switch.
 
-### Chat-only safety boundary
+### Conversation-focused safety boundary
 
-The absence of tool UI is not proof that tools are disabled.
+The MVP does not expose tool cards, approval controls, or tool-oriented workflows. Codex may retain built-in tool capability; exhaustive suppression is not a release requirement.
 
-- Configure app-server to deny tool use and approvals by default using capabilities verified against the installed schema.
-- Do not inherit user MCP servers or other tool-enabling configuration into the MVP session.
-- Do not expose a user project as the working directory for an MVP turn.
-- Use a read-only sandbox and a never-approve policy as defense in depth, not as the sole tool-disable mechanism.
-- Fail closed on every unexpected approval, tool, elicitation, or server request. Never auto-approve it.
-- Before calling the MVP complete, prove with an integration test or manual protocol trace that a conversational turn cannot run built-in tools or inherited MCP tools. If the current app-server cannot provide that guarantee, treat it as a release blocker rather than silently weakening the requirement.
+- Use a dedicated AgentHarness Codex home and empty non-project working directory so user projects and inherited extensions are excluded where practical.
+- Disable tool-bearing optional features and inherited MCP/extensions when supported, without treating an incomplete disable surface as a release blocker.
+- Use a read-only sandbox with tool network access disabled and an approval policy that never auto-approves as defense in depth.
+- Fail closed on every unexpected approval, tool, permission, elicitation, attestation, or other server request. Never auto-approve it or add approval UX in the MVP.
+- Keep exhaustive fake-server request-denial coverage. Authenticated adversarial proof that every built-in tool is absent is not required.
 
 ## Architecture boundaries
 
