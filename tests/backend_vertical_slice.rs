@@ -336,7 +336,12 @@ IFS= read -r hold
     backend.pump_event().await.unwrap();
     assert!(matches!(backend.state().auth, AuthState::SigningIn { .. }));
     backend.pump_event().await.unwrap();
-    assert!(matches!(backend.state().auth, AuthState::SignedIn { .. }));
+    assert_eq!(
+        backend.state().auth,
+        AuthState::SignedIn {
+            scope: AccountScope::from_chatgpt_email("user@example.com"),
+        }
+    );
     assert_eq!(
         backend.state().notice.as_deref(),
         Some("Signed in to ChatGPT")

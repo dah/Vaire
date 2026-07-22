@@ -197,7 +197,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, ui: &UiState) {
         .split(area);
 
     frame.render_widget(
-        Paragraph::new(status_text(state)).style(
+        Paragraph::new(status_text(state, regions[0].width)).style(
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
@@ -320,7 +320,7 @@ fn message_text(state: &AppState) -> Option<MessageText> {
     })
 }
 
-fn status_text(state: &AppState) -> String {
+fn status_text(state: &AppState, width: u16) -> String {
     let connection = match &state.connection {
         ConnectionState::Disconnected => "offline".to_owned(),
         ConnectionState::Connecting => "connecting".to_owned(),
@@ -336,9 +336,12 @@ fn status_text(state: &AppState) -> String {
         AuthState::Unknown => "auth?".to_owned(),
         AuthState::SignedOut => "signed out".to_owned(),
         AuthState::SigningIn { .. } => "signing in".to_owned(),
-        AuthState::SignedIn { .. } => "signed in".to_owned(),
+        AuthState::SignedIn {
+            scope: Some(crate::persistence::AccountScope::ChatgptEmail(email)),
+        } => sanitize_header_text(email),
+        AuthState::SignedIn { scope: None } => "account?".to_owned(),
         AuthState::Unsupported(message) => {
-            format!("unsupported: {}", sanitize_terminal_text(message))
+            format!("unsupported: {}", sanitize_header_text(message))
         }
     };
     let thread = match &state.thread {
@@ -371,7 +374,42 @@ fn status_text(state: &AppState) -> String {
     } else {
         ""
     };
-    format!(" {connection} • {auth} • {thread} • {model}/{reasoning} • {turn}{shutdown}")
+    truncate_for_display(
+        &format!(" {connection} • {auth} • {thread} • {model}/{reasoning} • {turn}{shutdown}"),
+        width,
+    )
+}
+
+fn sanitize_header_text(value: &str) -> String {
+    sanitize_terminal_text(value).replace('\n', " ")
+}
+
+fn truncate_for_display(value: &str, width: u16) -> String {
+    let width = usize::from(width);
+    let display_width = value
+        .chars()
+        .map(|character| UnicodeWidthChar::width(character).unwrap_or(0))
+        .sum::<usize>();
+    if display_width <= width {
+        return value.to_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+
+    let content_width = width.saturating_sub(1);
+    let mut truncated = String::with_capacity(value.len().min(width));
+    let mut used = 0_usize;
+    for character in value.chars() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if used.saturating_add(character_width) > content_width {
+            break;
+        }
+        truncated.push(character);
+        used = used.saturating_add(character_width);
+    }
+    truncated.push('…');
+    truncated
 }
 
 fn render_transcript(
@@ -734,6 +772,7 @@ mod tests {
         ThinkingKind, ThreadChoice, ThreadDeleteConfirmation, ThreadPickerPhase, ThreadPickerState,
         ThreadState, TranscriptEntry, TranscriptRole, TurnState,
     };
+    use crate::persistence::AccountScope;
 
     fn draw(state: &AppState, ui: &UiState, width: u16, height: u16) -> Terminal<TestBackend> {
         let backend = TestBackend::new(width, height);
@@ -755,10 +794,20 @@ mod tests {
             .join("\n")
     }
 
+    fn header(state: &AppState, width: u16) -> String {
+        screen(state, &UiState::default(), width, 20)
+            .lines()
+            .next()
+            .unwrap()
+            .to_owned()
+    }
+
     fn ready() -> AppState {
         AppState {
             connection: ConnectionState::Ready { generation: 1 },
-            auth: AuthState::SignedIn { scope: None },
+            auth: AuthState::SignedIn {
+                scope: AccountScope::from_chatgpt_email("user@example.com"),
+            },
             thread: ThreadState::Ready {
                 id: "thread".to_owned(),
             },
@@ -798,12 +847,75 @@ mod tests {
             ..AppState::default()
         };
 
-        state.reduce(Action::Event(DomainEvent::AccountLoaded(None)));
+        state.reduce(Action::Event(DomainEvent::AccountLoaded(
+            AccountScope::from_chatgpt_email("User@Example.COM"),
+        )));
 
         let rendered = screen(&state, &UiState::default(), 90, 20);
-        assert!(rendered.contains("signed in"));
+        assert!(header(&state, 90).contains("user@example.com"));
         assert!(rendered.contains("Signed in to ChatGPT"));
         assert!(!rendered.contains("Complete sign-in"));
+    }
+
+    #[test]
+    fn header_preserves_auth_labels_and_replaces_identity_on_account_changes() {
+        let mut state = ready();
+        state.auth = AuthState::Unknown;
+        assert!(header(&state, 100).contains("auth?"));
+
+        state.auth = AuthState::SignedOut;
+        assert!(header(&state, 100).contains("signed out"));
+
+        state.auth = AuthState::SigningIn {
+            login_id: "login-active".to_owned(),
+        };
+        assert!(header(&state, 100).contains("signing in"));
+
+        state.auth = AuthState::Unsupported("apiKey".to_owned());
+        assert!(header(&state, 100).contains("unsupported: apiKey"));
+
+        state.auth = AuthState::SignedIn { scope: None };
+        assert!(header(&state, 100).contains("account?"));
+
+        state.reduce(Action::Event(DomainEvent::AccountLoaded(
+            AccountScope::from_chatgpt_email("first@example.com"),
+        )));
+        assert!(header(&state, 100).contains("first@example.com"));
+
+        state.reduce(Action::Event(DomainEvent::AccountLoaded(
+            AccountScope::from_chatgpt_email("second@example.com"),
+        )));
+        let switched = header(&state, 100);
+        assert!(switched.contains("second@example.com"));
+        assert!(!switched.contains("first@example.com"));
+
+        state.reduce(Action::Event(DomainEvent::LoggedOut));
+        let logged_out = header(&state, 100);
+        assert!(logged_out.contains("signed out"));
+        assert!(!logged_out.contains("second@example.com"));
+    }
+
+    #[test]
+    fn account_identity_is_sanitized_and_header_is_truncated_at_display_width() {
+        let mut state = ready();
+        state.auth = AuthState::SignedIn {
+            scope: Some(AccountScope::ChatgptEmail(
+                "safe\u{1b}[2J\nspoof@example.com".to_owned(),
+            )),
+        };
+        let sanitized = header(&state, 120);
+        assert!(sanitized.contains("safe[2J spoof@example.com"));
+        assert!(!sanitized.contains('\u{1b}'));
+
+        let long_email = format!("{}@example.com", "account".repeat(20));
+        state.auth = AuthState::SignedIn {
+            scope: Some(AccountScope::ChatgptEmail(long_email.clone())),
+        };
+        let narrow = header(&state, 36);
+        assert_eq!(narrow.chars().count(), 36);
+        assert!(narrow.ends_with('…'));
+        assert!(!narrow.contains(&long_email));
+        assert!(!narrow.contains("Terminal too small"));
     }
 
     #[test]
