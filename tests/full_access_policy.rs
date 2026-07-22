@@ -124,6 +124,10 @@ fn assert_thread_policy(request: &Value, method: &str, cwd: &Path) {
         "all"
     );
     assert_eq!(
+        request["params"]["config"]["show_raw_agent_reasoning"],
+        true
+    );
+    assert_eq!(
         request["params"]["config"]["features"]["shell_snapshot"],
         true
     );
@@ -194,10 +198,13 @@ IFS= read -r hold || true
         serde_json::from_slice(&fs::read(captures.join("thread-resume.json")).unwrap()).unwrap();
 
     assert_thread_policy(&thread_start, "thread/start", &paths.conversation);
+    assert_eq!(thread_start["params"]["threadSource"], "appServer");
     assert_thread_policy(&thread_resume, "thread/resume", &paths.conversation);
     assert_eq!(thread_resume["params"]["threadId"], "thr-policy");
+    assert!(thread_resume["params"].get("threadSource").is_none());
     assert_eq!(turn_start["method"], "turn/start");
     assert_eq!(turn_start["params"]["approvalPolicy"], "never");
+    assert_eq!(turn_start["params"]["summary"], "detailed");
     assert_eq!(
         turn_start["params"]["cwd"],
         paths.conversation.to_string_lossy().as_ref()

@@ -125,10 +125,18 @@ printf '%s\n' '{{"id":3,"result":{{"data":[{{"id":"m1","displayName":"Model One"
 IFS= read -r model_page_two
 printf '%s\n' '{{"id":4,"result":{{"data":[{{"id":"m1","displayName":"duplicate","isDefault":false,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{{"reasoningEffort":"high","description":"deep"}}],"hidden":false}},{{"id":"m2","displayName":"Model Two","isDefault":false,"defaultReasoningEffort":"low","supportedReasoningEfforts":[{{"reasoningEffort":"low","description":"fast"}}],"hidden":false}}],"nextCursor":null}}}}'
 IFS= read -r thread_start
+case "$thread_start" in
+  *'"threadSource":"appServer"'*) ;;
+  *) exit 88 ;;
+esac
+case "$thread_start" in
+  *'"show_raw_agent_reasoning":true'*) ;;
+  *) exit 87 ;;
+esac
 printf '%s\n' '{{"id":5,"result":{{"thread":{{"id":"thr-new","turns":[]}}}}}}'
 IFS= read -r turn_start
 case "$turn_start" in
-  *'"summary":"auto"'*) ;;
+  *'"summary":"detailed"'*) ;;
   *) exit 89 ;;
 esac
 printf '%s\n' '{{"id":6,"result":{{"turn":{{"id":"turn-new","items":[],"status":"inProgress"}}}}}}'

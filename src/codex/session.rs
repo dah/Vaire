@@ -10,8 +10,8 @@ use super::protocol::{
     LoginAccountResponse, ModelInfo, ModelListParams, ModelListResponse, ProtocolEvent,
     ReasoningSummary, ThreadDeleteParams, ThreadDeleteResponse, ThreadItemContent, ThreadListEntry,
     ThreadListParams, ThreadListResponse, ThreadReadParams, ThreadResponse, ThreadResumeParams,
-    ThreadSnapshot, ThreadStartParams, TurnInterruptParams, TurnStartParams, TurnStartResponse,
-    UserInput,
+    ThreadSnapshot, ThreadSourceKind, ThreadStartParams, TurnInterruptParams, TurnStartParams,
+    TurnStartResponse, UserInput,
 };
 use super::safety::{FullAccessPolicy, IsolationPaths};
 use super::transport::{AppServerTransport, TransportError};
@@ -231,7 +231,10 @@ impl SessionService {
                     .request_default(
                         "thread/list",
                         ThreadListParams {
-                            source_kinds: vec!["appServer".to_owned()],
+                            source_kinds: vec![
+                                ThreadSourceKind::AppServer,
+                                ThreadSourceKind::Vscode,
+                            ],
                             archived: false,
                             cursor: cursor.clone(),
                             cwd: self.paths.conversation.clone(),
@@ -366,7 +369,7 @@ impl SessionService {
                         input: vec![UserInput::text(text)],
                         model: model.to_owned(),
                         effort: effort.to_owned(),
-                        summary: ReasoningSummary::Auto,
+                        summary: ReasoningSummary::Detailed,
                         approval_policy: "never".to_owned(),
                         cwd: self.paths.conversation.clone(),
                         sandbox_policy: overrides["sandboxPolicy"].clone(),
@@ -422,6 +425,7 @@ impl SessionService {
     fn thread_start_params(&self, model: &str) -> ThreadStartParams {
         let overrides = self.policy.thread_start_overrides(&self.paths.conversation);
         ThreadStartParams {
+            thread_source: ThreadSourceKind::AppServer,
             approval_policy: "never".to_owned(),
             config: overrides["config"].clone(),
             cwd: self.paths.conversation.clone(),

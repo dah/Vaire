@@ -1,7 +1,7 @@
 use crate::app::Intent;
 
 pub const HELP_TEXT: &str = "\
-Commands:\n  /login                 Sign in with ChatGPT in your browser\n  /login device          Use device-code sign-in if browser callback login fails\n  /login browser         Explicitly use browser callback sign-in\n  /logout                Sign out, or cancel a pending sign-in\n  /model [id]            List or select an available model\n  /reasoning [value]     List or select a reasoning level\n  /new                   Start and switch to a new thread\n  /resume                Browse and resume saved threads\n  /thinking              Toggle the emitted-thinking panel\n  /help                  Show this help\n  /quit                  Exit AgentHarness\nThread picker: arrows or j/k move, Enter resumes, d permanently deletes one inactive thread, D permanently clears all inactive threads, Esc closes. Deletion always requires Enter confirmation.\nKeys: Enter sends, Alt-Enter inserts a newline, Escape interrupts or closes help, PageUp/PageDown scroll, Ctrl-C quits.";
+Commands:\n  /login                 Sign in with ChatGPT in your browser\n  /login device          Use device-code sign-in if browser callback login fails\n  /login browser         Explicitly use browser callback sign-in\n  /logout                Sign out, or cancel a pending sign-in\n  /model [id]            List or select an available model\n  /reasoning [value]     List or select a reasoning level\n  /new                   Start and switch to a new thread\n  /resume                Browse and resume saved threads\n  /thinking              Toggle the Reasoning panel\n  /help                  Show this help\n  /quit                  Exit AgentHarness\nThread picker: arrows or j/k move, Enter resumes, d permanently deletes one inactive thread, D permanently clears all inactive threads, Esc closes. Deletion always requires Enter confirmation.\nKeys: Enter sends, Alt-Enter inserts a newline, Escape interrupts or closes help, PageUp/PageDown scroll, Ctrl-C quits.";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ParseError {
@@ -121,7 +121,8 @@ mod tests {
         assert!(HELP_TEXT.contains("/login device"));
         assert!(HELP_TEXT.contains("D permanently clears all inactive"));
         assert!(HELP_TEXT.contains("/quit"));
-        assert!(HELP_TEXT.contains("/thinking"));
+        assert!(HELP_TEXT.contains("/thinking              Toggle the Reasoning panel"));
+        assert!(HELP_TEXT.contains("/reasoning [value]     List or select a reasoning level"));
         assert!(HELP_TEXT.contains("Escape interrupts"));
     }
 }

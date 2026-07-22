@@ -4,7 +4,7 @@ AgentHarness is a small macOS-first terminal chat client with one active Codex c
 installed Codex app-server and the Codex-owned ChatGPT subscription login flow; it does not offer
 API-key login or approval UI. Codex's built-in command-line and file tools are enabled.
 
-The TUI can create and revisit saved threads, show emitted reasoning in a side panel, identify the
+The TUI can create and revisit saved threads, show emitted reasoning in a Reasoning side panel, identify the
 signed-in ChatGPT account, animate the wait for the first reply text, and report the remaining model
 context when Codex supplies usable token data.
 
@@ -30,7 +30,11 @@ non-secret preferences and dedicated Codex runtime under
 ~/Library/Application Support/AgentHarness/; Codex owns credentials in that dedicated home.
 Preferences may include the normalized ChatGPT email and a non-secret thread-to-account registry
 used to prevent cross-account thread listing or resume; the preferences file and its directory are
-owner-only.
+owner-only. New non-ephemeral threads are explicitly created with `threadSource: "appServer"`.
+For compatibility with existing AgentHarness threads created before that source was explicit,
+`/resume` discovers both `appServer` and legacy `vscode` sources, but exposes only thread IDs
+already registered to the signed-in account whose cwd exactly matches the dedicated conversation
+directory.
 Tool commands start in the dedicated `runtime/conversation` directory, and files created there are
 kept across launches. That directory and the dedicated Codex home are organizational boundaries,
 not security boundaries: commands can leave the starting directory and can reach other same-user
@@ -53,8 +57,13 @@ Sanitized diagnostics are written to the diagnostics subdirectory.
 - In the thread picker, **d** requests deletion of the selected inactive thread and **D** requests
   deletion of all inactive threads. Both actions show their exact scope and require a second
   **Enter** confirmation; **Escape** cancels. The active saved thread is always protected.
-- **/thinking** toggles a right-side panel containing only reasoning summaries or thinking text
-  explicitly emitted by Codex app-server. It does not expose or infer hidden chain-of-thought.
+- **/thinking** toggles the right-side Reasoning panel. AgentHarness requests detailed reasoning
+  summaries for each turn and configures its dedicated runtime with
+  `show_raw_agent_reasoning=true` at process and thread start/resume boundaries. This is
+  best-effort configuration: the panel shows reasoning text only when Codex and the selected
+  provider/model explicitly emit it, with summaries as the fallback. Hidden/private
+  chain-of-thought is unavailable; AgentHarness neither exposes nor infers it. `/thinking`
+  controls panel visibility; `/reasoning [value]` separately selects the reasoning effort level.
 - The header uses the authenticated account identity instead of a generic signed-in label and shows
   right-aligned **Context N%** when usable usage data is available, or **Context --** when it is not.
 - A small animated squiggle appears while Codex is working before the first assistant text. It is

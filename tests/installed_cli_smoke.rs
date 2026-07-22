@@ -46,6 +46,7 @@ async fn installed_cli_initializes_with_full_access_policy() {
         .unwrap();
     assert_eq!(config["config"]["approval_policy"], "never");
     assert_eq!(config["config"]["sandbox_mode"], "danger-full-access");
+    assert_eq!(config["config"]["show_raw_agent_reasoning"], true);
     assert_eq!(config["config"]["web_search"], "disabled");
     assert_eq!(
         config["config"]["shell_environment_policy"]["inherit"],

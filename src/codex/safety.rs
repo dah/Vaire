@@ -47,13 +47,14 @@ const DISABLED_OPTIONAL_FEATURES: [&str; 19] = [
 
 const ENABLED_COMMAND_FEATURES: [&str; 3] = ["shell_snapshot", "shell_tool", "unified_exec"];
 
-const CONFIG_OVERRIDES: [&str; 8] = [
+const CONFIG_OVERRIDES: [&str; 9] = [
     "approval_policy=\"never\"",
     "sandbox_mode=\"danger-full-access\"",
     "web_search=\"disabled\"",
     "mcp_servers={}",
     "apps._default.enabled=false",
     "history.persistence=\"none\"",
+    "show_raw_agent_reasoning=true",
     "forced_login_method=\"chatgpt\"",
     "shell_environment_policy.inherit=\"all\"",
 ];
@@ -142,6 +143,7 @@ impl FullAccessPolicy {
                 "apps": {"_default": {"enabled": false}},
                 "features": feature_values,
                 "history": {"persistence": "none"},
+                "show_raw_agent_reasoning": true,
                 "shell_environment_policy": {"inherit": "all"}
             }
         })
@@ -241,6 +243,7 @@ mod tests {
         assert_eq!(thread["config"]["features"]["unified_exec"], true);
         assert_eq!(thread["config"]["features"]["multi_agent"], false);
         assert_eq!(thread["config"]["web_search"], "disabled");
+        assert_eq!(thread["config"]["show_raw_agent_reasoning"], true);
         assert_eq!(
             thread["config"]["shell_environment_policy"]["inherit"],
             "all"
@@ -273,6 +276,9 @@ mod tests {
         assert!(args
             .iter()
             .any(|arg| arg == OsStr::new("sandbox_mode=\"danger-full-access\"")));
+        assert!(args
+            .iter()
+            .any(|arg| arg == OsStr::new("show_raw_agent_reasoning=true")));
         assert!(args
             .iter()
             .any(|arg| arg == OsStr::new("shell_environment_policy.inherit=\"all\"")));

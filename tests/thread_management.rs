@@ -106,6 +106,7 @@ fn listed_thread(
     preview: &str,
     cwd: &Path,
     updated_at: i64,
+    source: &str,
 ) -> String {
     json!({
         "id": id,
@@ -118,7 +119,7 @@ fn listed_thread(
         "cliVersion": "0.144.6",
         "modelProvider": "openai",
         "sessionId": id,
-        "source": "appServer",
+        "source": source,
         "status": {"type": "idle"},
         "turns": []
     })
@@ -142,7 +143,7 @@ printf '%s\n' '{{"id":4,"result":{{"thread":{{"id":"thr-old","turns":[]}}}}}}'
 IFS= read -r read_thread
 printf '%s\n' '{{"id":5,"result":{{"thread":{{"id":"thr-old","turns":[{{"id":"old-turn","status":"completed","items":[{{"id":"u","type":"userMessage","content":[{{"type":"text","text":"old question"}}]}},{{"id":"a","type":"agentMessage","text":"old answer"}}]}}]}}}}}}'
 IFS= read -r new_thread
-case "$new_thread" in *'"method":"thread/start"'*) ;; *) exit 41 ;; esac
+case "$new_thread" in *'"method":"thread/start"'*'"threadSource":"appServer"'*) ;; *) exit 41 ;; esac
 printf '%s\n' '{{"id":6,"result":{{"thread":{{"id":"thr-new","turns":[]}}}}}}'
 IFS= read -r hold
 "#
@@ -320,10 +321,33 @@ IFS= read -r hold
 async fn paginated_picker_switches_threads_and_reports_partial_bulk_deletion() {
     let temp = tempdir().unwrap();
     let cwd = temp.path().join("runtime/conversation");
-    let active = listed_thread("thr-active", Some("Current"), "current", &cwd, 40);
-    let old_a = listed_thread("thr-old-a", None, "Question A", &cwd, 30);
-    let old_b = listed_thread("thr-old-b", Some("Old B"), "question b", &cwd, 20);
-    let old_c = listed_thread("thr-old-c", Some("Old C"), "question c", &cwd, 10);
+    let active = listed_thread(
+        "thr-active",
+        Some("Current"),
+        "current",
+        &cwd,
+        40,
+        "appServer",
+    );
+    let old_a = listed_thread("thr-old-a", None, "Question A", &cwd, 30, "vscode");
+    let old_b = listed_thread(
+        "thr-old-b",
+        Some("Old B"),
+        "question b",
+        &cwd,
+        20,
+        "appServer",
+    );
+    let old_c = listed_thread("thr-old-c", Some("Old C"), "question c", &cwd, 10, "vscode");
+    let unregistered = listed_thread(
+        "thr-unregistered",
+        Some("Unregistered"),
+        "must stay hidden",
+        &cwd,
+        35,
+        "vscode",
+    );
+    let cwd_json = serde_json::to_string(&cwd).unwrap();
     let body = format!(
         r#"
 IFS= read -r initialize
@@ -338,8 +362,8 @@ printf '%s\n' '{{"id":4,"result":{{"thread":{{"id":"thr-active","turns":[]}}}}}}
 IFS= read -r read_active
 printf '%s\n' '{{"id":5,"result":{{"thread":{{"id":"thr-active","turns":[]}}}}}}'
 IFS= read -r list_page_one
-case "$list_page_one" in *'"method":"thread/list"'*'"cursor":null'*'"sortKey":"updated_at"'*'"sourceKinds":["appServer"]'*) ;; *) exit 51 ;; esac
-printf '%s\n' '{{"id":6,"result":{{"data":[{active},{old_a}],"nextCursor":"page-2"}}}}'
+case "$list_page_one" in *'"method":"thread/list"'*'"cursor":null'*'"cwd":{cwd_json}'*'"sortKey":"updated_at"'*'"sourceKinds":["appServer","vscode"]'*) ;; *) exit 51 ;; esac
+printf '%s\n' '{{"id":6,"result":{{"data":[{active},{unregistered},{old_a}],"nextCursor":"page-2"}}}}'
 IFS= read -r list_page_two
 case "$list_page_two" in *'"cursor":"page-2"'*) ;; *) exit 52 ;; esac
 printf '%s\n' '{{"id":7,"result":{{"data":[{old_a},{old_b},{old_c}],"nextCursor":null}}}}'
@@ -382,6 +406,17 @@ IFS= read -r hold
         "pagination should deduplicate thr-old-a"
     );
     assert_eq!(picker.selected, 0, "the active thread should be selected");
+    assert!(
+        picker.threads.iter().any(|thread| thread.id == "thr-old-a"),
+        "a registered legacy vscode thread should be discoverable"
+    );
+    assert!(
+        picker
+            .threads
+            .iter()
+            .all(|thread| thread.id != "thr-unregistered"),
+        "mixed-source discovery must retain account-scope filtering"
+    );
 
     backend
         .handle_intent(Intent::ThreadPickerMoveDown)
@@ -497,6 +532,57 @@ IFS= read -r hold
         .unwrap()
         .contains("app-server returned error -32010"));
     assert_eq!(saved.value().thread_id.as_deref(), Some("thr-old-a"));
+    backend.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn mixed_source_listing_rejects_foreign_cwd_and_preserves_active_thread() {
+    let temp = tempdir().unwrap();
+    let foreign = listed_thread(
+        "thr-foreign",
+        Some("Foreign"),
+        "outside the dedicated conversation directory",
+        &temp.path().join("other-conversation"),
+        50,
+        "vscode",
+    );
+    let body = format!(
+        r#"
+IFS= read -r initialize
+printf '%s\n' '{INITIALIZED}'
+IFS= read -r initialized
+IFS= read -r account
+printf '%s\n' '{ACCOUNT}'
+IFS= read -r models
+printf '%s\n' '{MODELS}'
+IFS= read -r resume_active
+printf '%s\n' '{{"id":4,"result":{{"thread":{{"id":"thr-active","turns":[]}}}}}}'
+IFS= read -r read_active
+printf '%s\n' '{{"id":5,"result":{{"thread":{{"id":"thr-active","turns":[]}}}}}}'
+IFS= read -r list_threads
+printf '%s\n' '{{"id":6,"result":{{"data":[{foreign}],"nextCursor":null}}}}'
+IFS= read -r hold
+"#
+    );
+    let saved = MemoryPreferences::new(preferences(Some("thr-active")));
+    let mut backend = BackendCoordinator::new(
+        session(temp.path(), &body).await,
+        saved.clone(),
+        NoopBrowser,
+    );
+    backend.startup().await.unwrap();
+
+    backend.handle_intent(Intent::Resume).await.unwrap();
+
+    let picker = backend.state().thread_picker.as_ref().unwrap();
+    assert!(matches!(picker.phase, ThreadPickerPhase::Failed));
+    assert!(picker
+        .message
+        .as_deref()
+        .unwrap()
+        .contains("working directory"));
+    assert!(matches!(&backend.state().thread, ThreadState::Ready { id } if id == "thr-active"));
+    assert_eq!(saved.value().thread_id.as_deref(), Some("thr-active"));
     backend.shutdown().await.unwrap();
 }
 

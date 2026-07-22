@@ -572,7 +572,7 @@ fn render_transcript(
 
 fn render_thinking(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let mut lines = vec![Line::from(Span::styled(
-        "Only text emitted by Codex.",
+        "Only reasoning content explicitly emitted by Codex is shown.",
         Style::default().fg(Color::DarkGray),
     ))];
     let populated = state
@@ -585,8 +585,8 @@ fn render_thinking(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     if populated.is_empty() {
         let message = match &state.turn {
             TurnState::Starting | TurnState::Streaming { .. } => "Awaiting emitted reasoning…",
-            TurnState::Failed { .. } => "No thinking text was emitted before this turn failed.",
-            _ => "No thinking text has been emitted for this turn.",
+            TurnState::Failed { .. } => "No reasoning content was emitted before this turn failed.",
+            _ => "No reasoning content was emitted for this turn.",
         };
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -598,7 +598,7 @@ fn render_thinking(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             lines.push(Line::from(""));
             let label = match entry.kind {
                 ThinkingKind::Summary => "Summary",
-                ThinkingKind::EmittedText => "Emitted text",
+                ThinkingKind::EmittedText => "Reasoning text",
             };
             lines.push(Line::from(Span::styled(
                 format!("{label}:"),
@@ -618,7 +618,7 @@ fn render_thinking(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         }
     }
 
-    let block = Block::default().title(" Thinking ").borders(Borders::ALL);
+    let block = Block::default().title(" Reasoning ").borders(Borders::ALL);
     let inner = block.inner(area);
     let wrap_width = inner.width.max(1) as usize;
     let line_count = lines
@@ -1210,7 +1210,7 @@ mod tests {
             activity_column < 67,
             "activity must stay in the conversation pane"
         );
-        assert!(normal.contains("Thinking"));
+        assert!(normal.contains("Reasoning"));
         assert!(normal.contains("Awaiting emitted reasoning"));
         assert!(header(&state, 100).ends_with("Context 73%"));
 
@@ -1218,7 +1218,7 @@ mod tests {
         assert!(narrow.contains("Conversation"));
         assert!(narrow.contains("Agent:"));
         assert!(narrow.contains('~'));
-        assert!(narrow.contains("Thinking"));
+        assert!(narrow.contains("Reasoning"));
         assert!(header(&state, 36).ends_with("Context 73%"));
     }
 
@@ -1342,7 +1342,7 @@ mod tests {
         let mut state = ready();
         state.context_remaining_percent = Some(73);
         let closed = screen(&state, &UiState::default(), 100, 20);
-        assert!(!closed.contains("Only text emitted by Codex"));
+        assert!(!closed.contains("Only reasoning content"));
         assert!(header(&state, 100).ends_with("Context 73%"));
 
         state.thinking.visible = true;
@@ -1351,7 +1351,7 @@ mod tests {
             turn_id: "turn".to_owned(),
         };
         let awaiting = screen(&state, &UiState::default(), 100, 20);
-        assert!(awaiting.contains("Thinking"));
+        assert!(awaiting.contains("Reasoning"));
         assert!(awaiting.contains("Awaiting emitted reasoning"));
 
         state.thinking.entries.push(ThinkingEntry {
@@ -1363,20 +1363,20 @@ mod tests {
             completed: false,
         });
         let normal = screen(&state, &UiState::default(), 100, 20);
-        assert!(normal.contains("Only text emitted by Codex"));
+        assert!(normal.contains("Only reasoning content"));
         assert!(normal.contains("Summary:"));
         assert!(normal.contains("Checking facts safely"));
         assert!(header(&state, 100).ends_with("Context 73%"));
 
         let narrow = screen(&state, &UiState::default(), 52, 16);
         assert!(narrow.contains("Conversation"));
-        assert!(narrow.contains("Thinking"));
+        assert!(narrow.contains("Reasoning"));
         assert!(narrow.contains("Summary:"));
         assert!(narrow.contains("Message"));
 
         let minimum_width = screen(&state, &UiState::default(), 36, 12);
         assert!(minimum_width.contains("Conversation"));
-        assert!(minimum_width.contains("Thinking"));
+        assert!(minimum_width.contains("Reasoning"));
         assert!(minimum_width.contains("Message"));
         assert!(header(&state, 36).ends_with("Context 73%"));
 
@@ -1390,8 +1390,8 @@ mod tests {
 
         state.thinking.entries.clear();
         let empty_failure = screen(&state, &UiState::default(), 100, 20);
-        assert!(empty_failure.contains("No thinking text"));
-        assert!(empty_failure.contains("turn failed"));
+        assert!(empty_failure.contains("No reasoning content"));
+        assert!(empty_failure.contains("before this turn"));
     }
 
     #[test]

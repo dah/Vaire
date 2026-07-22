@@ -294,10 +294,17 @@ pub struct ThreadListEntry {
     pub ephemeral: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ThreadSourceKind {
+    AppServer,
+    Vscode,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadListParams {
-    pub source_kinds: Vec<String>,
+    pub source_kinds: Vec<ThreadSourceKind>,
     pub archived: bool,
     pub cursor: Option<String>,
     pub cwd: PathBuf,
@@ -326,6 +333,7 @@ pub struct ThreadDeleteResponse {}
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadStartParams {
+    pub thread_source: ThreadSourceKind,
     pub approval_policy: String,
     pub config: Value,
     pub cwd: PathBuf,
@@ -373,6 +381,7 @@ pub struct TurnStartParams {
 #[serde(rename_all = "camelCase")]
 pub enum ReasoningSummary {
     Auto,
+    Detailed,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -582,7 +591,8 @@ mod tests {
         classify_message, parse_notification, CancelLoginAccountParams, CancelLoginAccountResponse,
         CancelLoginAccountStatus, InboundMessage, InitializeParams, LoginAccountParams,
         ProtocolEvent, ReasoningSummary, RequestId, ThreadDeleteParams, ThreadDeleteResponse,
-        ThreadItemContent, ThreadListParams, ThreadListResponse,
+        ThreadItemContent, ThreadListParams, ThreadListResponse, ThreadSourceKind,
+        ThreadStartParams,
     };
 
     #[test]
@@ -612,7 +622,7 @@ mod tests {
     #[test]
     fn models_thread_listing_and_deletion_from_the_installed_schema() {
         let params = serde_json::to_value(ThreadListParams {
-            source_kinds: vec!["appServer".to_owned()],
+            source_kinds: vec![ThreadSourceKind::AppServer, ThreadSourceKind::Vscode],
             archived: false,
             cursor: None,
             cwd: PathBuf::from("/tmp/conversation"),
@@ -621,8 +631,19 @@ mod tests {
             sort_key: "updated_at".to_owned(),
         })
         .unwrap();
-        assert_eq!(params["sourceKinds"], json!(["appServer"]));
+        assert_eq!(params["sourceKinds"], json!(["appServer", "vscode"]));
         assert_eq!(params["cwd"], "/tmp/conversation");
+
+        let start = serde_json::to_value(ThreadStartParams {
+            thread_source: ThreadSourceKind::AppServer,
+            approval_policy: "never".to_owned(),
+            config: json!({}),
+            cwd: PathBuf::from("/tmp/conversation"),
+            sandbox: "danger-full-access".to_owned(),
+            model: "m1".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(start["threadSource"], "appServer");
         let deletion = serde_json::to_value(ThreadDeleteParams {
             thread_id: "thr-old".to_owned(),
         })
@@ -763,6 +784,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(ReasoningSummary::Auto).unwrap(),
             json!("auto")
+        );
+        assert_eq!(
+            serde_json::to_value(ReasoningSummary::Detailed).unwrap(),
+            json!("detailed")
         );
     }
 

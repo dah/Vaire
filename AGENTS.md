@@ -26,8 +26,9 @@ The following behavior is implemented and is a regression contract unless an exp
 - Keep exactly one active chat thread in the UI.
 - Persist the active Codex thread ID and automatically resume that same working thread on the next launch when authenticated account scope is available and matches.
 - Let the user eagerly create a thread with `/new`; use `/resume` for the account-scoped saved-thread picker and confirmed deletion of one or all inactive threads. Never delete the active thread through the picker.
+- Explicitly create every new non-ephemeral thread with `threadSource: "appServer"`. For compatibility, `/resume` discovers both `appServer` and legacy `vscode` sources, then retains only threads with the exact dedicated conversation cwd whose IDs are already registered to the authenticated account. Never auto-register discovery results.
 - Stream agent-message deltas into the transcript and show a clear terminal state when each turn completes or fails.
-- Show emitted reasoning summaries or text in the optional Thinking panel without exposing or inferring hidden chain-of-thought.
+- Request detailed reasoning summaries for every turn and show them with any reasoning text explicitly emitted by Codex in the optional Reasoning panel. Configure `show_raw_agent_reasoning=true` at dedicated app-server process and thread start/resume boundaries as best-effort provider/model-dependent behavior; summaries are the fallback. Hidden/private chain-of-thought is unavailable and must never be exposed or inferred.
 - Enable Codex command-line and file tools with unrestricted same-user access and no approval prompts. The TUI remains conversational and has no tool cards, approval controls, or rich command-progress workflow.
 - Show the authenticated account identity and remaining context percentage in the header, and an ephemeral activity squiggle before the first assistant text.
 - Keep normal tests and CI offline; installed-CLI smoke tests remain explicit and ignored by default.
@@ -54,7 +55,7 @@ The completed milestone plans under `docs/plans/` are historical implementation 
 The post-MVP milestone documented in `docs/plans/agentharness-interactive-runtime-2026-07-22.md` is complete. Its capabilities are part of the regression baseline:
 
 - create a new thread with `/new`, choose among saved Codex threads through `/resume`, and delete one or all old threads with confirmation while retaining exactly one active thread;
-- toggle a right-side panel that displays only reasoning summaries or other thinking text actually emitted by app-server, never inferred or hidden chain-of-thought;
+- toggle a right-side Reasoning panel that displays only reasoning summaries or reasoning text actually emitted by app-server, never inferred or hidden chain-of-thought;
 - enable Codex command-line and file tools with full local access, without adding an approval UI;
 - show the authenticated account identity in the header;
 - show an animated pre-response thinking indicator that disappears on the first assistant-text delta; and
@@ -80,7 +81,7 @@ Normal text entered in the composer starts a turn in the active thread. Slash co
 - `/reasoning` — inspect or select a reasoning level supported by the current model.
 - `/new` — eagerly create and activate a fresh thread without deleting the previous thread.
 - `/resume` — open the account-scoped saved-thread picker.
-- `/thinking` — toggle the right-side panel of reasoning summaries or thinking text emitted by app-server.
+- `/thinking` — toggle the right-side Reasoning panel of reasoning summaries or reasoning text emitted by app-server. Distinct from `/reasoning`, which selects the reasoning effort level.
 - `/help` — show supported commands and essential keys.
 - `/quit` — shut down cleanly and exit.
 
