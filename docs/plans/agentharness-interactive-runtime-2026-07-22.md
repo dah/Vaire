@@ -57,3 +57,5 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
 cargo test --test installed_cli_smoke installed_cli_initializes_with_full_access_policy -- --ignored --nocapture
 ```
+
+Final result on 2026-07-22: format and strict Clippy passed; the offline suite passed with 109 tests and 2 intentionally ignored live smokes; the targeted installed-CLI initialization smoke passed against the installed Codex runtime.
