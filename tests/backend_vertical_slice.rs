@@ -187,6 +187,77 @@ IFS= read -r hold
 }
 
 #[tokio::test]
+async fn same_account_update_does_not_resume_or_disturb_the_active_turn() {
+    let temp = tempdir().unwrap();
+    let body = format!(
+        r#"
+IFS= read -r initialize
+printf '%s\n' '{INITIALIZED}'
+IFS= read -r initialized
+IFS= read -r account
+printf '%s\n' '{{"id":2,"result":{{"account":{{"type":"chatgpt","email":"user@example.com"}},"requiresOpenaiAuth":true}}}}'
+IFS= read -r models
+printf '%s\n' '{MODEL_PAGE}'
+IFS= read -r thread_start
+printf '%s\n' '{{"id":4,"result":{{"thread":{{"id":"thr-refresh","turns":[]}}}}}}'
+IFS= read -r turn_start
+printf '%s\n' '{{"id":5,"result":{{"turn":{{"id":"turn-refresh","items":[],"status":"inProgress"}}}}}}'
+printf '%s\n' '{{"method":"item/reasoning/summaryTextDelta","params":{{"threadId":"thr-refresh","turnId":"turn-refresh","itemId":"why","summaryIndex":0,"delta":"still thinking"}}}}'
+printf '%s\n' '{{"method":"thread/tokenUsage/updated","params":{{"threadId":"thr-refresh","turnId":"turn-refresh","tokenUsage":{{"last":{{"cachedInputTokens":0,"inputTokens":20,"outputTokens":0,"reasoningOutputTokens":0,"totalTokens":20}},"total":{{"cachedInputTokens":0,"inputTokens":20,"outputTokens":0,"reasoningOutputTokens":0,"totalTokens":20}},"modelContextWindow":100}}}}}}'
+printf '%s\n' '{{"method":"account/updated","params":{{"authMode":"chatgpt"}}}}'
+IFS= read -r refreshed_account
+case "$refreshed_account" in *'"method":"account/read"'*) ;; *) exit 89 ;; esac
+printf '%s\n' '{{"id":6,"result":{{"account":{{"type":"chatgpt","email":"user@example.com"}},"requiresOpenaiAuth":true}}}}'
+printf '%s\n' '{{"method":"item/agentMessage/delta","params":{{"threadId":"thr-refresh","turnId":"turn-refresh","itemId":"answer","delta":"done"}}}}'
+printf '%s\n' '{{"method":"turn/completed","params":{{"threadId":"thr-refresh","turn":{{"id":"turn-refresh","items":[],"status":"completed"}}}}}}'
+if IFS= read -r unexpected; then
+  case "$unexpected" in *'"method":"thread/resume"'*) exit 90 ;; *) exit 91 ;; esac
+fi
+"#
+    );
+    let mut backend = BackendCoordinator::new(
+        session(temp.path(), &body).await,
+        MemoryPreferences::new(PreferencesV1::default()),
+        RecordingBrowser::default(),
+    );
+    backend.startup().await.unwrap();
+    backend
+        .handle_intent(Intent::SendMessage("keep working".to_owned()))
+        .await
+        .unwrap();
+
+    assert!(backend.pump_event().await.unwrap());
+    assert!(backend.pump_event().await.unwrap());
+    assert_eq!(backend.state().thinking.entries[0].text, "still thinking");
+    assert_eq!(backend.state().context_remaining_percent, Some(80));
+    let transcript_before_refresh = backend.state().transcript.clone();
+
+    assert!(backend.pump_event().await.unwrap());
+    assert!(matches!(
+        backend.state().thread,
+        ThreadState::Ready { ref id } if id == "thr-refresh"
+    ));
+    assert!(matches!(
+        backend.state().turn,
+        TurnState::Streaming { ref turn_id, .. } if turn_id == "turn-refresh"
+    ));
+    assert_eq!(backend.state().transcript, transcript_before_refresh);
+    assert_eq!(backend.state().thinking.entries[0].text, "still thinking");
+    assert_eq!(backend.state().context_remaining_percent, Some(80));
+
+    assert!(backend.pump_event().await.unwrap());
+    assert!(backend.pump_event().await.unwrap());
+    assert!(matches!(backend.state().turn, TurnState::Completed { .. }));
+    assert!(backend
+        .state()
+        .transcript
+        .iter()
+        .any(|entry| entry.role == TranscriptRole::Assistant && entry.text == "done"));
+
+    backend.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn same_account_resume_restores_history_and_stale_resume_never_replaces_id() {
     let temp = tempdir().unwrap();
     let body = format!(

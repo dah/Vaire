@@ -734,13 +734,24 @@ impl AppState {
             DomainEvent::AccountLoaded(scope) => {
                 let completed_login = matches!(self.auth, AuthState::SigningIn { .. });
                 let picker_was_open = self.thread_picker.is_some();
-                let account_changed = !matches!(
+                let same_account = matches!(
                     &self.auth,
                     AuthState::SignedIn { scope: current } if current == &scope
                 );
-                if account_changed {
+                let switched_accounts = matches!(
+                    &self.auth,
+                    AuthState::SignedIn { scope: current } if current != &scope
+                );
+                if !same_account {
                     self.reset_context_window();
                     self.thinking.clear_content();
+                }
+                if switched_accounts {
+                    // An account update can arrive while a turn is active. Detach the old turn
+                    // before changing the displayed identity so every subsequently queued event
+                    // from that turn becomes stale.
+                    self.turn = TurnState::Idle;
+                    self.thread_picker = None;
                 }
                 self.auth = AuthState::SignedIn {
                     scope: scope.clone(),
@@ -750,7 +761,10 @@ impl AppState {
                 }
                 if let Some(id) = self.preferences.thread_id.clone() {
                     if scope.is_some() && scope == self.preferences.account_scope {
-                        if !picker_was_open {
+                        // Account refresh notifications are not lifecycle requests. Only attach
+                        // the saved thread when startup or login left us without a thread; an
+                        // already-ready or in-flight resume must remain untouched.
+                        if !picker_was_open && matches!(self.thread, ThreadState::None) {
                             self.thread = ThreadState::Resuming { id: id.clone() };
                             return vec![Effect::ResumeThread { id }];
                         }
@@ -760,11 +774,21 @@ impl AppState {
                     self.thread = ThreadState::AccountMismatch { id };
                     self.notice =
                         Some("saved thread belongs to a different or unscoped account".to_owned());
+                } else if switched_accounts {
+                    self.thread = ThreadState::None;
                 }
             }
             DomainEvent::UnsupportedAccount(message) => {
                 self.auth = AuthState::Unsupported(message);
+                self.turn = TurnState::Idle;
+                self.thread_picker = None;
+                self.thinking.clear_content();
                 self.reset_context_window();
+                self.thread = self
+                    .preferences
+                    .thread_id
+                    .clone()
+                    .map_or(ThreadState::None, |id| ThreadState::AccountMismatch { id });
             }
             DomainEvent::LoginStarted { login_id } => self.auth = AuthState::SigningIn { login_id },
             DomainEvent::LoginFailed(message) => {
@@ -792,6 +816,7 @@ impl AppState {
             DomainEvent::ResumeSucceeded { id, history } => {
                 self.reset_context_window();
                 self.thread = ThreadState::Ready { id: id.clone() };
+                self.turn = TurnState::Idle;
                 self.transcript = history;
                 self.thinking.clear_content();
                 self.preferences.thread_id = Some(id.clone());
@@ -1831,6 +1856,159 @@ mod tests {
                 id: "thr-old".to_owned()
             }]
         );
+    }
+
+    #[test]
+    fn same_account_refresh_preserves_ready_and_in_flight_resume_state() {
+        let mut state = thread_ready_state();
+        let scope = AccountScope::from_chatgpt_email("user@example.com");
+        state.turn = TurnState::Streaming {
+            thread_id: "thr-active".to_owned(),
+            turn_id: "turn-old".to_owned(),
+        };
+        state.context_remaining_percent = Some(61);
+        seed_thinking(&mut state, "live reasoning");
+        let ready_snapshot = state.clone();
+
+        assert!(state
+            .reduce(Action::Event(DomainEvent::AccountLoaded(scope.clone())))
+            .is_empty());
+        assert_eq!(state, ready_snapshot);
+
+        state.thread = ThreadState::Resuming {
+            id: "thr-active".to_owned(),
+        };
+        state.turn = TurnState::Idle;
+        let resuming_snapshot = state.clone();
+        assert!(state
+            .reduce(Action::Event(DomainEvent::AccountLoaded(scope)))
+            .is_empty());
+        assert_eq!(state, resuming_snapshot);
+    }
+
+    #[test]
+    fn account_switch_settles_old_turn_closes_picker_and_rejects_late_events() {
+        let mut state = thread_ready_state();
+        state.turn = TurnState::Streaming {
+            thread_id: "thr-active".to_owned(),
+            turn_id: "turn-old".to_owned(),
+        };
+        state.context_remaining_percent = Some(61);
+        seed_thinking(&mut state, "old account reasoning");
+        state.thread_picker = Some(ThreadPickerState {
+            phase: ThreadPickerPhase::Ready,
+            threads: vec![thread("thr-old", "Old account thread", 1)],
+            selected: 0,
+            confirmation: None,
+            message: None,
+        });
+        let transcript = state.transcript.clone();
+
+        assert!(state
+            .reduce(Action::Event(DomainEvent::AccountLoaded(
+                AccountScope::from_chatgpt_email("other@example.com"),
+            )))
+            .is_empty());
+        assert!(matches!(state.turn, TurnState::Idle));
+        assert!(matches!(
+            state.thread,
+            ThreadState::AccountMismatch { ref id } if id == "thr-active"
+        ));
+        assert!(state.thread_picker.is_none());
+        assert!(state.thinking.entries.is_empty());
+        assert_eq!(state.context_remaining_percent, None);
+
+        deliver_stale_old_turn_events(&mut state);
+        assert!(matches!(state.turn, TurnState::Idle));
+        assert_eq!(state.transcript, transcript);
+        assert!(state.thinking.entries.is_empty());
+        assert_eq!(state.context_remaining_percent, None);
+    }
+
+    #[test]
+    fn account_switch_closes_picker_even_when_new_scope_matches_saved_thread() {
+        let mut state = thread_ready_state();
+        let saved_scope = AccountScope::from_chatgpt_email("saved@example.com");
+        state.thread = ThreadState::AccountMismatch {
+            id: "thr-saved".to_owned(),
+        };
+        state.turn = TurnState::Starting;
+        state.preferences.account_scope = saved_scope.clone();
+        state.preferences.thread_id = Some("thr-saved".to_owned());
+        state.thread_picker = Some(ThreadPickerState {
+            phase: ThreadPickerPhase::Ready,
+            threads: vec![thread("thr-old", "Previous account thread", 1)],
+            selected: 0,
+            confirmation: None,
+            message: None,
+        });
+
+        assert!(state
+            .reduce(Action::Event(DomainEvent::AccountLoaded(saved_scope)))
+            .is_empty());
+        assert!(state.thread_picker.is_none());
+        assert!(matches!(state.turn, TurnState::Idle));
+        assert!(matches!(
+            state.thread,
+            ThreadState::AccountMismatch { ref id } if id == "thr-saved"
+        ));
+    }
+
+    #[test]
+    fn unsupported_account_detaches_saved_thread_and_rejects_late_events() {
+        let mut state = thread_ready_state();
+        state.turn = TurnState::Streaming {
+            thread_id: "thr-active".to_owned(),
+            turn_id: "turn-old".to_owned(),
+        };
+        state.context_remaining_percent = Some(61);
+        seed_thinking(&mut state, "old account reasoning");
+        state.thread_picker = Some(ThreadPickerState {
+            phase: ThreadPickerPhase::Ready,
+            threads: vec![thread("thr-old", "Old account thread", 1)],
+            selected: 0,
+            confirmation: None,
+            message: None,
+        });
+        let transcript = state.transcript.clone();
+
+        state.reduce(Action::Event(DomainEvent::UnsupportedAccount(
+            "unsupported account type apiKey; use ChatGPT login".to_owned(),
+        )));
+        assert!(matches!(state.auth, AuthState::Unsupported(_)));
+        assert!(matches!(state.turn, TurnState::Idle));
+        assert!(matches!(
+            state.thread,
+            ThreadState::AccountMismatch { ref id } if id == "thr-active"
+        ));
+        assert!(state.thread_picker.is_none());
+        assert!(state.thinking.entries.is_empty());
+        assert_eq!(state.context_remaining_percent, None);
+
+        deliver_stale_old_turn_events(&mut state);
+        assert!(matches!(state.turn, TurnState::Idle));
+        assert_eq!(state.transcript, transcript);
+        assert!(state.thinking.entries.is_empty());
+        assert_eq!(state.context_remaining_percent, None);
+    }
+
+    #[test]
+    fn successful_automatic_resume_settles_turn_state() {
+        let mut state = thread_ready_state();
+        state.thread = ThreadState::Resuming {
+            id: "thr-active".to_owned(),
+        };
+        state.turn = TurnState::Streaming {
+            thread_id: "thr-active".to_owned(),
+            turn_id: "stale-turn".to_owned(),
+        };
+
+        state.reduce(Action::Event(DomainEvent::ResumeSucceeded {
+            id: "thr-active".to_owned(),
+            history: Vec::new(),
+        }));
+
+        assert!(matches!(state.turn, TurnState::Idle));
     }
 
     #[test]
