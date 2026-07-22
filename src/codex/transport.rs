@@ -58,7 +58,9 @@ impl RequestTimeouts {
             "initialize" => self.initialize,
             "account/read" | "account/login/start" | "account/logout" => self.auth,
             "model/list" => self.catalog,
-            "thread/start" | "thread/resume" | "thread/read" => self.thread,
+            "thread/start" | "thread/resume" | "thread/read" | "thread/list" | "thread/delete" => {
+                self.thread
+            }
             "turn/start" | "turn/interrupt" => self.turn,
             _ => self.fallback,
         }

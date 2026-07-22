@@ -4,6 +4,7 @@ use crate::persistence::{AccountScope, PreferencesV1};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Intent {
     SendMessage(String),
+    NewThread,
     Login,
     LoginDevice,
     Logout,
@@ -12,6 +13,14 @@ pub enum Intent {
     ShowReasoning,
     SelectReasoning(String),
     Resume,
+    ThreadPickerMoveUp,
+    ThreadPickerMoveDown,
+    ThreadPickerSelect,
+    ThreadPickerClose,
+    ThreadPickerRequestDelete,
+    ThreadPickerRequestClearInactive,
+    ThreadPickerConfirmDelete,
+    ThreadPickerCancelDelete,
     Help,
     Quit,
     Interrupt,
@@ -93,12 +102,78 @@ pub struct TranscriptEntry {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThreadChoice {
+    pub id: String,
+    pub title: String,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ThreadPickerPhase {
+    Loading,
+    Ready,
+    Resuming { id: String },
+    Deleting { requested: usize },
+    Failed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ThreadDeleteConfirmation {
+    Selected { target: ThreadChoice },
+    AllInactive { targets: Vec<ThreadChoice> },
+}
+
+impl ThreadDeleteConfirmation {
+    pub fn targets(&self) -> Vec<ThreadChoice> {
+        match self {
+            Self::Selected { target } => vec![target.clone()],
+            Self::AllInactive { targets } => targets.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThreadPickerState {
+    pub phase: ThreadPickerPhase,
+    pub threads: Vec<ThreadChoice>,
+    pub selected: usize,
+    pub confirmation: Option<ThreadDeleteConfirmation>,
+    pub message: Option<String>,
+}
+
+impl ThreadPickerState {
+    fn loading() -> Self {
+        Self {
+            phase: ThreadPickerPhase::Loading,
+            threads: Vec::new(),
+            selected: 0,
+            confirmation: None,
+            message: None,
+        }
+    }
+
+    pub fn selected_thread(&self) -> Option<&ThreadChoice> {
+        self.threads.get(self.selected)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThreadDeletionFailure {
+    pub id: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Effect {
     StartLogin,
     StartDeviceLogin,
     CancelLogin { login_id: String },
     Logout,
+    StartNewThread,
+    ListThreads,
     ResumeThread { id: String },
+    SwitchThread { id: String },
+    DeleteThreads { ids: Vec<String> },
     SendMessage { text: String },
     InterruptTurn { thread_id: String, turn_id: String },
     Persist(PreferencesV1),
@@ -138,6 +213,25 @@ pub enum DomainEvent {
     ResumeFailed {
         id: String,
         message: String,
+    },
+    NewThreadSucceeded {
+        id: String,
+    },
+    NewThreadFailed(String),
+    ThreadListLoaded(Vec<ThreadChoice>),
+    ThreadListFailed(String),
+    ThreadSwitchSucceeded {
+        id: String,
+        history: Vec<TranscriptEntry>,
+    },
+    ThreadSwitchFailed {
+        id: String,
+        message: String,
+    },
+    ThreadDeletionFinished {
+        requested: usize,
+        deleted: Vec<String>,
+        failures: Vec<ThreadDeletionFailure>,
     },
     ThreadStarted {
         id: String,
@@ -184,6 +278,7 @@ pub struct AppState {
     pub selected_model: Option<String>,
     pub selected_reasoning: Option<String>,
     pub transcript: Vec<TranscriptEntry>,
+    pub thread_picker: Option<ThreadPickerState>,
     pub preferences: PreferencesV1,
     pub notice: Option<String>,
     pub shutting_down: bool,
@@ -200,6 +295,7 @@ impl Default for AppState {
             selected_model: None,
             selected_reasoning: None,
             transcript: Vec::new(),
+            thread_picker: None,
             preferences: PreferencesV1::default(),
             notice: None,
             shutting_down: false,
@@ -293,26 +389,33 @@ impl AppState {
                 }
                 self.notice = Some("not signed in".to_owned());
             }
+            Intent::NewThread => {
+                if let Some(reason) = self.thread_action_block_reason(false) {
+                    self.notice = Some(reason);
+                } else {
+                    self.notice = Some("Starting a new thread…".to_owned());
+                    return vec![Effect::StartNewThread];
+                }
+            }
             Intent::Resume => {
-                let Some(id) = self.preferences.thread_id.clone() else {
-                    self.notice = Some("there is no saved thread to resume".to_owned());
-                    return Vec::new();
-                };
-                match &self.auth {
-                    AuthState::SignedIn {
-                        scope: Some(current_scope),
-                    } if self.preferences.account_scope.as_ref() == Some(current_scope) => {
-                        self.thread = ThreadState::Resuming { id: id.clone() };
-                        return vec![Effect::ResumeThread { id }];
-                    }
-                    AuthState::SignedIn { .. } => {
-                        self.notice = Some(
-                            "saved thread belongs to a different or unscoped account; sign in with the matching ChatGPT account"
-                                .to_owned(),
-                        );
-                    }
-                    _ => {
-                        self.notice = Some("sign in with /login before resuming".to_owned());
+                if let Some(reason) = self.thread_action_block_reason(true) {
+                    self.notice = Some(reason);
+                } else {
+                    self.thread_picker = Some(ThreadPickerState::loading());
+                    return vec![Effect::ListThreads];
+                }
+            }
+            Intent::ThreadPickerMoveUp => self.move_thread_picker(-1),
+            Intent::ThreadPickerMoveDown => self.move_thread_picker(1),
+            Intent::ThreadPickerSelect => return self.select_thread_picker(),
+            Intent::ThreadPickerClose => self.close_thread_picker(),
+            Intent::ThreadPickerRequestDelete => self.request_selected_thread_delete(),
+            Intent::ThreadPickerRequestClearInactive => self.request_clear_inactive_threads(),
+            Intent::ThreadPickerConfirmDelete => return self.confirm_thread_delete(),
+            Intent::ThreadPickerCancelDelete => {
+                if let Some(picker) = &mut self.thread_picker {
+                    if picker.confirmation.take().is_some() {
+                        picker.message = Some("Deletion cancelled".to_owned());
                     }
                 }
             }
@@ -345,7 +448,13 @@ impl AppState {
 
     fn reduce_event(&mut self, event: DomainEvent) -> Vec<Effect> {
         match event {
-            DomainEvent::PreferencesLoaded(preferences) => {
+            DomainEvent::PreferencesLoaded(mut preferences) => {
+                if let (Some(id), Some(scope)) = (
+                    preferences.thread_id.clone(),
+                    preferences.account_scope.clone(),
+                ) {
+                    preferences.thread_account_scopes.entry(id).or_insert(scope);
+                }
                 self.selected_model = preferences.model_id.clone();
                 self.selected_reasoning = preferences.reasoning_effort.clone();
                 self.preferences = preferences;
@@ -356,6 +465,11 @@ impl AppState {
             }
             DomainEvent::ConnectionFailed(message) | DomainEvent::ProcessExited(message) => {
                 self.connection = ConnectionState::Failed(message.clone());
+                if let Some(picker) = &mut self.thread_picker {
+                    picker.phase = ThreadPickerPhase::Failed;
+                    picker.confirmation = None;
+                    picker.message = Some(message.clone());
+                }
                 if self.turn.is_active() {
                     self.turn = TurnState::Failed {
                         turn_id: None,
@@ -365,6 +479,7 @@ impl AppState {
             }
             DomainEvent::AccountLoaded(scope) => {
                 let completed_login = matches!(self.auth, AuthState::SigningIn { .. });
+                let picker_was_open = self.thread_picker.is_some();
                 self.auth = AuthState::SignedIn {
                     scope: scope.clone(),
                 };
@@ -373,9 +488,13 @@ impl AppState {
                 }
                 if let Some(id) = self.preferences.thread_id.clone() {
                     if scope.is_some() && scope == self.preferences.account_scope {
-                        self.thread = ThreadState::Resuming { id: id.clone() };
-                        return vec![Effect::ResumeThread { id }];
+                        if !picker_was_open {
+                            self.thread = ThreadState::Resuming { id: id.clone() };
+                            return vec![Effect::ResumeThread { id }];
+                        }
+                        return Vec::new();
                     }
+                    self.thread_picker = None;
                     self.thread = ThreadState::AccountMismatch { id };
                     self.notice =
                         Some("saved thread belongs to a different or unscoped account".to_owned());
@@ -391,6 +510,7 @@ impl AppState {
                 self.auth = AuthState::SignedOut;
                 self.thread = ThreadState::None;
                 self.turn = TurnState::Idle;
+                self.thread_picker = None;
             }
             DomainEvent::CatalogLoaded(models) => {
                 self.models = models;
@@ -400,7 +520,8 @@ impl AppState {
             DomainEvent::ResumeSucceeded { id, history } => {
                 self.thread = ThreadState::Ready { id: id.clone() };
                 self.transcript = history;
-                self.preferences.thread_id = Some(id);
+                self.preferences.thread_id = Some(id.clone());
+                self.register_thread_scope(&id);
                 return vec![Effect::Persist(self.preferences.clone())];
             }
             DomainEvent::ResumeFailed { id, message } => {
@@ -410,12 +531,165 @@ impl AppState {
                 };
                 self.notice = Some(message);
             }
-            DomainEvent::ThreadStarted { id } => {
+            DomainEvent::NewThreadSucceeded { id } => {
                 self.thread = ThreadState::Ready { id: id.clone() };
-                self.preferences.thread_id = Some(id);
+                self.turn = TurnState::Idle;
+                self.transcript.clear();
+                self.thread_picker = None;
+                self.preferences.thread_id = Some(id.clone());
                 if let AuthState::SignedIn { scope } = &self.auth {
                     self.preferences.account_scope = scope.clone();
                 }
+                self.register_thread_scope(&id);
+                self.notice = Some("Started a new thread".to_owned());
+                return vec![Effect::Persist(self.preferences.clone())];
+            }
+            DomainEvent::NewThreadFailed(message) => {
+                self.notice = Some(format!(
+                    "Could not start a new thread; the current thread was preserved: {message}"
+                ));
+            }
+            DomainEvent::ThreadListLoaded(threads) => {
+                let active_id = self.active_saved_thread_id().map(str::to_owned);
+                let found_local_threads = !threads.is_empty();
+                let threads = match &self.auth {
+                    AuthState::SignedIn { scope: Some(scope) } => threads
+                        .into_iter()
+                        .filter(|thread| {
+                            self.preferences.thread_account_scopes.get(&thread.id) == Some(scope)
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                if let Some(picker) = &mut self.thread_picker {
+                    if matches!(picker.phase, ThreadPickerPhase::Loading) {
+                        picker.threads = threads;
+                        picker.selected = active_id
+                            .as_deref()
+                            .and_then(|active| {
+                                picker.threads.iter().position(|thread| thread.id == active)
+                            })
+                            .unwrap_or(0);
+                        picker.phase = ThreadPickerPhase::Ready;
+                        picker.message = picker.threads.is_empty().then(|| {
+                            if found_local_threads {
+                                "No saved threads are registered to this ChatGPT account".to_owned()
+                            } else {
+                                "No saved AgentHarness threads were found".to_owned()
+                            }
+                        });
+                    }
+                }
+            }
+            DomainEvent::ThreadListFailed(message) => {
+                if let Some(picker) = &mut self.thread_picker {
+                    if matches!(picker.phase, ThreadPickerPhase::Loading) {
+                        picker.phase = ThreadPickerPhase::Failed;
+                        picker.message = Some(format!("Could not load threads: {message}"));
+                    }
+                }
+            }
+            DomainEvent::ThreadSwitchSucceeded { id, history } => {
+                let matches_request = self.thread_picker.as_ref().is_some_and(|picker| {
+                    matches!(&picker.phase, ThreadPickerPhase::Resuming { id: expected } if expected == &id)
+                });
+                if matches_request {
+                    self.thread = ThreadState::Ready { id: id.clone() };
+                    self.turn = TurnState::Idle;
+                    self.transcript = history;
+                    self.thread_picker = None;
+                    self.preferences.thread_id = Some(id.clone());
+                    if let AuthState::SignedIn { scope } = &self.auth {
+                        self.preferences.account_scope = scope.clone();
+                    }
+                    self.register_thread_scope(&id);
+                    self.notice = Some("Resumed the selected thread".to_owned());
+                    return vec![Effect::Persist(self.preferences.clone())];
+                }
+            }
+            DomainEvent::ThreadSwitchFailed { id, message } => {
+                if let Some(picker) = &mut self.thread_picker {
+                    if matches!(&picker.phase, ThreadPickerPhase::Resuming { id: expected } if expected == &id)
+                    {
+                        picker.phase = ThreadPickerPhase::Ready;
+                        picker.message = Some(format!(
+                            "Could not resume the selected thread; the active thread was preserved: {message}"
+                        ));
+                    }
+                }
+            }
+            DomainEvent::ThreadDeletionFinished {
+                requested,
+                deleted,
+                failures,
+            } => {
+                let active_id = self.active_saved_thread_id().map(str::to_owned);
+                if let Some(picker) = &mut self.thread_picker {
+                    let expected = match picker.phase {
+                        ThreadPickerPhase::Deleting { requested } => requested,
+                        _ => return Vec::new(),
+                    };
+                    if expected != requested {
+                        picker.phase = ThreadPickerPhase::Failed;
+                        picker.message = Some(
+                            "Thread deletion result did not match the requested scope".to_owned(),
+                        );
+                        return Vec::new();
+                    }
+                    let protected_reported = deleted
+                        .iter()
+                        .any(|id| active_id.as_deref() == Some(id.as_str()));
+                    let safe_deleted = deleted
+                        .iter()
+                        .filter(|id| active_id.as_deref() != Some(id.as_str()))
+                        .cloned()
+                        .collect::<std::collections::HashSet<_>>();
+                    picker
+                        .threads
+                        .retain(|thread| !safe_deleted.contains(thread.id.as_str()));
+                    picker.selected = picker.selected.min(picker.threads.len().saturating_sub(1));
+                    picker.phase = ThreadPickerPhase::Ready;
+                    picker.confirmation = None;
+
+                    let deleted_count = safe_deleted.len();
+                    let mut message = if failures.is_empty() && !protected_reported {
+                        format!("Deleted {deleted_count} inactive thread(s)")
+                    } else {
+                        format!(
+                            "Deleted {deleted_count} of {requested} inactive thread(s); {} failed",
+                            failures.len() + usize::from(protected_reported)
+                        )
+                    };
+                    if !failures.is_empty() {
+                        let details = failures
+                            .iter()
+                            .map(|failure| format!("{}: {}", failure.id, failure.message))
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        message.push_str(&format!(" — {details}"));
+                    }
+                    if protected_reported {
+                        message
+                            .push_str(" — ignored an invalid result for the active saved thread");
+                    }
+                    picker.message = Some(message);
+                    let mut removed_scope = false;
+                    for id in &safe_deleted {
+                        removed_scope |=
+                            self.preferences.thread_account_scopes.remove(id).is_some();
+                    }
+                    if removed_scope {
+                        return vec![Effect::Persist(self.preferences.clone())];
+                    }
+                }
+            }
+            DomainEvent::ThreadStarted { id } => {
+                self.thread = ThreadState::Ready { id: id.clone() };
+                self.preferences.thread_id = Some(id.clone());
+                if let AuthState::SignedIn { scope } = &self.auth {
+                    self.preferences.account_scope = scope.clone();
+                }
+                self.register_thread_scope(&id);
                 return vec![Effect::Persist(self.preferences.clone())];
             }
             DomainEvent::TurnStarted { thread_id, turn_id } => {
@@ -508,6 +782,188 @@ impl AppState {
             .and_then(|id| self.models.iter().find(|model| &model.id == id))
     }
 
+    fn thread_action_block_reason(&self, require_account_identity: bool) -> Option<String> {
+        if self.thread_picker.is_some() {
+            return Some(
+                "close the thread picker before starting another thread action".to_owned(),
+            );
+        }
+        if !matches!(self.connection, ConnectionState::Ready { .. }) {
+            return Some("app-server is not connected".to_owned());
+        }
+        let AuthState::SignedIn { scope } = &self.auth else {
+            return Some("sign in with /login before managing threads".to_owned());
+        };
+        if self.turn.is_active() {
+            return Some("wait for or interrupt the active turn".to_owned());
+        }
+        if require_account_identity && scope.is_none() {
+            return Some(
+                "ChatGPT account identity is unavailable; thread history cannot be opened safely"
+                    .to_owned(),
+            );
+        }
+        if self.models.is_empty() || self.selected_model.is_none() {
+            return Some("model catalog is not ready".to_owned());
+        }
+        None
+    }
+
+    fn move_thread_picker(&mut self, delta: isize) {
+        let Some(picker) = &mut self.thread_picker else {
+            return;
+        };
+        if !matches!(picker.phase, ThreadPickerPhase::Ready)
+            || picker.confirmation.is_some()
+            || picker.threads.is_empty()
+        {
+            return;
+        }
+        picker.message = None;
+        let last = picker.threads.len().saturating_sub(1);
+        picker.selected = if delta < 0 {
+            picker.selected.saturating_sub(1)
+        } else {
+            picker.selected.saturating_add(1).min(last)
+        };
+    }
+
+    fn select_thread_picker(&mut self) -> Vec<Effect> {
+        let active_id = self.active_saved_thread_id().map(str::to_owned);
+        let Some(picker) = &mut self.thread_picker else {
+            return Vec::new();
+        };
+        if !matches!(picker.phase, ThreadPickerPhase::Ready) || picker.confirmation.is_some() {
+            return Vec::new();
+        }
+        let Some(selected) = picker.selected_thread().cloned() else {
+            picker.message = Some("No thread is available to resume".to_owned());
+            return Vec::new();
+        };
+        if matches!(&self.thread, ThreadState::Ready { id } if id == &selected.id)
+            && active_id.as_deref() == Some(selected.id.as_str())
+        {
+            self.thread_picker = None;
+            self.notice = Some("That thread is already active".to_owned());
+            return Vec::new();
+        }
+        picker.phase = ThreadPickerPhase::Resuming {
+            id: selected.id.clone(),
+        };
+        picker.message = Some(format!("Opening {}…", selected.title));
+        vec![Effect::SwitchThread { id: selected.id }]
+    }
+
+    fn close_thread_picker(&mut self) {
+        let busy = self.thread_picker.as_ref().is_some_and(|picker| {
+            matches!(
+                picker.phase,
+                ThreadPickerPhase::Resuming { .. } | ThreadPickerPhase::Deleting { .. }
+            )
+        });
+        if busy {
+            if let Some(picker) = &mut self.thread_picker {
+                picker.message = Some("Wait for the current thread operation to finish".to_owned());
+            }
+        } else {
+            self.thread_picker = None;
+        }
+    }
+
+    fn request_selected_thread_delete(&mut self) {
+        let active_id = self.active_saved_thread_id().map(str::to_owned);
+        let Some(picker) = &mut self.thread_picker else {
+            return;
+        };
+        if !matches!(picker.phase, ThreadPickerPhase::Ready) || picker.confirmation.is_some() {
+            return;
+        }
+        let Some(target) = picker.selected_thread().cloned() else {
+            picker.message = Some("No thread is selected".to_owned());
+            return;
+        };
+        if active_id.as_deref() == Some(target.id.as_str()) {
+            picker.message = Some(
+                "The active thread cannot be deleted. Switch threads or use /new first.".to_owned(),
+            );
+            return;
+        }
+        picker.message = None;
+        picker.confirmation = Some(ThreadDeleteConfirmation::Selected { target });
+    }
+
+    fn request_clear_inactive_threads(&mut self) {
+        let active_id = self.active_saved_thread_id().map(str::to_owned);
+        let Some(picker) = &mut self.thread_picker else {
+            return;
+        };
+        if !matches!(picker.phase, ThreadPickerPhase::Ready) || picker.confirmation.is_some() {
+            return;
+        }
+        let targets = picker
+            .threads
+            .iter()
+            .filter(|thread| active_id.as_deref() != Some(thread.id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
+            picker.message = Some("There are no inactive threads to delete".to_owned());
+            return;
+        }
+        picker.message = None;
+        picker.confirmation = Some(ThreadDeleteConfirmation::AllInactive { targets });
+    }
+
+    fn confirm_thread_delete(&mut self) -> Vec<Effect> {
+        let active_id = self.active_saved_thread_id().map(str::to_owned);
+        let Some(picker) = &mut self.thread_picker else {
+            return Vec::new();
+        };
+        if !matches!(picker.phase, ThreadPickerPhase::Ready) {
+            return Vec::new();
+        }
+        let Some(confirmation) = picker.confirmation.take() else {
+            return Vec::new();
+        };
+        let targets = confirmation.targets();
+        if targets
+            .iter()
+            .any(|target| active_id.as_deref() == Some(target.id.as_str()))
+        {
+            picker.message = Some(
+                "Deletion cancelled because its scope included the active saved thread".to_owned(),
+            );
+            return Vec::new();
+        }
+        let ids = targets
+            .into_iter()
+            .map(|target| target.id)
+            .collect::<Vec<_>>();
+        picker.phase = ThreadPickerPhase::Deleting {
+            requested: ids.len(),
+        };
+        picker.message = Some(format!("Deleting {} inactive thread(s)…", ids.len()));
+        vec![Effect::DeleteThreads { ids }]
+    }
+
+    fn active_saved_thread_id(&self) -> Option<&str> {
+        self.preferences
+            .thread_id
+            .as_deref()
+            .or(match &self.thread {
+                ThreadState::Ready { id } => Some(id.as_str()),
+                _ => None,
+            })
+    }
+
+    fn register_thread_scope(&mut self, thread_id: &str) {
+        if let AuthState::SignedIn { scope: Some(scope) } = &self.auth {
+            self.preferences
+                .thread_account_scopes
+                .insert(thread_id.to_owned(), scope.clone());
+        }
+    }
+
     fn validate_selection(&mut self) {
         let had_saved_selection =
             self.preferences.model_id.is_some() || self.preferences.reasoning_effort.is_some();
@@ -570,6 +1026,9 @@ impl AppState {
         }
         if self.turn.is_active() {
             return Some("wait for or interrupt the active turn".to_owned());
+        }
+        if self.thread_picker.is_some() {
+            return Some("close the thread picker before sending".to_owned());
         }
         if matches!(self.thread, ThreadState::Resuming { .. }) {
             return Some("wait for thread resume to finish".to_owned());
@@ -642,6 +1101,62 @@ mod tests {
             is_default: default,
             default_reasoning_effort: default_effort.to_owned(),
             supported_reasoning_efforts: efforts.iter().map(|value| (*value).to_owned()).collect(),
+        }
+    }
+
+    fn thread(id: &str, title: &str, updated_at: i64) -> ThreadChoice {
+        ThreadChoice {
+            id: id.to_owned(),
+            title: title.to_owned(),
+            updated_at,
+        }
+    }
+
+    fn thread_ready_state() -> AppState {
+        let scope = AccountScope::from_chatgpt_email("user@example.com");
+        AppState {
+            connection: ConnectionState::Ready { generation: 1 },
+            auth: AuthState::SignedIn {
+                scope: scope.clone(),
+            },
+            thread: ThreadState::Ready {
+                id: "thr-active".to_owned(),
+            },
+            turn: TurnState::Completed {
+                turn_id: "turn-old".to_owned(),
+            },
+            models: vec![model("m1", true, &["high"], "high")],
+            selected_model: Some("m1".to_owned()),
+            selected_reasoning: Some("high".to_owned()),
+            transcript: vec![TranscriptEntry {
+                role: TranscriptRole::Assistant,
+                text: "old conversation".to_owned(),
+                item_id: None,
+                turn_id: None,
+            }],
+            preferences: PreferencesV1 {
+                account_scope: scope,
+                thread_id: Some("thr-active".to_owned()),
+                model_id: Some("m1".to_owned()),
+                reasoning_effort: Some("high".to_owned()),
+                thread_account_scopes: [
+                    "thr-active",
+                    "thr-old",
+                    "thr-old-a",
+                    "thr-old-b",
+                    "thr-old-c",
+                ]
+                .into_iter()
+                .map(|id| {
+                    (
+                        id.to_owned(),
+                        AccountScope::from_chatgpt_email("user@example.com").unwrap(),
+                    )
+                })
+                .collect(),
+                ..PreferencesV1::default()
+            },
+            ..AppState::default()
         }
     }
 
@@ -725,9 +1240,10 @@ mod tests {
     }
 
     #[test]
-    fn manual_resume_requires_matching_scope_and_retries_same_account_failure() {
+    fn thread_picker_requires_account_identity_and_can_safely_replace_a_mismatched_active_thread() {
         let saved_scope = AccountScope::from_chatgpt_email("saved@example.com");
         let mut state = AppState {
+            connection: ConnectionState::Ready { generation: 1 },
             auth: AuthState::SignedIn {
                 scope: AccountScope::from_chatgpt_email("other@example.com"),
             },
@@ -739,19 +1255,25 @@ mod tests {
                 thread_id: Some("thr-saved".to_owned()),
                 ..PreferencesV1::default()
             },
+            models: vec![model("m1", true, &["high"], "high")],
+            selected_model: Some("m1".to_owned()),
             ..AppState::default()
         };
 
-        assert!(state.reduce(Action::Intent(Intent::Resume)).is_empty());
+        assert_eq!(
+            state.reduce(Action::Intent(Intent::Resume)),
+            vec![Effect::ListThreads]
+        );
         assert_eq!(state.preferences.thread_id.as_deref(), Some("thr-saved"));
-        assert!(state
-            .notice
-            .as_deref()
-            .unwrap()
-            .contains("matching ChatGPT"));
+        assert!(matches!(
+            state.thread_picker.as_ref().map(|picker| &picker.phase),
+            Some(ThreadPickerPhase::Loading)
+        ));
+        state.reduce(Action::Intent(Intent::ThreadPickerClose));
 
         state.auth = AuthState::SignedIn { scope: None };
         assert!(state.reduce(Action::Intent(Intent::Resume)).is_empty());
+        assert!(state.notice.as_deref().unwrap().contains("identity"));
 
         state.auth = AuthState::SignedIn { scope: saved_scope };
         state.thread = ThreadState::ResumeFailed {
@@ -760,13 +1282,11 @@ mod tests {
         };
         assert_eq!(
             state.reduce(Action::Intent(Intent::Resume)),
-            vec![Effect::ResumeThread {
-                id: "thr-saved".to_owned()
-            }]
+            vec![Effect::ListThreads]
         );
         assert!(matches!(
-            state.thread,
-            ThreadState::Resuming { ref id } if id == "thr-saved"
+            state.thread_picker.as_ref().map(|picker| &picker.phase),
+            Some(ThreadPickerPhase::Loading)
         ));
     }
 
@@ -785,6 +1305,246 @@ mod tests {
         assert_eq!(state.selected_reasoning.as_deref(), Some("high"));
         state.reduce(Action::Intent(Intent::SelectModel("m2".to_owned())));
         assert_eq!(state.selected_reasoning.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn new_thread_is_eager_and_only_replaces_state_after_success() {
+        let mut state = thread_ready_state();
+        assert_eq!(
+            state.reduce(Action::Intent(Intent::NewThread)),
+            vec![Effect::StartNewThread]
+        );
+        assert_eq!(state.preferences.thread_id.as_deref(), Some("thr-active"));
+        assert_eq!(state.transcript[0].text, "old conversation");
+
+        state.reduce(Action::Event(DomainEvent::NewThreadFailed(
+            "server rejected it".to_owned(),
+        )));
+        assert!(matches!(&state.thread, ThreadState::Ready { id } if id == "thr-active"));
+        assert_eq!(state.preferences.thread_id.as_deref(), Some("thr-active"));
+        assert_eq!(state.transcript.len(), 1);
+
+        let effects = state.reduce(Action::Event(DomainEvent::NewThreadSucceeded {
+            id: "thr-new".to_owned(),
+        }));
+        assert!(matches!(&state.thread, ThreadState::Ready { id } if id == "thr-new"));
+        assert!(state.transcript.is_empty());
+        assert!(matches!(state.turn, TurnState::Idle));
+        assert_eq!(state.preferences.thread_id.as_deref(), Some("thr-new"));
+        assert!(matches!(effects.as_slice(), [Effect::Persist(_)]));
+    }
+
+    #[test]
+    fn picker_navigation_and_failed_switch_preserve_the_active_thread() {
+        let mut state = thread_ready_state();
+        assert_eq!(
+            state.reduce(Action::Intent(Intent::Resume)),
+            vec![Effect::ListThreads]
+        );
+        state.reduce(Action::Event(DomainEvent::ThreadListLoaded(vec![
+            thread("thr-active", "Current", 30),
+            thread("thr-old", "Older", 20),
+        ])));
+        state.reduce(Action::Intent(Intent::ThreadPickerMoveDown));
+        assert_eq!(state.thread_picker.as_ref().unwrap().selected, 1);
+        assert_eq!(
+            state.reduce(Action::Intent(Intent::ThreadPickerSelect)),
+            vec![Effect::SwitchThread {
+                id: "thr-old".to_owned()
+            }]
+        );
+        assert!(matches!(&state.thread, ThreadState::Ready { id } if id == "thr-active"));
+
+        state.reduce(Action::Event(DomainEvent::ThreadSwitchFailed {
+            id: "thr-old".to_owned(),
+            message: "malformed history".to_owned(),
+        }));
+        assert_eq!(state.preferences.thread_id.as_deref(), Some("thr-active"));
+        assert_eq!(state.transcript[0].text, "old conversation");
+        assert!(matches!(
+            state.thread_picker.as_ref().map(|picker| &picker.phase),
+            Some(ThreadPickerPhase::Ready)
+        ));
+
+        assert_eq!(
+            state.reduce(Action::Intent(Intent::ThreadPickerSelect)),
+            vec![Effect::SwitchThread {
+                id: "thr-old".to_owned()
+            }]
+        );
+        let history = vec![TranscriptEntry {
+            role: TranscriptRole::User,
+            text: "restored".to_owned(),
+            item_id: None,
+            turn_id: None,
+        }];
+        let effects = state.reduce(Action::Event(DomainEvent::ThreadSwitchSucceeded {
+            id: "thr-old".to_owned(),
+            history: history.clone(),
+        }));
+        assert_eq!(state.preferences.thread_id.as_deref(), Some("thr-old"));
+        assert_eq!(state.transcript, history);
+        assert!(state.thread_picker.is_none());
+        assert!(matches!(effects.as_slice(), [Effect::Persist(_)]));
+    }
+
+    #[test]
+    fn picker_only_exposes_threads_registered_to_the_current_account() {
+        let mut state = thread_ready_state();
+        state.preferences.thread_account_scopes.insert(
+            "thr-foreign".to_owned(),
+            AccountScope::from_chatgpt_email("other@example.com").unwrap(),
+        );
+        state.thread_picker = Some(ThreadPickerState::loading());
+        state.reduce(Action::Event(DomainEvent::ThreadListLoaded(vec![
+            thread("thr-active", "Current", 30),
+            thread("thr-old", "Same account", 20),
+            thread("thr-foreign", "Other account", 10),
+            thread("thr-unknown", "Unknown account", 5),
+        ])));
+        assert_eq!(
+            state
+                .thread_picker
+                .as_ref()
+                .unwrap()
+                .threads
+                .iter()
+                .map(|thread| thread.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["thr-active", "thr-old"]
+        );
+
+        let scope = AccountScope::from_chatgpt_email("legacy@example.com").unwrap();
+        let mut legacy = AppState::default();
+        legacy.reduce(Action::Event(DomainEvent::PreferencesLoaded(
+            PreferencesV1 {
+                account_scope: Some(scope.clone()),
+                thread_id: Some("thr-legacy".to_owned()),
+                ..PreferencesV1::default()
+            },
+        )));
+        assert_eq!(
+            legacy.preferences.thread_account_scopes.get("thr-legacy"),
+            Some(&scope)
+        );
+    }
+
+    #[test]
+    fn deletion_confirmation_protects_active_and_supports_cancellation() {
+        let mut state = thread_ready_state();
+        state.thread_picker = Some(ThreadPickerState {
+            phase: ThreadPickerPhase::Ready,
+            threads: vec![
+                thread("thr-active", "Current", 30),
+                thread("thr-old", "Older", 20),
+            ],
+            selected: 0,
+            confirmation: None,
+            message: None,
+        });
+        assert!(state
+            .reduce(Action::Intent(Intent::ThreadPickerRequestDelete))
+            .is_empty());
+        assert!(state.thread_picker.as_ref().unwrap().confirmation.is_none());
+        assert!(state
+            .thread_picker
+            .as_ref()
+            .unwrap()
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("active"));
+
+        state.reduce(Action::Intent(Intent::ThreadPickerMoveDown));
+        state.reduce(Action::Intent(Intent::ThreadPickerRequestDelete));
+        assert!(matches!(
+            state
+                .thread_picker
+                .as_ref()
+                .and_then(|picker| picker.confirmation.as_ref()),
+            Some(ThreadDeleteConfirmation::Selected { target }) if target.id == "thr-old"
+        ));
+        assert!(state
+            .reduce(Action::Intent(Intent::ThreadPickerCancelDelete))
+            .is_empty());
+        assert!(state.thread_picker.as_ref().unwrap().confirmation.is_none());
+
+        state.reduce(Action::Intent(Intent::ThreadPickerRequestDelete));
+        assert_eq!(
+            state.reduce(Action::Intent(Intent::ThreadPickerConfirmDelete)),
+            vec![Effect::DeleteThreads {
+                ids: vec!["thr-old".to_owned()]
+            }]
+        );
+        state.reduce(Action::Event(DomainEvent::ThreadDeletionFinished {
+            requested: 1,
+            deleted: vec!["thr-old".to_owned()],
+            failures: vec![],
+        }));
+        assert_eq!(state.preferences.thread_id.as_deref(), Some("thr-active"));
+        assert_eq!(state.thread_picker.as_ref().unwrap().threads.len(), 1);
+    }
+
+    #[test]
+    fn clear_inactive_reports_partial_failures_and_never_removes_active_saved_id() {
+        let mut state = thread_ready_state();
+        state.thread_picker = Some(ThreadPickerState {
+            phase: ThreadPickerPhase::Ready,
+            threads: vec![
+                thread("thr-active", "Current", 30),
+                thread("thr-old-a", "Old A", 20),
+                thread("thr-old-b", "Old B", 10),
+            ],
+            selected: 0,
+            confirmation: None,
+            message: None,
+        });
+        state.reduce(Action::Intent(Intent::ThreadPickerRequestClearInactive));
+        let targets = state
+            .thread_picker
+            .as_ref()
+            .unwrap()
+            .confirmation
+            .as_ref()
+            .unwrap()
+            .targets();
+        assert_eq!(
+            targets
+                .iter()
+                .map(|target| target.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["thr-old-a", "thr-old-b"]
+        );
+        assert_eq!(
+            state.reduce(Action::Intent(Intent::ThreadPickerConfirmDelete)),
+            vec![Effect::DeleteThreads {
+                ids: vec!["thr-old-a".to_owned(), "thr-old-b".to_owned()]
+            }]
+        );
+        state.reduce(Action::Event(DomainEvent::ThreadDeletionFinished {
+            requested: 2,
+            deleted: vec!["thr-active".to_owned(), "thr-old-a".to_owned()],
+            failures: vec![ThreadDeletionFailure {
+                id: "thr-old-b".to_owned(),
+                message: "permission denied".to_owned(),
+            }],
+        }));
+        let picker = state.thread_picker.as_ref().unwrap();
+        assert_eq!(state.preferences.thread_id.as_deref(), Some("thr-active"));
+        assert_eq!(
+            picker
+                .threads
+                .iter()
+                .map(|thread| thread.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["thr-active", "thr-old-b"]
+        );
+        assert!(picker.message.as_deref().unwrap().contains("failed"));
+        assert!(picker
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("active saved thread"));
     }
 
     #[test]

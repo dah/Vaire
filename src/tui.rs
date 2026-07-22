@@ -3,13 +3,16 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 use unicode_width::UnicodeWidthChar;
 
 use crate::{
-    app::{AppState, AuthState, ConnectionState, Intent, ThreadState, TranscriptRole, TurnState},
+    app::{
+        AppState, AuthState, ConnectionState, Intent, ThreadDeleteConfirmation, ThreadPickerPhase,
+        ThreadPickerState, ThreadState, TranscriptRole, TurnState,
+    },
     command::{parse, HELP_TEXT},
 };
 
@@ -34,6 +37,51 @@ impl UiState {
                 self.composer.push_str(&sanitize_terminal_text(&text));
                 None
             }
+            _ => None,
+        }
+    }
+
+    pub fn handle_event_for_state(&mut self, event: Event, state: &AppState) -> Option<Intent> {
+        if state.thread_picker.is_none() {
+            return self.handle_event(event);
+        }
+        match event {
+            Event::Key(key) => self.handle_thread_picker_key(key, state),
+            _ => None,
+        }
+    }
+
+    fn handle_thread_picker_key(&mut self, key: KeyEvent, state: &AppState) -> Option<Intent> {
+        if key.kind == KeyEventKind::Release {
+            return None;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            return Some(Intent::Quit);
+        }
+        if self.overlay.is_some() {
+            if key.code == KeyCode::Esc {
+                self.overlay = None;
+            }
+            return None;
+        }
+        let picker = state.thread_picker.as_ref()?;
+        if picker.confirmation.is_some() {
+            return match key.code {
+                KeyCode::Enter => Some(Intent::ThreadPickerConfirmDelete),
+                KeyCode::Esc => Some(Intent::ThreadPickerCancelDelete),
+                _ => None,
+            };
+        }
+        match key.code {
+            KeyCode::Esc => Some(Intent::ThreadPickerClose),
+            KeyCode::Up | KeyCode::Char('k') => Some(Intent::ThreadPickerMoveUp),
+            KeyCode::Down | KeyCode::Char('j') => Some(Intent::ThreadPickerMoveDown),
+            KeyCode::Enter => Some(Intent::ThreadPickerSelect),
+            KeyCode::Char('D') => Some(Intent::ThreadPickerRequestClearInactive),
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                Some(Intent::ThreadPickerRequestClearInactive)
+            }
+            KeyCode::Char('d') => Some(Intent::ThreadPickerRequestDelete),
             _ => None,
         }
     }
@@ -171,7 +219,12 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, ui: &UiState) {
         regions[0],
     );
     render_transcript(frame, regions[1], state, ui.scroll_from_bottom);
-    render_composer(frame, regions[2], &composer_wrapped);
+    render_composer(
+        frame,
+        regions[2],
+        &composer_wrapped,
+        state.thread_picker.is_none(),
+    );
     render_message_or_help(
         frame,
         regions[3],
@@ -181,6 +234,9 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, ui: &UiState) {
 
     if let Some(overlay) = &ui.overlay {
         render_overlay(frame, area, overlay);
+    }
+    if let Some(picker) = &state.thread_picker {
+        render_thread_picker(frame, area, picker, state.preferences.thread_id.as_deref());
     }
 }
 
@@ -334,9 +390,9 @@ fn render_transcript(
                 "Signed out. Use /login to connect your ChatGPT subscription."
             }
             (_, ThreadState::ResumeFailed { .. }) => {
-                "The saved thread could not be resumed. Use /resume to retry; it was not replaced."
+                "The saved thread could not be resumed. Use /resume to choose a thread or /new to start fresh; it was not replaced."
             }
-            _ => "Ready for one conversation. Type a message and press Enter.",
+            _ => "Ready. Type a message, use /new, or browse saved threads with /resume.",
         };
         lines.push(Line::from(Span::styled(
             prompt,
@@ -380,7 +436,7 @@ fn render_transcript(
     frame.render_widget(paragraph.scroll((top, 0)), area);
 }
 
-fn render_composer(frame: &mut Frame<'_>, area: Rect, wrapped: &WrappedText) {
+fn render_composer(frame: &mut Frame<'_>, area: Rect, wrapped: &WrappedText, show_cursor: bool) {
     let block = Block::default().title(" Message ").borders(Borders::ALL);
     let inner = block.inner(area);
     let scroll = wrapped.rows.saturating_sub(inner.height as usize);
@@ -402,7 +458,9 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, wrapped: &WrappedText) {
     let y = inner
         .y
         .saturating_add(visible_tail_row.min(inner.height.saturating_sub(1)));
-    frame.set_cursor_position((x, y));
+    if show_cursor {
+        frame.set_cursor_position((x, y));
+    }
 }
 
 fn render_message_or_help(
@@ -453,6 +511,154 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, value: &str) {
     );
 }
 
+fn render_thread_picker(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    picker: &ThreadPickerState,
+    active_id: Option<&str>,
+) {
+    let width = area.width.saturating_sub(4).min(92);
+    let height = area.height.saturating_sub(2).min(24);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup = Rect::new(x, y, width, height);
+    frame.render_widget(Clear, popup);
+
+    if let Some(confirmation) = &picker.confirmation {
+        let targets = confirmation.targets();
+        let mut text = match confirmation {
+            ThreadDeleteConfirmation::Selected { target } => format!(
+                "Permanently delete this inactive thread?\n\n{}\nID: {}",
+                sanitize_terminal_text(&target.title).replace('\n', " "),
+                sanitize_terminal_text(&target.id)
+            ),
+            ThreadDeleteConfirmation::AllInactive { targets } => format!(
+                "Permanently delete all {} inactive threads? The active saved thread, if any, is excluded.",
+                targets.len()
+            ),
+        };
+        if matches!(confirmation, ThreadDeleteConfirmation::AllInactive { .. }) {
+            for target in &targets {
+                text.push_str(&format!(
+                    "\n• {} [{}]",
+                    sanitize_terminal_text(&target.title).replace('\n', " "),
+                    sanitize_terminal_text(&target.id)
+                ));
+            }
+        }
+        text.push_str("\n\nThis cannot be undone. Press Enter to confirm or Esc to cancel.");
+        frame.render_widget(
+            Paragraph::new(text)
+                .block(
+                    Block::default()
+                        .title(" Confirm permanent deletion ")
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Red)),
+                )
+                .style(Style::default().fg(Color::Yellow))
+                .wrap(Wrap { trim: false }),
+            popup,
+        );
+        return;
+    }
+
+    let block = Block::default()
+        .title(" Saved threads ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let footer_height = inner.height.min(3);
+    let regions = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(footer_height)])
+        .split(inner);
+
+    match picker.phase {
+        ThreadPickerPhase::Loading => {
+            frame.render_widget(
+                Paragraph::new("Loading saved AgentHarness threads…")
+                    .style(Style::default().fg(Color::DarkGray)),
+                regions[0],
+            );
+        }
+        ThreadPickerPhase::Failed if picker.threads.is_empty() => {
+            frame.render_widget(
+                Paragraph::new("Threads could not be loaded. Esc closes this window.")
+                    .style(Style::default().fg(Color::Red))
+                    .wrap(Wrap { trim: false }),
+                regions[0],
+            );
+        }
+        _ if picker.threads.is_empty() => {
+            frame.render_widget(
+                Paragraph::new("No saved threads. Esc closes; /new starts a fresh thread.")
+                    .style(Style::default().fg(Color::DarkGray))
+                    .wrap(Wrap { trim: false }),
+                regions[0],
+            );
+        }
+        _ => {
+            let items = picker
+                .threads
+                .iter()
+                .map(|thread| {
+                    let active = active_id == Some(thread.id.as_str());
+                    let title = sanitize_terminal_text(&thread.title).replace('\n', " ");
+                    let metadata = if active {
+                        "ACTIVE — protected".to_owned()
+                    } else {
+                        format!("inactive — {}", sanitize_terminal_text(&thread.id))
+                    };
+                    ListItem::new(vec![
+                        Line::from(Span::styled(
+                            title,
+                            Style::default().add_modifier(Modifier::BOLD),
+                        )),
+                        Line::from(Span::styled(
+                            metadata,
+                            Style::default().fg(if active {
+                                Color::Green
+                            } else {
+                                Color::DarkGray
+                            }),
+                        )),
+                    ])
+                })
+                .collect::<Vec<_>>();
+            let list = List::new(items).highlight_symbol("› ").highlight_style(
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            );
+            let mut list_state = ListState::default().with_selected(Some(picker.selected));
+            frame.render_stateful_widget(list, regions[0], &mut list_state);
+        }
+    }
+
+    let phase_message = match &picker.phase {
+        ThreadPickerPhase::Loading => "Loading…",
+        ThreadPickerPhase::Resuming { .. } => "Opening selected thread…",
+        ThreadPickerPhase::Deleting { .. } => "Deleting inactive threads…",
+        ThreadPickerPhase::Failed => "Load failed",
+        ThreadPickerPhase::Ready => {
+            "↑/↓ or j/k move • Enter resume • d delete • D clear inactive • Esc close"
+        }
+    };
+    let footer = picker
+        .message
+        .as_deref()
+        .map(|message| format!("{}\n{phase_message}", sanitize_terminal_text(message)))
+        .unwrap_or_else(|| phase_message.to_owned());
+    frame.render_widget(
+        Paragraph::new(footer)
+            .style(Style::default().fg(Color::Yellow))
+            .wrap(Wrap { trim: false }),
+        regions[1],
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -460,8 +666,9 @@ mod tests {
 
     use super::{render, sanitize_terminal_text, UiState};
     use crate::app::{
-        Action, AppState, AuthState, ConnectionState, DomainEvent, ThreadState, TranscriptEntry,
-        TranscriptRole, TurnState,
+        Action, AppState, AuthState, ConnectionState, DomainEvent, Intent, ThreadChoice,
+        ThreadDeleteConfirmation, ThreadPickerPhase, ThreadPickerState, ThreadState,
+        TranscriptEntry, TranscriptRole, TurnState,
     };
 
     fn draw(state: &AppState, ui: &UiState, width: u16, height: u16) -> Terminal<TestBackend> {
@@ -678,5 +885,104 @@ mod tests {
             ))),
             Some(crate::app::Intent::Quit)
         ));
+    }
+
+    #[test]
+    fn thread_picker_renders_at_normal_and_narrow_supported_widths() {
+        let mut state = ready();
+        state.preferences.thread_id = Some("thr-active".to_owned());
+        state.thread_picker = Some(ThreadPickerState {
+            phase: ThreadPickerPhase::Ready,
+            threads: vec![
+                ThreadChoice {
+                    id: "thr-active".to_owned(),
+                    title: "Current conversation".to_owned(),
+                    updated_at: 20,
+                },
+                ThreadChoice {
+                    id: "thr-old".to_owned(),
+                    title: "An older conversation".to_owned(),
+                    updated_at: 10,
+                },
+            ],
+            selected: 1,
+            confirmation: None,
+            message: None,
+        });
+        let normal = screen(&state, &UiState::default(), 90, 24);
+        assert!(normal.contains("Saved threads"));
+        assert!(normal.contains("Current conversation"));
+        assert!(normal.contains("ACTIVE"));
+        assert!(normal.contains("D clear inactive"));
+
+        let narrow = screen(&state, &UiState::default(), 36, 9);
+        assert!(narrow.contains("Saved threads"));
+        assert!(narrow.contains("Current conversation") || narrow.contains("An older"));
+    }
+
+    #[test]
+    fn thread_picker_keys_are_modal_and_confirmation_is_a_second_action() {
+        let mut state = ready();
+        state.thread_picker = Some(ThreadPickerState {
+            phase: ThreadPickerPhase::Ready,
+            threads: vec![ThreadChoice {
+                id: "thr-old".to_owned(),
+                title: "Old".to_owned(),
+                updated_at: 1,
+            }],
+            selected: 0,
+            confirmation: None,
+            message: None,
+        });
+        let mut ui = UiState::default();
+        assert_eq!(
+            ui.handle_event_for_state(
+                Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+                &state,
+            ),
+            Some(Intent::ThreadPickerMoveDown)
+        );
+        assert_eq!(
+            ui.handle_event_for_state(
+                Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)),
+                &state,
+            ),
+            Some(Intent::ThreadPickerRequestDelete)
+        );
+        assert_eq!(
+            ui.handle_event_for_state(
+                Event::Key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT)),
+                &state,
+            ),
+            Some(Intent::ThreadPickerRequestClearInactive)
+        );
+        assert!(ui.composer.is_empty());
+
+        state.thread_picker.as_mut().unwrap().confirmation =
+            Some(ThreadDeleteConfirmation::Selected {
+                target: ThreadChoice {
+                    id: "thr-old".to_owned(),
+                    title: "Old".to_owned(),
+                    updated_at: 1,
+                },
+            });
+        assert_eq!(
+            ui.handle_event_for_state(
+                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &state,
+            ),
+            Some(Intent::ThreadPickerConfirmDelete)
+        );
+        assert_eq!(
+            ui.handle_event_for_state(
+                Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                &state,
+            ),
+            Some(Intent::ThreadPickerCancelDelete)
+        );
+        let confirmation = screen(&state, &ui, 70, 20);
+        assert!(confirmation.contains("Confirm permanent deletion"));
+        assert!(confirmation.contains("thr-old"));
+        assert!(confirmation.contains("cannot be undone"));
     }
 }

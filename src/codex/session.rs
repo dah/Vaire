@@ -8,12 +8,13 @@ use super::protocol::{
     parse_notification, AccountReadResponse, CancelLoginAccountParams, CancelLoginAccountResponse,
     CancelLoginAccountStatus, InitializeParams, InitializeResponse, LoginAccountParams,
     LoginAccountResponse, ModelInfo, ModelListParams, ModelListResponse, ProtocolEvent,
-    ThreadReadParams, ThreadResponse, ThreadResumeParams, ThreadSnapshot, ThreadStartParams,
-    TurnInterruptParams, TurnStartParams, TurnStartResponse, UserInput,
+    ThreadDeleteParams, ThreadDeleteResponse, ThreadListEntry, ThreadListParams,
+    ThreadListResponse, ThreadReadParams, ThreadResponse, ThreadResumeParams, ThreadSnapshot,
+    ThreadStartParams, TurnInterruptParams, TurnStartParams, TurnStartResponse, UserInput,
 };
 use super::safety::{ConversationSafetyPolicy, IsolationPaths};
 use super::transport::{AppServerTransport, TransportError};
-use crate::app::{ModelChoice, TranscriptEntry, TranscriptRole};
+use crate::app::{ModelChoice, ThreadChoice, TranscriptEntry, TranscriptRole};
 use crate::persistence::AccountScope;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -217,6 +218,58 @@ impl SessionService {
         Ok(models)
     }
 
+    pub async fn list_threads(&self) -> Result<Vec<ThreadListEntry>, SessionError> {
+        let mut cursor = None;
+        let mut seen_cursors = HashSet::new();
+        let mut seen_threads = HashSet::new();
+        let mut threads = Vec::new();
+        loop {
+            let response: ThreadListResponse = decode(
+                "thread/list",
+                self.transport
+                    .request_default(
+                        "thread/list",
+                        ThreadListParams {
+                            source_kinds: vec!["appServer".to_owned()],
+                            archived: false,
+                            cursor: cursor.clone(),
+                            cwd: self.paths.conversation.clone(),
+                            limit: 50,
+                            sort_direction: "desc".to_owned(),
+                            sort_key: "updated_at".to_owned(),
+                        },
+                    )
+                    .await?,
+            )?;
+            for thread in response.data {
+                if thread.id.trim().is_empty() {
+                    return Err(SessionError::Protocol(
+                        "thread/list returned an empty thread id".to_owned(),
+                    ));
+                }
+                if thread.cwd != self.paths.conversation {
+                    return Err(SessionError::Protocol(
+                        "thread/list returned a thread outside the AgentHarness working directory"
+                            .to_owned(),
+                    ));
+                }
+                if !thread.ephemeral && seen_threads.insert(thread.id.clone()) {
+                    threads.push(thread);
+                }
+            }
+            let Some(next) = response.next_cursor else {
+                break;
+            };
+            if next.is_empty() || !seen_cursors.insert(next.clone()) {
+                return Err(SessionError::Protocol(
+                    "thread/list returned an invalid cursor cycle".to_owned(),
+                ));
+            }
+            cursor = Some(next);
+        }
+        Ok(threads)
+    }
+
     pub async fn start_thread(&self, model: &str) -> Result<ThreadSnapshot, SessionError> {
         let params = self.thread_start_params(model);
         let response: ThreadResponse = decode(
@@ -277,6 +330,21 @@ impl SessionService {
             ));
         }
         Ok(response.thread)
+    }
+
+    pub async fn delete_thread(&self, thread_id: &str) -> Result<(), SessionError> {
+        let _: ThreadDeleteResponse = decode(
+            "thread/delete",
+            self.transport
+                .request_default(
+                    "thread/delete",
+                    ThreadDeleteParams {
+                        thread_id: thread_id.to_owned(),
+                    },
+                )
+                .await?,
+        )?;
+        Ok(())
     }
 
     pub async fn start_turn(
@@ -382,6 +450,34 @@ pub fn model_choices(models: &[ModelInfo]) -> Vec<ModelChoice> {
         .collect()
 }
 
+pub fn thread_choices(threads: Vec<ThreadListEntry>) -> Vec<ThreadChoice> {
+    threads
+        .into_iter()
+        .map(|thread| {
+            let title = thread
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .or_else(|| {
+                    thread
+                        .preview
+                        .lines()
+                        .next()
+                        .map(str::trim)
+                        .filter(|preview| !preview.is_empty())
+                })
+                .unwrap_or("Untitled thread")
+                .to_owned();
+            ThreadChoice {
+                id: thread.id,
+                title,
+                updated_at: thread.updated_at,
+            }
+        })
+        .collect()
+}
+
 pub fn history_entries(thread: &ThreadSnapshot) -> Vec<TranscriptEntry> {
     let mut entries = Vec::new();
     for turn in &thread.turns {
@@ -420,10 +516,12 @@ pub fn history_entries(thread: &ThreadSnapshot) -> Vec<TranscriptEntry> {
 
 #[cfg(test)]
 mod tests {
-    use super::{history_entries, model_choices};
+    use std::path::PathBuf;
+
+    use super::{history_entries, model_choices, thread_choices};
     use crate::codex::protocol::{
-        ModelInfo, ReasoningEffortOption, ThreadItem, ThreadSnapshot, TurnSnapshot, TurnStatus,
-        UserInput,
+        ModelInfo, ReasoningEffortOption, ThreadItem, ThreadListEntry, ThreadSnapshot,
+        TurnSnapshot, TurnStatus, UserInput,
     };
 
     #[test]
@@ -471,5 +569,41 @@ mod tests {
         let history = history_entries(&thread);
         assert_eq!(history.len(), 2);
         assert_eq!(history[1].text, "hi");
+    }
+
+    #[test]
+    fn thread_choices_prefer_names_then_preview_then_fallback() {
+        let choices = thread_choices(vec![
+            ThreadListEntry {
+                id: "named".to_owned(),
+                name: Some("  A name  ".to_owned()),
+                preview: "ignored".to_owned(),
+                created_at: 1,
+                updated_at: 3,
+                cwd: PathBuf::from("/tmp/conversation"),
+                ephemeral: false,
+            },
+            ThreadListEntry {
+                id: "preview".to_owned(),
+                name: None,
+                preview: "  First line\nsecond line".to_owned(),
+                created_at: 1,
+                updated_at: 2,
+                cwd: PathBuf::from("/tmp/conversation"),
+                ephemeral: false,
+            },
+            ThreadListEntry {
+                id: "empty".to_owned(),
+                name: Some(" ".to_owned()),
+                preview: String::new(),
+                created_at: 1,
+                updated_at: 1,
+                cwd: PathBuf::from("/tmp/conversation"),
+                ephemeral: false,
+            },
+        ]);
+        assert_eq!(choices[0].title, "A name");
+        assert_eq!(choices[1].title, "First line");
+        assert_eq!(choices[2].title, "Untitled thread");
     }
 }

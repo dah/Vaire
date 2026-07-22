@@ -265,6 +265,48 @@ pub struct ThreadSnapshot {
     pub turns: Vec<TurnSnapshot>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadListEntry {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub preview: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub cwd: PathBuf,
+    pub ephemeral: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadListParams {
+    pub source_kinds: Vec<String>,
+    pub archived: bool,
+    pub cursor: Option<String>,
+    pub cwd: PathBuf,
+    pub limit: u32,
+    pub sort_direction: String,
+    pub sort_key: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadListResponse {
+    pub data: Vec<ThreadListEntry>,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadDeleteParams {
+    pub thread_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct ThreadDeleteResponse {}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadStartParams {
@@ -436,12 +478,15 @@ pub fn classify_message(value: Value) -> Result<InboundMessage, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use serde_json::json;
 
     use super::{
         classify_message, parse_notification, CancelLoginAccountParams, CancelLoginAccountResponse,
         CancelLoginAccountStatus, InboundMessage, InitializeParams, LoginAccountParams,
-        ProtocolEvent, RequestId,
+        ProtocolEvent, RequestId, ThreadDeleteParams, ThreadDeleteResponse, ThreadListParams,
+        ThreadListResponse,
     };
 
     #[test]
@@ -466,6 +511,49 @@ mod tests {
 
         let device = serde_json::to_value(LoginAccountParams::chatgpt_device_code()).unwrap();
         assert_eq!(device, json!({"type": "chatgptDeviceCode"}));
+    }
+
+    #[test]
+    fn models_thread_listing_and_deletion_from_the_installed_schema() {
+        let params = serde_json::to_value(ThreadListParams {
+            source_kinds: vec!["appServer".to_owned()],
+            archived: false,
+            cursor: None,
+            cwd: PathBuf::from("/tmp/conversation"),
+            limit: 50,
+            sort_direction: "desc".to_owned(),
+            sort_key: "updated_at".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(params["sourceKinds"], json!(["appServer"]));
+        assert_eq!(params["cwd"], "/tmp/conversation");
+        let deletion = serde_json::to_value(ThreadDeleteParams {
+            thread_id: "thr-old".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(deletion, json!({"threadId": "thr-old"}));
+        let _: ThreadDeleteResponse = serde_json::from_value(json!({})).unwrap();
+        assert!(serde_json::from_value::<ThreadDeleteResponse>(json!(null)).is_err());
+
+        let list: ThreadListResponse = serde_json::from_value(json!({
+            "data": [{
+                "id": "thr-1",
+                "name": null,
+                "preview": "hello",
+                "createdAt": 10,
+                "updatedAt": 20,
+                "cwd": "/tmp/conversation",
+                "ephemeral": false
+            }],
+            "nextCursor": "page-2"
+        }))
+        .unwrap();
+        assert_eq!(list.data[0].updated_at, 20);
+        assert_eq!(list.next_cursor.as_deref(), Some("page-2"));
+        assert!(serde_json::from_value::<ThreadListResponse>(json!({
+            "data": [{"id": "thr-malformed", "preview": "missing required fields"}]
+        }))
+        .is_err());
     }
 
     #[test]

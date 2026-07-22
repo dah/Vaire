@@ -1,7 +1,7 @@
 use crate::app::Intent;
 
 pub const HELP_TEXT: &str = "\
-Commands:\n  /login                 Sign in with ChatGPT in your browser\n  /login device          Use device-code sign-in if browser callback login fails\n  /login browser         Explicitly use browser callback sign-in\n  /logout                Sign out, or cancel a pending sign-in\n  /model [id]            List or select an available model\n  /reasoning [value]     List or select a reasoning level\n  /resume                Retry the saved working thread\n  /help                  Show this help\n  /quit                  Exit AgentHarness\nKeys: Enter sends, Alt-Enter inserts a newline, Escape interrupts or closes help, PageUp/PageDown scroll, Ctrl-C quits.";
+Commands:\n  /login                 Sign in with ChatGPT in your browser\n  /login device          Use device-code sign-in if browser callback login fails\n  /login browser         Explicitly use browser callback sign-in\n  /logout                Sign out, or cancel a pending sign-in\n  /model [id]            List or select an available model\n  /reasoning [value]     List or select a reasoning level\n  /new                   Start and switch to a new thread\n  /resume                Browse and resume saved threads\n  /help                  Show this help\n  /quit                  Exit AgentHarness\nThread picker: arrows or j/k move, Enter resumes, d permanently deletes one inactive thread, D permanently clears all inactive threads, Esc closes. Deletion always requires Enter confirmation.\nKeys: Enter sends, Alt-Enter inserts a newline, Escape interrupts or closes help, PageUp/PageDown scroll, Ctrl-C quits.";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ParseError {
@@ -57,6 +57,7 @@ pub fn parse(input: &str) -> Result<Intent, ParseError> {
             Some(_) => Err(ParseError::UnexpectedArgument(command.to_owned())),
         },
         "/logout" => no_argument(Intent::Logout),
+        "/new" => no_argument(Intent::NewThread),
         "/model" => {
             Ok(argument.map_or(Intent::ShowModels, |id| Intent::SelectModel(id.to_owned())))
         }
@@ -91,6 +92,7 @@ mod tests {
             Ok(Intent::SelectReasoning("high".to_owned()))
         );
         assert_eq!(parse("/resume"), Ok(Intent::Resume));
+        assert_eq!(parse("/new"), Ok(Intent::NewThread));
         assert_eq!(parse("/login"), Ok(Intent::Login));
         assert_eq!(parse("/login browser"), Ok(Intent::Login));
         assert_eq!(parse("/login device"), Ok(Intent::LoginDevice));
@@ -111,6 +113,7 @@ mod tests {
             "use /login, /login browser, or /login device"
         );
         assert!(HELP_TEXT.contains("/login device"));
+        assert!(HELP_TEXT.contains("D permanently clears all inactive"));
         assert!(HELP_TEXT.contains("/quit"));
         assert!(HELP_TEXT.contains("Escape interrupts"));
     }
