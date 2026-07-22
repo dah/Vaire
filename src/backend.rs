@@ -1,6 +1,6 @@
 //! Testable backend coordinator shared by the background runtime and integration tests.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use thiserror::Error;
 
@@ -17,6 +17,65 @@ use crate::codex::session::{
 use crate::codex::transport::TransportError;
 use crate::persistence::{LoadNotice, PersistenceError, PreferencesPort};
 use crate::platform::{BrowserError, BrowserOpener};
+
+const MAX_TRACKED_COMPLETED_ITEMS_PER_TURN: usize = 1_024;
+const MAX_TRACKED_COMPLETED_ITEM_ID_BYTES: usize = 64 * 1_024;
+
+#[derive(Debug, Default)]
+struct CompletedItemTracker {
+    scope: Option<(String, String)>,
+    ids: HashSet<String>,
+    id_bytes: usize,
+    saturated: bool,
+}
+
+impl CompletedItemTracker {
+    fn begin_turn(&mut self, thread_id: &str, turn_id: &str) {
+        self.scope = Some((thread_id.to_owned(), turn_id.to_owned()));
+        self.ids.clear();
+        self.id_bytes = 0;
+        self.saturated = false;
+    }
+
+    fn observe_turn(&mut self, thread_id: &str, turn_id: &str) {
+        if !self.is_scope(thread_id, turn_id) {
+            self.begin_turn(thread_id, turn_id);
+        }
+    }
+
+    fn should_ignore(&self, thread_id: &str, turn_id: &str, item_id: &str) -> bool {
+        self.is_scope(thread_id, turn_id) && (self.saturated || self.ids.contains(item_id))
+    }
+
+    fn record(&mut self, thread_id: &str, turn_id: &str, item_id: &str) {
+        if !self.is_scope(thread_id, turn_id) || self.saturated || self.ids.contains(item_id) {
+            return;
+        }
+        if self.ids.len() >= MAX_TRACKED_COMPLETED_ITEMS_PER_TURN
+            || self.id_bytes.saturating_add(item_id.len()) > MAX_TRACKED_COMPLETED_ITEM_ID_BYTES
+        {
+            // Once exact tracking cannot continue within its hard bounds, stop accepting all
+            // subsequent item mutations for this turn. Dropping output is safer than allowing a
+            // late delta to rewrite an item whose completion could not be retained.
+            self.saturated = true;
+            return;
+        }
+        self.ids.insert(item_id.to_owned());
+        self.id_bytes = self.id_bytes.saturating_add(item_id.len());
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn is_scope(&self, thread_id: &str, turn_id: &str) -> bool {
+        self.scope
+            .as_ref()
+            .is_some_and(|(active_thread, active_turn)| {
+                active_thread == thread_id && active_turn == turn_id
+            })
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum BackendError {
@@ -36,6 +95,7 @@ pub struct BackendCoordinator<P, B> {
     preferences: P,
     browser: B,
     may_persist: bool,
+    completed_items: CompletedItemTracker,
 }
 
 impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
@@ -46,6 +106,7 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
             preferences,
             browser,
             may_persist: true,
+            completed_items: CompletedItemTracker::default(),
         }
     }
 
@@ -132,8 +193,29 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
         self.execute_pending(effects).await
     }
 
+    /// Receives and parses exactly one transport event without starting any follow-up RPCs.
+    ///
+    /// The runtime selects this cancellation-safe boundary against user input. Once it returns,
+    /// `process_received_event` must be allowed to finish so an already-consumed event cannot be
+    /// lost while, for example, an account update waits for `account/read`.
+    pub async fn receive_event(&mut self) -> Option<Result<SessionEvent, SessionError>> {
+        self.session.next_event().await
+    }
+
+    /// Convenience path for sequential tests and callers.
+    ///
+    /// Do not race this combined future against unrelated work: use `receive_event` followed by
+    /// `process_received_event` so cancellation cannot land between receipt and processing.
     pub async fn pump_event(&mut self) -> Result<bool, BackendError> {
-        let Some(event) = self.session.next_event().await else {
+        let event = self.receive_event().await;
+        self.process_received_event(event).await
+    }
+
+    pub async fn process_received_event(
+        &mut self,
+        event: Option<Result<SessionEvent, SessionError>>,
+    ) -> Result<bool, BackendError> {
+        let Some(event) = event else {
             self.state.reduce(Action::Event(DomainEvent::ProcessExited(
                 "app-server event stream closed".to_owned(),
             )));
@@ -181,6 +263,7 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
     ) -> Result<(), BackendError> {
         let _ = self.session.shutdown().await;
         self.session = session;
+        self.completed_items.reset();
         self.state.connection = crate::app::ConnectionState::Disconnected;
         self.state.turn = crate::app::TurnState::Idle;
         self.startup().await
@@ -406,9 +489,11 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
             .session
             .start_turn(&thread_id, text, &model, &effort)
             .await?;
+        let turn_id = response.turn.id;
+        self.completed_items.begin_turn(&thread_id, &turn_id);
         Ok(self.state.reduce(Action::Event(DomainEvent::TurnStarted {
             thread_id,
-            turn_id: response.turn.id,
+            turn_id,
         })))
     }
 
@@ -546,12 +631,31 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
             }
             ProtocolEvent::ThreadStarted(_) => Vec::new(),
             ProtocolEvent::TurnStarted(notification) => {
-                self.state.reduce(Action::Event(DomainEvent::TurnStarted {
-                    thread_id: notification.thread_id,
-                    turn_id: notification.turn.id,
-                }))
+                let thread_id = notification.thread_id;
+                let turn_id = notification.turn.id;
+                let effects = self.state.reduce(Action::Event(DomainEvent::TurnStarted {
+                    thread_id: thread_id.clone(),
+                    turn_id: turn_id.clone(),
+                }));
+                if matches!(
+                    &self.state.turn,
+                    crate::app::TurnState::Streaming {
+                        thread_id: active_thread,
+                        turn_id: active_turn,
+                    } if active_thread == &thread_id && active_turn == &turn_id
+                ) {
+                    self.completed_items.observe_turn(&thread_id, &turn_id);
+                }
+                effects
             }
             ProtocolEvent::AgentMessageDelta(delta) => {
+                if self.completed_items.should_ignore(
+                    &delta.thread_id,
+                    &delta.turn_id,
+                    &delta.item_id,
+                ) {
+                    return Ok(Vec::new());
+                }
                 self.state.reduce(Action::Event(DomainEvent::AgentDelta {
                     thread_id: delta.thread_id,
                     turn_id: delta.turn_id,
@@ -560,6 +664,13 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                 }))
             }
             ProtocolEvent::ReasoningSummaryTextDelta(delta) => {
+                if self.completed_items.should_ignore(
+                    &delta.thread_id,
+                    &delta.turn_id,
+                    &delta.item_id,
+                ) {
+                    return Ok(Vec::new());
+                }
                 self.state.reduce(Action::Event(DomainEvent::ThinkingDelta {
                     thread_id: delta.thread_id,
                     turn_id: delta.turn_id,
@@ -570,6 +681,12 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                 }))
             }
             ProtocolEvent::ReasoningSummaryPartAdded(part) => {
+                if self
+                    .completed_items
+                    .should_ignore(&part.thread_id, &part.turn_id, &part.item_id)
+                {
+                    return Ok(Vec::new());
+                }
                 self.state
                     .reduce(Action::Event(DomainEvent::ThinkingSummaryPartAdded {
                         thread_id: part.thread_id,
@@ -579,6 +696,13 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                     }))
             }
             ProtocolEvent::ReasoningTextDelta(delta) => {
+                if self.completed_items.should_ignore(
+                    &delta.thread_id,
+                    &delta.turn_id,
+                    &delta.item_id,
+                ) {
+                    return Ok(Vec::new());
+                }
                 self.state.reduce(Action::Event(DomainEvent::ThinkingDelta {
                     thread_id: delta.thread_id,
                     turn_id: delta.turn_id,
@@ -589,6 +713,24 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                 }))
             }
             ProtocolEvent::ItemCompleted(completed) => {
+                let recognized =
+                    matches!(completed.item.kind.as_str(), "agentMessage" | "reasoning");
+                if recognized
+                    && self.completed_items.should_ignore(
+                        &completed.thread_id,
+                        &completed.turn_id,
+                        &completed.item.id,
+                    )
+                {
+                    return Ok(Vec::new());
+                }
+                if recognized {
+                    self.completed_items.record(
+                        &completed.thread_id,
+                        &completed.turn_id,
+                        &completed.item.id,
+                    );
+                }
                 if completed.item.kind == "agentMessage" {
                     self.state
                         .reduce(Action::Event(DomainEvent::AgentCompleted {
@@ -725,12 +867,55 @@ fn load_notice_message(notice: Option<LoadNotice>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::load_notice_message;
+    use super::{
+        load_notice_message, CompletedItemTracker, MAX_TRACKED_COMPLETED_ITEMS_PER_TURN,
+        MAX_TRACKED_COMPLETED_ITEM_ID_BYTES,
+    };
     use crate::persistence::LoadNotice;
 
     #[test]
     fn missing_preferences_are_a_quiet_first_run() {
         assert_eq!(load_notice_message(Some(LoadNotice::Missing)), None);
         assert!(load_notice_message(Some(LoadNotice::Corrupt)).is_some());
+    }
+
+    #[test]
+    fn completed_items_reset_for_every_local_turn_even_when_server_ids_repeat() {
+        let mut tracker = CompletedItemTracker::default();
+        tracker.begin_turn("thread", "turn-one");
+        tracker.record("thread", "turn-one", "reused-item");
+        tracker.observe_turn("thread", "turn-one");
+        assert!(tracker.should_ignore("thread", "turn-one", "reused-item"));
+
+        tracker.begin_turn("thread", "turn-one");
+        assert!(!tracker.should_ignore("thread", "turn-one", "reused-item"));
+
+        tracker.record("thread", "turn-one", "reused-item");
+        tracker.begin_turn("thread", "turn-two");
+        assert!(!tracker.should_ignore("thread", "turn-two", "reused-item"));
+        assert!(!tracker.should_ignore("thread", "turn-one", "reused-item"));
+    }
+
+    #[test]
+    fn completed_item_tracking_saturates_closed_at_count_and_byte_bounds() {
+        let mut tracker = CompletedItemTracker::default();
+        tracker.begin_turn("thread", "count-bound");
+        for index in 0..=MAX_TRACKED_COMPLETED_ITEMS_PER_TURN {
+            tracker.record("thread", "count-bound", &format!("item-{index}"));
+        }
+        assert_eq!(tracker.ids.len(), MAX_TRACKED_COMPLETED_ITEMS_PER_TURN);
+        assert!(tracker.should_ignore("thread", "count-bound", "untracked-late-item"));
+        assert!(!tracker.should_ignore("other-thread", "count-bound", "untracked-late-item"));
+
+        tracker.begin_turn("thread", "byte-bound");
+        let at_limit = "x".repeat(MAX_TRACKED_COMPLETED_ITEM_ID_BYTES);
+        tracker.record("thread", "byte-bound", &at_limit);
+        tracker.record("thread", "byte-bound", "over-limit");
+        assert_eq!(tracker.ids.len(), 1);
+        assert_eq!(tracker.id_bytes, MAX_TRACKED_COMPLETED_ITEM_ID_BYTES);
+        assert!(tracker.should_ignore("thread", "byte-bound", "another-untracked-item"));
+
+        tracker.begin_turn("thread", "fresh-turn");
+        assert!(!tracker.should_ignore("thread", "fresh-turn", "new-item"));
     }
 }

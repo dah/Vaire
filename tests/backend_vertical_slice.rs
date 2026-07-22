@@ -147,8 +147,10 @@ printf '%s\n' '{{"method":"item/reasoning/summaryPartAdded","params":{{"threadId
 printf '%s\n' '{{"method":"item/reasoning/summaryTextDelta","params":{{"threadId":"thr-new","turnId":"turn-new","itemId":"why","summaryIndex":0,"delta":"checking"}}}}'
 printf '%s\n' '{{"method":"item/reasoning/textDelta","params":{{"threadId":"thr-new","turnId":"turn-new","itemId":"why","contentIndex":0,"delta":"emitted"}}}}'
 printf '%s\n' '{{"method":"item/completed","params":{{"threadId":"thr-new","turnId":"turn-new","completedAtMs":1,"item":{{"id":"why","type":"reasoning","summary":["checking facts"],"content":["emitted detail"]}}}}}}'
-printf '%s\n' '{{"method":"item/agentMessage/delta","params":{{"threadId":"thr-new","turnId":"turn-new","itemId":"item-a","delta":"hé"}}}}'
-printf '%s\n' '{{"method":"item/completed","params":{{"threadId":"thr-new","turnId":"turn-new","completedAtMs":1,"item":{{"id":"item-a","type":"agentMessage","text":"héllo"}}}}}}'
+printf '%s\n' '{{"method":"item/reasoning/summaryTextDelta","params":{{"threadId":"thr-new","turnId":"turn-new","itemId":"why","summaryIndex":0,"delta":" stale"}}}}'
+printf '%s\n' '{{"method":"item/agentMessage/delta","params":{{"threadId":"thr-new","turnId":"turn-new","itemId":"item-a","delta":"h\u001b\u202eé"}}}}'
+printf '%s\n' '{{"method":"item/completed","params":{{"threadId":"thr-new","turnId":"turn-new","completedAtMs":1,"item":{{"id":"item-a","type":"agentMessage","text":"h\u001b\u202eéllo"}}}}}}'
+printf '%s\n' '{{"method":"item/agentMessage/delta","params":{{"threadId":"thr-new","turnId":"turn-new","itemId":"item-a","delta":" stale"}}}}'
 printf '%s\n' '{{"method":"turn/completed","params":{{"threadId":"thr-new","turn":{{"id":"turn-new","items":[],"status":"completed"}}}}}}'
 IFS= read -r hold
 "#
@@ -167,7 +169,7 @@ IFS= read -r hold
         .handle_intent(Intent::SendMessage("hello".to_owned()))
         .await
         .unwrap();
-    for _ in 0..10 {
+    for _ in 0..12 {
         assert!(backend.pump_event().await.unwrap());
     }
     assert!(matches!(backend.state().thread, ThreadState::Ready { ref id } if id == "thr-new"));
@@ -784,7 +786,7 @@ printf '%s\n' '{{"id":2,"result":{{"account":{{"type":"chatgpt","email":"user@ex
 IFS= read -r models
 printf '%s\n' '{MODEL_PAGE}'
 IFS= read -r thread_start
-sleep 1
+IFS= read -r hold
 "#
     );
     let paths = IsolationPaths::prepare(temp.path().join("runtime")).unwrap();

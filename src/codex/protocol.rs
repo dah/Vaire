@@ -1,6 +1,11 @@
-use serde::{Deserialize, Serialize};
+use serde::de::{IgnoredAny, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
+
+use crate::text::is_terminal_unsafe;
+
+pub(super) const MAX_PROTOCOL_IDENTIFIER_BYTES: usize = 16 * 1024;
 
 /// JSON-RPC request identifiers accepted by the generated Codex schema.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -101,6 +106,8 @@ pub struct AccountReadResponse {
     pub account: Option<AccountInfo>,
     pub requires_openai_auth: bool,
 }
+
+pub type LogoutAccountResponse = EmptyObjectResponse;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct LoginAccountParams {
@@ -267,7 +274,6 @@ pub struct ThreadItem {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct TurnSnapshot {
     pub id: String,
-    #[serde(default)]
     pub items: Vec<ThreadItem>,
     pub status: TurnStatus,
     #[serde(default)]
@@ -277,7 +283,6 @@ pub struct TurnSnapshot {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct ThreadSnapshot {
     pub id: String,
-    #[serde(default)]
     pub turns: Vec<TurnSnapshot>,
 }
 
@@ -292,6 +297,41 @@ pub struct ThreadListEntry {
     pub updated_at: i64,
     pub cwd: PathBuf,
     pub ephemeral: bool,
+    pub source: SessionSource,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(untagged)]
+pub enum SessionSource {
+    Named(SessionSourceName),
+    Custom {
+        custom: String,
+    },
+    SubAgent {
+        #[serde(rename = "subAgent")]
+        sub_agent: Value,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionSourceName {
+    Cli,
+    Vscode,
+    Exec,
+    AppServer,
+    Unknown,
+    #[serde(other)]
+    Other,
+}
+
+impl SessionSource {
+    pub(super) fn is_supported_resume_source(&self) -> bool {
+        matches!(
+            self,
+            Self::Named(SessionSourceName::AppServer | SessionSourceName::Vscode)
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -327,8 +367,37 @@ pub struct ThreadDeleteParams {
     pub thread_id: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub struct ThreadDeleteResponse {}
+pub type ThreadDeleteResponse = EmptyObjectResponse;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EmptyObjectResponse;
+
+impl<'de> Deserialize<'de> for EmptyObjectResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct EmptyObjectVisitor;
+
+        impl<'de> Visitor<'de> for EmptyObjectVisitor {
+            type Value = EmptyObjectResponse;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JSON object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(EmptyObjectResponse)
+            }
+        }
+
+        deserializer.deserialize_map(EmptyObjectVisitor)
+    }
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -395,6 +464,8 @@ pub struct TurnInterruptParams {
     pub thread_id: String,
     pub turn_id: String,
 }
+
+pub type TurnInterruptResponse = EmptyObjectResponse;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -510,6 +581,7 @@ pub fn parse_notification(method: &str, params: Value) -> Result<Option<Protocol
             .map_err(|_| format!("{method} notification had invalid required fields"))
     }
 
+    let invalid = || format!("{method} notification had invalid required fields");
     let event = match method {
         "account/login/completed" => ProtocolEvent::AccountLoginCompleted(decode(method, params)?),
         "account/updated" => ProtocolEvent::AccountUpdated,
@@ -518,26 +590,126 @@ pub fn parse_notification(method: &str, params: Value) -> Result<Option<Protocol
             struct Body {
                 thread: ThreadSnapshot,
             }
-            ProtocolEvent::ThreadStarted(decode::<Body>(method, params)?.thread)
+            let thread = decode::<Body>(method, params)?.thread;
+            validate_thread_snapshot(&thread).map_err(|_| invalid())?;
+            ProtocolEvent::ThreadStarted(thread)
         }
-        "turn/started" => ProtocolEvent::TurnStarted(decode(method, params)?),
-        "item/agentMessage/delta" => ProtocolEvent::AgentMessageDelta(decode(method, params)?),
+        "turn/started" => {
+            let notification: TurnNotification = decode(method, params)?;
+            validate_scope(&[&notification.thread_id]).map_err(|_| invalid())?;
+            validate_turn_snapshot(&notification.turn).map_err(|_| invalid())?;
+            if notification.turn.status != TurnStatus::InProgress {
+                return Err(invalid());
+            }
+            ProtocolEvent::TurnStarted(notification)
+        }
+        "item/agentMessage/delta" => {
+            let notification: AgentMessageDeltaNotification = decode(method, params)?;
+            validate_scope(&[
+                &notification.thread_id,
+                &notification.turn_id,
+                &notification.item_id,
+            ])
+            .map_err(|_| invalid())?;
+            ProtocolEvent::AgentMessageDelta(notification)
+        }
         "item/reasoning/summaryTextDelta" => {
-            ProtocolEvent::ReasoningSummaryTextDelta(decode(method, params)?)
+            let notification: ReasoningSummaryTextDeltaNotification = decode(method, params)?;
+            validate_scope(&[
+                &notification.thread_id,
+                &notification.turn_id,
+                &notification.item_id,
+            ])
+            .map_err(|_| invalid())?;
+            ProtocolEvent::ReasoningSummaryTextDelta(notification)
         }
         "item/reasoning/summaryPartAdded" => {
-            ProtocolEvent::ReasoningSummaryPartAdded(decode(method, params)?)
+            let notification: ReasoningSummaryPartAddedNotification = decode(method, params)?;
+            validate_scope(&[
+                &notification.thread_id,
+                &notification.turn_id,
+                &notification.item_id,
+            ])
+            .map_err(|_| invalid())?;
+            ProtocolEvent::ReasoningSummaryPartAdded(notification)
         }
-        "item/reasoning/textDelta" => ProtocolEvent::ReasoningTextDelta(decode(method, params)?),
-        "item/completed" => ProtocolEvent::ItemCompleted(decode(method, params)?),
-        "turn/completed" => ProtocolEvent::TurnCompleted(decode(method, params)?),
+        "item/reasoning/textDelta" => {
+            let notification: ReasoningTextDeltaNotification = decode(method, params)?;
+            validate_scope(&[
+                &notification.thread_id,
+                &notification.turn_id,
+                &notification.item_id,
+            ])
+            .map_err(|_| invalid())?;
+            ProtocolEvent::ReasoningTextDelta(notification)
+        }
+        "item/completed" => {
+            let notification: ItemCompletedNotification = decode(method, params)?;
+            validate_scope(&[&notification.thread_id, &notification.turn_id])
+                .map_err(|_| invalid())?;
+            validate_thread_item(&notification.item).map_err(|_| invalid())?;
+            ProtocolEvent::ItemCompleted(notification)
+        }
+        "turn/completed" => {
+            let notification: TurnNotification = decode(method, params)?;
+            validate_scope(&[&notification.thread_id]).map_err(|_| invalid())?;
+            validate_turn_snapshot(&notification.turn).map_err(|_| invalid())?;
+            ProtocolEvent::TurnCompleted(notification)
+        }
         "thread/tokenUsage/updated" => {
-            ProtocolEvent::ThreadTokenUsageUpdated(decode(method, params)?)
+            let notification: ThreadTokenUsageUpdatedNotification = decode(method, params)?;
+            validate_scope(&[&notification.thread_id, &notification.turn_id])
+                .map_err(|_| invalid())?;
+            ProtocolEvent::ThreadTokenUsageUpdated(notification)
         }
-        "error" => ProtocolEvent::Error(decode(method, params)?),
+        "error" => {
+            let notification: ErrorNotification = decode(method, params)?;
+            validate_scope(&[&notification.thread_id, &notification.turn_id])
+                .map_err(|_| invalid())?;
+            ProtocolEvent::Error(notification)
+        }
         _ => return Ok(None),
     };
     Ok(Some(event))
+}
+
+pub(super) fn validate_thread_snapshot(thread: &ThreadSnapshot) -> Result<(), ()> {
+    validate_scope(&[&thread.id])?;
+    for turn in &thread.turns {
+        validate_turn_snapshot(turn)?;
+    }
+    Ok(())
+}
+
+pub(super) fn validate_turn_snapshot(turn: &TurnSnapshot) -> Result<(), ()> {
+    validate_scope(&[&turn.id])?;
+    for item in &turn.items {
+        validate_thread_item(item)?;
+    }
+    Ok(())
+}
+
+fn validate_thread_item(item: &ThreadItem) -> Result<(), ()> {
+    validate_scope(&[&item.id])?;
+    if item.kind == "agentMessage" && item.text.is_none() {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn validate_scope(values: &[&str]) -> Result<(), ()> {
+    if values.iter().any(|value| !valid_identifier(value)) {
+        Err(())
+    } else {
+        Ok(())
+    }
+}
+
+pub(super) fn valid_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value == value.trim()
+        && value.len() <= MAX_PROTOCOL_IDENTIFIER_BYTES
+        && !value.chars().any(is_terminal_unsafe)
 }
 
 pub fn classify_message(value: Value) -> Result<InboundMessage, String> {
@@ -551,9 +723,20 @@ pub fn classify_message(value: Value) -> Result<InboundMessage, String> {
         .map(serde_json::from_value::<RequestId>)
         .transpose()
         .map_err(|_| "JSON-RPC id must be a non-negative integer or string".to_owned())?;
-    let method = object.get("method").and_then(Value::as_str);
+    let method = object
+        .get("method")
+        .map(|method| {
+            method
+                .as_str()
+                .ok_or_else(|| "JSON-RPC method must be a string".to_owned())
+        })
+        .transpose()?;
+    let has_response_fields = object.contains_key("result") || object.contains_key("error");
 
     match (id, method) {
+        (Some(_), Some(_)) | (None, Some(_)) if has_response_fields => {
+            Err("JSON-RPC request or notification cannot contain response fields".to_owned())
+        }
         (Some(id), Some(method)) => Ok(InboundMessage::ServerRequest {
             id,
             method: method.to_owned(),
@@ -592,7 +775,7 @@ mod tests {
         CancelLoginAccountStatus, InboundMessage, InitializeParams, LoginAccountParams,
         ProtocolEvent, ReasoningSummary, RequestId, ThreadDeleteParams, ThreadDeleteResponse,
         ThreadItemContent, ThreadListParams, ThreadListResponse, ThreadSourceKind,
-        ThreadStartParams,
+        ThreadStartParams, MAX_PROTOCOL_IDENTIFIER_BYTES,
     };
 
     #[test]
@@ -651,6 +834,7 @@ mod tests {
         assert_eq!(deletion, json!({"threadId": "thr-old"}));
         let _: ThreadDeleteResponse = serde_json::from_value(json!({})).unwrap();
         assert!(serde_json::from_value::<ThreadDeleteResponse>(json!(null)).is_err());
+        assert!(serde_json::from_value::<ThreadDeleteResponse>(json!([])).is_err());
 
         let list: ThreadListResponse = serde_json::from_value(json!({
             "data": [{
@@ -660,7 +844,8 @@ mod tests {
                 "createdAt": 10,
                 "updatedAt": 20,
                 "cwd": "/tmp/conversation",
-                "ephemeral": false
+                "ephemeral": false,
+                "source": "appServer"
             }],
             "nextCursor": "page-2"
         }))
@@ -697,6 +882,23 @@ mod tests {
     fn rejects_ambiguous_responses() {
         let error = classify_message(json!({"id": 1, "result": {}, "error": {}})).unwrap_err();
         assert!(error.contains("exactly one"));
+
+        for malformed in [
+            json!([]),
+            json!({"id": -1, "result": {}}),
+            json!({"id": 1.5, "result": {}}),
+            json!({"id": 1}),
+            json!({"id": 1, "error": {"code": "bad", "message": "failure"}}),
+            json!({"method": 7, "params": {}}),
+            json!({"id": 1, "method": 7, "result": {}}),
+            json!({"id": 1, "method": "approval", "result": {}}),
+            json!({"method": "notice", "error": {"code": -1, "message": "bad"}}),
+        ] {
+            assert!(
+                classify_message(malformed).is_err(),
+                "malformed JSON-RPC frame was classified as usable"
+            );
+        }
     }
 
     #[test]
@@ -714,6 +916,55 @@ mod tests {
             None
         );
         assert!(parse_notification("turn/completed", json!({"threadId":"thr"})).is_err());
+    }
+
+    #[test]
+    fn rejects_empty_event_scope_and_incomplete_agent_snapshots() {
+        for (method, params) in [
+            (
+                "item/agentMessage/delta",
+                json!({"threadId":"", "turnId":"turn", "itemId":"item", "delta":"hi"}),
+            ),
+            (
+                "turn/started",
+                json!({
+                    "threadId":"thr",
+                    "turn":{"id":"", "items":[], "status":"inProgress"}
+                }),
+            ),
+            (
+                "item/completed",
+                json!({
+                    "threadId":"thr", "turnId":"turn",
+                    "item":{"id":"item", "type":"agentMessage"}
+                }),
+            ),
+            (
+                "turn/started",
+                json!({
+                    "threadId":"thr",
+                    "turn":{"id":"turn", "items":[], "status":"completed"}
+                }),
+            ),
+            (
+                "item/agentMessage/delta",
+                json!({
+                    "threadId":"thr", "turnId":"turn", "itemId":"bad\nid", "delta":"x"
+                }),
+            ),
+            (
+                "item/agentMessage/delta",
+                json!({
+                    "threadId":"thr", "turnId":"turn",
+                    "itemId":"x".repeat(MAX_PROTOCOL_IDENTIFIER_BYTES + 1), "delta":"x"
+                }),
+            ),
+        ] {
+            assert!(
+                parse_notification(method, params).is_err(),
+                "{method} accepted an unusable scope or snapshot"
+            );
+        }
     }
 
     #[test]

@@ -113,6 +113,8 @@ The installed CLI schema wins when documentation, memory, examples, or the optio
 - Use the app-server protocol for authentication state, model discovery, thread lifecycle, turns, and streamed events. Do not scrape human-oriented Codex TUI or CLI output.
 - Keep JSON-RPC framing and request correlation inside the transport layer. Keep thread and turn behavior out of Ratatui widgets.
 - Initialize once per connection, correlate every request and response, and consume stdout and stderr continuously so the child cannot deadlock on a full pipe.
+- Treat event receipt as the cancellation boundary: once an app-server event has been received, finish its reduction and any required follow-up RPC before handling a competing UI intent. Never race a combined receive-and-process future against input, because cancellation could discard an already-consumed event.
+- Preserve the established resource ceilings: 1 MiB per JSON-RPC frame, 128 pending requests, 256 pagination pages, 1,024 models or 50 threads per page, 16,384 retained paginated items / 16 MiB of estimated retained text, and 16 KiB cursors. Reject violations visibly and keep a usable connection alive only when correlation remains unambiguous.
 - Scope streamed deltas and terminal events to their thread, turn, and item. Reconcile final snapshots without duplicating streamed text.
 - Treat process exit, malformed frames or required payloads, stale thread IDs, timeouts, and version skew as visible failures. Tolerate genuinely unknown notification methods where safe; if diagnosing them, record only sanitized method metadata. Preserve settled state where possible; when the app-server connection becomes unusable, tell the user to restart because the current product has no in-app reconnect.
 - Enforce the tested minimum Codex CLI version with an actionable upgrade message. Regenerate the installed schema and update protocol fixtures, safety policy, and compatibility notes whenever the tested baseline changes.
@@ -156,6 +158,7 @@ Use traits or equivalent injection seams around transport, persistence, browser 
 ## Persistence and lifecycle
 
 - Store only the minimum local state needed to restore the experience. Codex remains the source of truth for thread history.
+- Keep interactive and local-state memory bounded: 128 KiB composer drafts, 256 KiB reducer-level messages, 1 MiB / 2,048-entry transcript retention with explicit newline and display-width ceilings, 32 KiB / 128-entry emitted reasoning retention, 1 MiB preferences, and a rotating 1 MiB diagnostics file. Treat these values as tested compatibility contracts; change them deliberately with tests and user-facing documentation.
 - Put application state in the appropriate macOS application-support directory, not in the repository or current working directory.
 - Use a small versioned serialization format and atomic replace-on-write behavior.
 - Treat a missing or invalid state file as a clean first run, not a crash.
@@ -182,6 +185,7 @@ Keep the core testable without launching a terminal or signing in. Maintain cove
 - Thread-picker listing, switching, confirmed single/bulk deletion, active-thread protection, partial failures, and stale result correlation.
 - Emitted-reasoning scoping, full-access policy and inherited-environment behavior, account/header sanitization, activity-animation lifecycle, context-usage scoping and arithmetic, and narrow/normal cross-feature Ratatui rendering.
 - Tool-heavy event floods and unexpected server requests, proving meaningful conversation events remain deliverable and every unimplemented request still fails closed.
+- Rendering above `u16::MAX` aggregate logical rows, proving transcript and reasoning pre-windowing reaches the true requested viewport without relying on a saturated Ratatui scroll offset.
 - If runtime-agent instructions are introduced, test new-thread and resumed-thread behavior, instruction precedence, and the invariant that this development `AGENTS.md` is never injected into a user conversation.
 
 Keep any future real authenticated Codex smoke test manual or ignored. Default tests and CI must not require ChatGPT login or network access.
@@ -195,6 +199,8 @@ cargo test --all-targets
 ```
 
 Run the smallest relevant checks while iterating, then all three before handing off a completed change. Add or update tests with behavior changes. Do not weaken lint settings or delete a failing test merely to make a check pass.
+
+Ratatui 0.29's `unstable-rendered-line-info` feature is intentionally enabled only so the TUI can measure Ratatui's own wrapped-line layout before pre-windowing a viewport. It does not require nightly Rust or add platform coupling. Keep its use isolated to rendering calculations, retain the Ratatui 0.29 pin until an explicit compatibility review, and exercise wrapping/windowing tests before any Ratatui upgrade or feature change.
 
 ## RepoPrompt-assisted development
 

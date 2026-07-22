@@ -32,16 +32,20 @@ impl TerminalOps for SystemTerminalOps {
 fn enter_with_restore<Enable, Enter, Restore>(
     enable_raw: Enable,
     enter_screen: Enter,
-    restore: Restore,
+    mut restore: Restore,
 ) -> io::Result<()>
 where
     Enable: FnOnce() -> io::Result<()>,
     Enter: FnOnce() -> io::Result<()>,
-    Restore: FnOnce() -> io::Result<()>,
+    Restore: FnMut() -> io::Result<()>,
 {
     enable_raw()?;
     if let Err(error) = enter_screen() {
-        let _ = restore();
+        if restore().is_err() {
+            // The restore sequence is idempotent. A second attempt covers transient failures in
+            // the partial-entry path, where no guard can be returned to retry during Drop.
+            let _ = restore();
+        }
         return Err(error);
     }
     Ok(())
@@ -69,8 +73,11 @@ impl<T: TerminalOps> TerminalGuard<T> {
         if !self.active {
             return Ok(());
         }
-        self.active = false;
-        self.ops.restore()
+        let result = self.ops.restore();
+        if result.is_ok() {
+            self.active = false;
+        }
+        result
     }
 }
 
@@ -97,6 +104,10 @@ mod tests {
         restores: Arc<AtomicUsize>,
     }
 
+    struct FailOnceRestoreOps {
+        restores: Arc<AtomicUsize>,
+    }
+
     impl TerminalOps for MockOps {
         fn enter(&mut self) -> io::Result<()> {
             self.enters.fetch_add(1, Ordering::SeqCst);
@@ -106,6 +117,21 @@ mod tests {
         fn restore(&mut self) -> io::Result<()> {
             self.restores.fetch_add(1, Ordering::SeqCst);
             Ok(())
+        }
+    }
+
+    impl TerminalOps for FailOnceRestoreOps {
+        fn enter(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn restore(&mut self) -> io::Result<()> {
+            let attempt = self.restores.fetch_add(1, Ordering::SeqCst);
+            if attempt == 0 {
+                Err(io::Error::other("first restore failed"))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -145,19 +171,37 @@ mod tests {
     }
 
     #[test]
-    fn partial_screen_entry_attempts_the_full_restore_path() {
+    fn failed_explicit_restore_is_retried_on_drop() {
+        let restores = Arc::new(AtomicUsize::new(0));
+        let mut guard = TerminalGuard::enter(FailOnceRestoreOps {
+            restores: Arc::clone(&restores),
+        })
+        .unwrap();
+
+        assert!(guard.restore().is_err());
+        drop(guard);
+
+        assert_eq!(restores.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn partial_screen_entry_retries_a_transient_restore_failure() {
         let restores = Arc::new(AtomicUsize::new(0));
         let restore_count = Arc::clone(&restores);
         let error = enter_with_restore(
             || Ok(()),
             || Err(io::Error::other("partial screen entry")),
             move || {
-                restore_count.fetch_add(1, Ordering::SeqCst);
-                Ok(())
+                let attempt = restore_count.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    Err(io::Error::other("transient restore failure"))
+                } else {
+                    Ok(())
+                }
             },
         )
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Other);
-        assert_eq!(restores.load(Ordering::SeqCst), 1);
+        assert_eq!(restores.load(Ordering::SeqCst), 2);
     }
 }

@@ -8,8 +8,10 @@ use std::time::Duration;
 use agentharness::codex::protocol::InboundEvent;
 use agentharness::codex::transport::{
     AppServerTransport, ProcessSpec, RequestTimeouts, TransportError, EVENT_QUEUE_CAPACITY,
+    MAX_FRAME_BYTES, MAX_PENDING_REQUESTS,
 };
 use agentharness::diagnostics::MemoryDiagnosticSink;
+use futures_util::{stream::FuturesUnordered, StreamExt};
 use serde_json::json;
 use tempfile::tempdir;
 
@@ -67,7 +69,7 @@ async fn late_timed_out_response_is_ignored_and_connection_remains_usable() {
         temp.path(),
         r#"
 IFS= read -r first
-sleep 0.08
+IFS= read -r release
 printf '%s\n' '{"id":1,"result":{"late":true}}'
 IFS= read -r second
 printf '%s\n' '{"id":2,"result":{"ok":true}}'
@@ -90,6 +92,7 @@ IFS= read -r hold
         transport.request_default("slow", json!({})).await,
         Err(TransportError::Timeout)
     );
+    transport.notify("release", json!({})).await.unwrap();
     let response = transport
         .request("next", json!({}), Duration::from_secs(1))
         .await
@@ -106,22 +109,165 @@ IFS= read -r hold
 }
 
 #[tokio::test]
-async fn malformed_json_and_eof_are_visible_recoverable_events() {
-    for (body, category) in [
-        ("printf '%s\\n' '{broken'\nsleep 1", "framing"),
-        ("exit 0", "eof"),
-    ] {
+async fn oversized_outbound_request_is_rejected_without_closing_the_connection() {
+    let temp = tempdir().unwrap();
+    let executable = script(
+        temp.path(),
+        r#"
+IFS= read -r request
+printf '%s\n' '{"id":1,"result":{"ok":true}}'
+IFS= read -r hold
+"#,
+    );
+    let mut transport = AppServerTransport::spawn(spec(temp.path(), executable))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        transport
+            .request("invalid-timeout", json!({}), Duration::MAX)
+            .await,
+        Err(TransportError::Protocol(message)) if message.contains("timeout range")
+    ));
+    let oversized = "x".repeat(agentharness::codex::transport::MAX_FRAME_BYTES);
+    assert!(matches!(
+        transport
+            .notify("oversized-notify", json!({"value": oversized.clone()}))
+            .await,
+        Err(TransportError::Protocol(message)) if message.contains("size limit")
+    ));
+    assert!(matches!(
+        transport
+            .request("oversized", json!({"value": oversized}), Duration::from_secs(1))
+            .await,
+        Err(TransportError::Protocol(message)) if message.contains("size limit")
+    ));
+    let response = transport
+        .request("ping", json!({}), Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(response["ok"], true);
+
+    transport.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_request_admission_and_cancellation_are_bounded_without_closing_the_connection()
+{
+    let temp = tempdir().unwrap();
+    let executable = script(
+        temp.path(),
+        r#"
+held=0
+while IFS= read -r request; do
+  case "$request" in
+    *'"method":"held"'*) held=$((held + 1)) ;;
+    *'"method":"ping"'*) printf '{"id":%s,"result":{"ok":true}}\n' "$((held + 1))" ;;
+  esac
+done
+"#,
+    );
+    let mut transport = AppServerTransport::spawn(spec(temp.path(), executable))
+        .await
+        .unwrap();
+    let mut requests = FuturesUnordered::new();
+    for sequence in 0..=MAX_PENDING_REQUESTS {
+        requests.push(transport.request(
+            "held",
+            json!({"sequence": sequence}),
+            Duration::from_secs(5),
+        ));
+    }
+
+    let overload = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(result) = requests.next().await {
+            if matches!(
+                &result,
+                Err(TransportError::Protocol(message)) if message.contains("concurrent")
+            ) {
+                return result;
+            }
+        }
+        panic!("all requests settled without an admission error");
+    })
+    .await
+    .expect("unbounded in-flight requests never applied backpressure");
+    assert!(matches!(overload, Err(TransportError::Protocol(_))));
+
+    // Dropping the remaining callers must immediately retire their 128 pending IDs. A useful
+    // request should not have to wait for their five-second deadlines before it can be admitted.
+    drop(requests);
+
+    let response = transport
+        .request("ping", json!({}), Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(response["ok"], true);
+    transport.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn malformed_json_is_reported_as_a_framing_failure() {
+    let temp = tempdir().unwrap();
+    let executable = script(temp.path(), "printf '%s\\n' '{broken'\nsleep 1");
+    let mut transport = AppServerTransport::spawn(spec(temp.path(), executable))
+        .await
+        .unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(1), transport.next_event())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        event.event,
+        InboundEvent::ConnectionClosed { category } if category == "framing"
+    ));
+    transport.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn codec_rejects_oversized_and_invalid_utf8_lines_without_poisoning_later_connections() {
+    let cases = [
+        (
+            "oversized-line",
+            format!(
+                "dd if=/dev/zero bs={} count=1 2>/dev/null | tr '\\000' x\nprintf '\\n'\nIFS= read -r hold || true",
+                MAX_FRAME_BYTES + 1
+            ),
+        ),
+        (
+            "invalid-utf8",
+            "printf '\\377\\n'\nIFS= read -r hold || true".to_owned(),
+        ),
+    ];
+
+    for (name, body) in cases {
         let temp = tempdir().unwrap();
-        let executable = script(temp.path(), body);
+        let executable = script(temp.path(), &body);
         let mut transport = AppServerTransport::spawn(spec(temp.path(), executable))
             .await
             .unwrap();
-        let event = tokio::time::timeout(Duration::from_secs(1), transport.next_event())
+
+        let event = tokio::time::timeout(Duration::from_secs(2), transport.next_event())
             .await
-            .unwrap()
-            .unwrap();
+            .unwrap_or_else(|_| panic!("{name} did not close the connection"))
+            .expect("framing failure event was missing");
         assert!(
-            matches!(event.event, InboundEvent::ConnectionClosed { category: ref actual } if actual == category)
+            matches!(event.event, InboundEvent::ConnectionClosed { category } if category == "framing"),
+            "{name} was not classified as a codec framing failure"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), transport.next_event())
+                .await
+                .expect("connection worker did not finish")
+                .is_none(),
+            "{name} emitted data after its terminal framing event"
+        );
+        assert_eq!(
+            transport
+                .request("after-framing-failure", json!({}), Duration::from_secs(1))
+                .await,
+            Err(TransportError::Closed),
+            "{name} left a partially usable transport behind"
         );
         transport.shutdown().await.unwrap();
     }
@@ -193,6 +339,51 @@ sleep 1
         matches!(event.event, InboundEvent::ConnectionClosed { category } if category == "protocol")
     );
     transport.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn in_flight_requests_fail_on_uncorrelatable_response_ids_and_eof() {
+    for (body, expected_category) in [
+        (
+            r#"
+IFS= read -r request
+printf '%s\n' '{"id":"1","result":{}}'
+sleep 1
+"#,
+            "protocol",
+        ),
+        (
+            r#"
+IFS= read -r request
+exit 0
+"#,
+            "eof",
+        ),
+    ] {
+        let temp = tempdir().unwrap();
+        let executable = script(temp.path(), body);
+        let mut transport = AppServerTransport::spawn(spec(temp.path(), executable))
+            .await
+            .unwrap();
+
+        let result = transport
+            .request("pending", json!({}), Duration::from_secs(1))
+            .await;
+        match expected_category {
+            "protocol" => assert!(matches!(result, Err(TransportError::Protocol(_)))),
+            "eof" => assert_eq!(result, Err(TransportError::Closed)),
+            _ => unreachable!(),
+        }
+        let event = tokio::time::timeout(Duration::from_secs(1), transport.next_event())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            event.event,
+            InboundEvent::ConnectionClosed { category } if category == expected_category
+        ));
+        transport.shutdown().await.unwrap();
+    }
 }
 
 #[tokio::test]

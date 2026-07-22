@@ -6,7 +6,8 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{
@@ -14,6 +15,7 @@ use crate::{
         ThreadPickerPhase, ThreadPickerState, ThreadState, TranscriptRole, TurnState,
     },
     command::{parse, HELP_TEXT},
+    text::append_sanitized_terminal_text,
 };
 
 pub use crate::text::sanitize_terminal_text;
@@ -22,6 +24,9 @@ const MIN_WIDTH: u16 = 36;
 const MIN_HEIGHT: u16 = 9;
 const MAX_COMPOSER_ROWS: usize = 5;
 const MAX_MESSAGE_ROWS: usize = 4;
+// Sanitization leaves only newlines, quotes, and backslashes needing two-byte JSON escapes, so
+// even worst-case input remains well below the transport's 1 MiB frame ceiling after envelopes.
+const MAX_COMPOSER_BYTES: usize = 128 * 1_024;
 const ACTIVITY_TICKS_PER_FRAME: u8 = 4;
 const ACTIVITY_FRAMES: [&str; 10] = [
     "~    ", "~~   ", "~~~  ", " ~~~ ", "  ~~~", "   ~~", "    ~", "   ~~", "  ~~~", " ~~~ ",
@@ -100,8 +105,8 @@ impl UiState {
     pub fn handle_event(&mut self, event: Event) -> Option<Intent> {
         match event {
             Event::Key(key) => self.handle_key(key),
-            Event::Paste(text) => {
-                self.composer.push_str(&sanitize_terminal_text(&text));
+            Event::Paste(text) if self.overlay.is_none() => {
+                self.append_composer_text(&text);
                 None
             }
             _ => None,
@@ -160,16 +165,16 @@ impl UiState {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Some(Intent::Quit);
         }
-        match key.code {
-            KeyCode::Esc => {
-                if self.overlay.take().is_some() {
-                    None
-                } else {
-                    Some(Intent::Interrupt)
-                }
+        if self.overlay.is_some() {
+            if key.code == KeyCode::Esc {
+                self.overlay = None;
             }
+            return None;
+        }
+        match key.code {
+            KeyCode::Esc => Some(Intent::Interrupt),
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
-                self.composer.push('\n');
+                self.append_composer_text("\n");
                 None
             }
             KeyCode::Enter => self.submit(),
@@ -196,7 +201,8 @@ impl UiState {
             KeyCode::Char(character)
                 if !key.modifiers.contains(KeyModifiers::CONTROL) && !character.is_control() =>
             {
-                self.composer.push(character);
+                let mut encoded = [0_u8; 4];
+                self.append_composer_text(character.encode_utf8(&mut encoded));
                 None
             }
             _ => None,
@@ -221,6 +227,15 @@ impl UiState {
             }
         }
     }
+
+    fn append_composer_text(&mut self, value: &str) {
+        if !append_sanitized_terminal_text(&mut self.composer, value, MAX_COMPOSER_BYTES) {
+            self.overlay = Some(format!(
+                "The message size limit is {} KiB. Press Esc, shorten the draft, and try again.",
+                MAX_COMPOSER_BYTES / 1_024
+            ));
+        }
+    }
 }
 
 pub fn render(frame: &mut Frame<'_>, state: &AppState, ui: &UiState) {
@@ -241,7 +256,8 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, ui: &UiState) {
 
     let composer_text = sanitize_terminal_text(&ui.composer);
     let content_width = area.width.saturating_sub(2).max(1);
-    let composer_wrapped = wrap_for_display(&composer_text, content_width);
+    let composer_wrapped =
+        wrap_for_display(&composer_text, content_width).retain_tail_rows(MAX_COMPOSER_ROWS);
     let message = message_text(state);
     let message_wrapped = message
         .as_ref()
@@ -310,26 +326,118 @@ struct WrappedText {
     tail_column: usize,
 }
 
+struct ParagraphWindow {
+    lines: Vec<Line<'static>>,
+    scroll: u16,
+}
+
+fn wrapped_line_rows(line: &Line<'static>, width: u16) -> usize {
+    Paragraph::new(line.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(width.max(1))
+        .max(1)
+}
+
+/// Selects only the logical lines needed for the requested visual viewport.
+///
+/// Ratatui's paragraph scroll offset is a `u16`. Retained transcript state can contain more than
+/// 65,535 explicit newline rows even when its byte size is bounded, so clamping the global offset
+/// would render a stale middle section instead of the requested tail. Counting first and then
+/// retaining the intersecting logical-line range keeps the residual offset local to one bounded
+/// line while preserving Ratatui's native word wrapping and span styles.
+fn paragraph_window(
+    lines: Vec<Line<'static>>,
+    width: u16,
+    height: u16,
+    scroll_from_bottom: usize,
+) -> ParagraphWindow {
+    if lines.is_empty() {
+        return ParagraphWindow { lines, scroll: 0 };
+    }
+
+    let row_counts = lines
+        .iter()
+        .map(|line| wrapped_line_rows(line, width))
+        .collect::<Vec<_>>();
+    let total_rows = row_counts
+        .iter()
+        .fold(0usize, |total, rows| total.saturating_add(*rows));
+    let maximum_top = total_rows.saturating_sub(usize::from(height));
+    let target_top = maximum_top.saturating_sub(scroll_from_bottom.min(maximum_top));
+
+    let mut rows_before = 0usize;
+    let mut start = 0usize;
+    while start < row_counts.len() && rows_before.saturating_add(row_counts[start]) <= target_top {
+        rows_before = rows_before.saturating_add(row_counts[start]);
+        start += 1;
+    }
+    if start == lines.len() {
+        start = lines.len() - 1;
+        rows_before = rows_before.saturating_sub(row_counts[start]);
+    }
+
+    let residual = target_top.saturating_sub(rows_before);
+    // Reducer retention bounds keep every individual transcript line below this limit at the
+    // minimum supported pane width; reasoning entries have a tighter 32-KiB bound. The windowing
+    // above removes the unbounded aggregate offset.
+    let scroll = u16::try_from(residual).unwrap_or(u16::MAX);
+    let required_rows = residual.saturating_add(usize::from(height));
+    let mut selected_rows = 0usize;
+    let mut end = start;
+    while end < lines.len() && selected_rows < required_rows {
+        selected_rows = selected_rows.saturating_add(row_counts[end]);
+        end += 1;
+    }
+
+    ParagraphWindow {
+        lines: lines[start..end].to_vec(),
+        scroll,
+    }
+}
+
+impl WrappedText {
+    fn retain_tail_rows(mut self, maximum: usize) -> Self {
+        let maximum = maximum.max(1);
+        if self.rows <= maximum {
+            return self;
+        }
+        let skip = self.rows - maximum;
+        let byte_index = self
+            .text
+            .match_indices('\n')
+            .nth(skip - 1)
+            .map_or(self.text.len(), |(index, _)| index + 1);
+        self.text = self.text[byte_index..].to_owned();
+        self.rows = maximum;
+        self
+    }
+}
+
 fn wrap_for_display(value: &str, width: u16) -> WrappedText {
     let width = usize::from(width.max(1));
     let mut text = String::with_capacity(value.len());
     let mut row = 0_usize;
     let mut column = 0_usize;
-    for character in value.chars() {
-        if character == '\n' {
+    for grapheme in value.graphemes(true) {
+        if grapheme == "\n" {
             text.push('\n');
             row = row.saturating_add(1);
             column = 0;
             continue;
         }
-        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
-        if column > 0 && column.saturating_add(character_width) > width {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if column > 0 && column.saturating_add(grapheme_width) > width {
             text.push('\n');
             row = row.saturating_add(1);
             column = 0;
         }
-        text.push(character);
-        column = column.saturating_add(character_width);
+        text.push_str(grapheme);
+        column = column.saturating_add(grapheme_width);
+    }
+    if column >= width && !text.is_empty() {
+        text.push('\n');
+        row = row.saturating_add(1);
+        column = 0;
     }
     WrappedText {
         text,
@@ -485,13 +593,13 @@ fn truncate_for_display(value: &str, width: usize) -> String {
     let content_width = width.saturating_sub(1);
     let mut truncated = String::with_capacity(value.len().min(width));
     let mut used = 0_usize;
-    for character in value.chars() {
-        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
-        if used.saturating_add(character_width) > content_width {
+    for grapheme in value.graphemes(true) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if used.saturating_add(grapheme_width) > content_width {
             break;
         }
-        truncated.push(character);
-        used = used.saturating_add(character_width);
+        truncated.push_str(grapheme);
+        used = used.saturating_add(grapheme_width);
     }
     truncated.push('…');
     truncated
@@ -556,18 +664,14 @@ fn render_transcript(
         .title(" Conversation ")
         .borders(Borders::ALL);
     let inner = block.inner(area);
-    let wrap_width = inner.width.max(1) as usize;
-    let line_count = lines
-        .iter()
-        .map(|line| line.width().max(1).div_ceil(wrap_width))
-        .sum::<usize>();
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .wrap(Wrap { trim: false });
-    let max_top = line_count.saturating_sub(inner.height as usize);
-    let from_bottom = scroll_from_bottom.min(max_top);
-    let top = max_top.saturating_sub(from_bottom).min(u16::MAX as usize) as u16;
-    frame.render_widget(paragraph.scroll((top, 0)), area);
+    let window = paragraph_window(lines, inner.width, inner.height, scroll_from_bottom);
+    frame.render_widget(
+        Paragraph::new(window.lines)
+            .wrap(Wrap { trim: false })
+            .block(block)
+            .scroll((window.scroll, 0)),
+        area,
+    );
 }
 
 fn render_thinking(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -620,19 +724,12 @@ fn render_thinking(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 
     let block = Block::default().title(" Reasoning ").borders(Borders::ALL);
     let inner = block.inner(area);
-    let wrap_width = inner.width.max(1) as usize;
-    let line_count = lines
-        .iter()
-        .map(|line| line.width().max(1).div_ceil(wrap_width))
-        .sum::<usize>();
-    let top = line_count
-        .saturating_sub(inner.height as usize)
-        .min(u16::MAX as usize) as u16;
+    let window = paragraph_window(lines, inner.width, inner.height, 0);
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(block)
+        Paragraph::new(window.lines)
             .wrap(Wrap { trim: false })
-            .scroll((top, 0)),
+            .block(block)
+            .scroll((window.scroll, 0)),
         area,
     );
 }
@@ -867,8 +964,8 @@ mod tests {
     use unicode_width::UnicodeWidthStr;
 
     use super::{
-        header_text, render, sanitize_terminal_text, UiState, ACTIVITY_FRAMES,
-        ACTIVITY_TICKS_PER_FRAME,
+        header_text, render, sanitize_terminal_text, truncate_for_display, wrap_for_display,
+        UiState, ACTIVITY_FRAMES, ACTIVITY_TICKS_PER_FRAME, MAX_COMPOSER_BYTES,
     };
     use crate::app::{
         Action, AppState, AuthState, ConnectionState, DomainEvent, Intent, ThinkingEntry,
@@ -1186,11 +1283,90 @@ mod tests {
         assert_eq!(before, after);
         assert_eq!(ui.scroll_from_bottom, 5);
 
+        ui.scroll_from_bottom = usize::MAX;
+        let oldest = screen(&state, &ui, 50, 12);
+        assert!(oldest.contains("historical message 0"));
+
         ui.scroll_from_bottom = 0;
         let narrow = screen(&state, &ui, 36, 9);
         assert!(narrow.contains("Agent:"));
         assert!(narrow.contains('~'));
         assert!(screen(&state, &ui, 35, 8).contains("Terminal too small"));
+    }
+
+    #[test]
+    fn transcript_bottom_scroll_accounts_for_word_wrap_slack() {
+        let mut state = ready();
+        state.transcript.push(TranscriptEntry {
+            role: TranscriptRole::Assistant,
+            text: format!("{}TAIL", "abcdefghijklmnopqr ".repeat(8)),
+            item_id: Some("item".to_owned()),
+            turn_id: Some("turn".to_owned()),
+        });
+
+        let rendered = screen(&state, &UiState::default(), 36, 9);
+        assert!(rendered.contains("TAIL"));
+
+        state.transcript[0].text = format!("{}WIDE-TAIL", "界界界界界界界界e\u{301} ".repeat(8));
+        let unicode = screen(&state, &UiState::default(), 36, 9);
+        assert!(unicode.contains("WIDE-TAIL"));
+    }
+
+    #[test]
+    fn newline_heavy_streams_remain_bounded_and_render_the_tail() {
+        let mut state = ready();
+        state.turn = TurnState::Streaming {
+            thread_id: "thread".to_owned(),
+            turn_id: "turn".to_owned(),
+        };
+        state.reduce(Action::Event(DomainEvent::AgentDelta {
+            thread_id: "thread".to_owned(),
+            turn_id: "turn".to_owned(),
+            item_id: "item".to_owned(),
+            delta: format!("{}TRANSCRIPT-TAIL", "\n".repeat(70_000)),
+        }));
+
+        let rendered = screen(&state, &UiState::default(), 36, 9);
+        assert!(rendered.contains("TRANSCRIPT-TAIL"));
+        assert!(state.transcript[0].text.len() < 70_000);
+    }
+
+    #[test]
+    fn transcript_and_reasoning_window_past_u16_logical_rows() {
+        let mut state = ready();
+        state.transcript.push(TranscriptEntry {
+            role: TranscriptRole::Assistant,
+            text: format!("{}TRANSCRIPT-TAIL", "\n".repeat(usize::from(u16::MAX) + 32)),
+            item_id: Some("item".to_owned()),
+            turn_id: Some("turn".to_owned()),
+        });
+        let bottom = screen(&state, &UiState::default(), 52, 12);
+        assert!(bottom.contains("TRANSCRIPT-TAIL"));
+
+        let oldest = screen(
+            &state,
+            &UiState {
+                scroll_from_bottom: usize::MAX,
+                ..UiState::default()
+            },
+            52,
+            12,
+        );
+        assert!(oldest.contains("Agent:"));
+        assert!(!oldest.contains("TRANSCRIPT-TAIL"));
+
+        state.transcript.clear();
+        state.thinking.visible = true;
+        state.thinking.entries.push(ThinkingEntry {
+            turn_id: "turn".to_owned(),
+            item_id: "why".to_owned(),
+            kind: ThinkingKind::Summary,
+            index: 0,
+            text: format!("{}REASONING-TAIL", "\n".repeat(usize::from(u16::MAX) + 32)),
+            completed: false,
+        });
+        let reasoning = screen(&state, &UiState::default(), 52, 12);
+        assert!(reasoning.contains("REASONING-TAIL"));
     }
 
     #[test]
@@ -1263,6 +1439,9 @@ mod tests {
 
     #[test]
     fn handles_small_terminals_and_malicious_control_text() {
+        for (width, height) in [(0, 0), (0, 9), (36, 0), (1, 1), (35, 8)] {
+            let _ = draw(&ready(), &UiState::default(), width, height);
+        }
         let small = screen(&ready(), &UiState::default(), 24, 6);
         assert!(small.contains("Terminal too small"));
         let mut state = ready();
@@ -1282,6 +1461,16 @@ mod tests {
 
     #[test]
     fn composer_wraps_long_wide_input_and_keeps_tail_cursor_visible() {
+        let exact_width_ui = UiState {
+            composer: "a".repeat(38),
+            ..UiState::default()
+        };
+        let mut exact_width = draw(&ready(), &exact_width_ui, 40, 16);
+        assert_eq!(
+            exact_width.backend_mut().get_cursor_position().unwrap(),
+            Position::new(1, 13)
+        );
+
         let normal_ui = UiState {
             composer: format!("{}{}", "a".repeat(50), "界".repeat(20)),
             ..UiState::default()
@@ -1310,6 +1499,18 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(rendered.contains('界'));
+    }
+
+    #[test]
+    fn display_wrapping_and_truncation_keep_grapheme_clusters_intact() {
+        let wrapped = wrap_for_display("aa👩‍💻", 4);
+        assert_eq!(wrapped.text, "aa👩‍💻\n");
+        assert_eq!(wrapped.rows, 2);
+        assert!(!wrapped.text.contains("👩‍\n💻"));
+
+        let truncated = truncate_for_display("ab👩‍💻cd", 5);
+        assert_eq!(truncated, "ab👩‍💻…");
+        assert_eq!(UnicodeWidthStr::width(truncated.as_str()), 5);
     }
 
     #[test]
@@ -1380,6 +1581,12 @@ mod tests {
         assert!(minimum_width.contains("Message"));
         assert!(header(&state, 36).ends_with("Context 73%"));
 
+        state.thinking.entries[0].text =
+            format!("{}REASONING-TAIL", "界界界界界界e\u{301} ".repeat(8));
+        let wrapped_reasoning = screen(&state, &UiState::default(), 52, 12);
+        assert!(wrapped_reasoning.contains("REASONING-TAIL"));
+        state.thinking.entries[0].text = "Checking facts safely".to_owned();
+
         state.turn = TurnState::Failed {
             turn_id: Some("turn".to_owned()),
             message: "model failed".to_owned(),
@@ -1411,6 +1618,32 @@ mod tests {
             )))
             .is_none());
         assert!(ui.overlay.is_some());
+        let visible_overlay = ui.overlay.clone();
+        assert!(ui
+            .handle_event(Event::Paste("hidden paste".to_owned()))
+            .is_none());
+        assert!(ui
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE,
+            )))
+            .is_none());
+        assert!(ui
+            .handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )))
+            .is_none());
+        assert_eq!(ui.overlay, visible_overlay);
+        assert!(ui.composer.is_empty());
+        assert_eq!(
+            ui.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            ))),
+            Some(Intent::Quit)
+        );
+        assert_eq!(ui.overlay, visible_overlay);
         assert!(ui
             .handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)))
             .is_none());
@@ -1430,6 +1663,48 @@ mod tests {
             ))),
             Some(crate::app::Intent::Quit)
         ));
+    }
+
+    #[test]
+    fn composer_input_is_bounded_without_splitting_utf8() {
+        let mut ui = UiState {
+            composer: "a".repeat(MAX_COMPOSER_BYTES - 1),
+            ..UiState::default()
+        };
+        assert!(ui
+            .handle_event(Event::Paste("界 tail".to_owned()))
+            .is_none());
+        assert_eq!(ui.composer.len(), MAX_COMPOSER_BYTES - 1);
+        assert!(ui
+            .overlay
+            .as_deref()
+            .is_some_and(|message| message.contains("message size limit")));
+
+        ui.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        ui.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Backspace,
+            KeyModifiers::NONE,
+        )));
+        ui.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Backspace,
+            KeyModifiers::NONE,
+        )));
+        ui.handle_event(Event::Paste("界".to_owned()));
+        assert_eq!(ui.composer.len(), MAX_COMPOSER_BYTES);
+        assert!(ui.overlay.is_none());
+
+        ui.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(ui.composer.len(), MAX_COMPOSER_BYTES);
+        assert!(ui.overlay.is_some());
+
+        let mut newline_heavy = UiState::default();
+        newline_heavy.handle_event(Event::Paste(format!("{}TAIL", "\n".repeat(70_000))));
+        let rendered = screen(&ready(), &newline_heavy, 36, 9);
+        assert!(rendered.contains("TAIL"));
+        assert!(newline_heavy.overlay.is_none());
     }
 
     #[test]
@@ -1463,6 +1738,10 @@ mod tests {
         let narrow = screen(&state, &UiState::default(), 36, 9);
         assert!(narrow.contains("Saved threads"));
         assert!(narrow.contains("Current conversation") || narrow.contains("An older"));
+
+        state.thread_picker.as_mut().unwrap().selected = usize::MAX;
+        let corrupted_selection = screen(&state, &UiState::default(), 36, 9);
+        assert!(corrupted_selection.contains("Saved threads"));
     }
 
     #[test]
@@ -1506,6 +1785,13 @@ mod tests {
             Some(Intent::ThreadPickerRequestClearInactive)
         );
         assert_eq!(ui.composer, "draft message");
+        assert_eq!(
+            ui.handle_event_for_state(
+                Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL,)),
+                &state,
+            ),
+            Some(Intent::Quit)
+        );
 
         let combined = screen(&state, &ui, 36, 12);
         assert!(combined.contains("Saved threads"));

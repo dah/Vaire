@@ -5,6 +5,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const MAX_DIAGNOSTIC_BYTES: u64 = 1024 * 1024;
+const MAX_DIAGNOSTIC_RECORD_BYTES: u64 = 512;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DiagnosticEvent {
     pub category: &'static str,
@@ -61,7 +64,12 @@ impl DiagnosticSink for MemoryDiagnosticSink {
 }
 
 pub struct FileDiagnosticSink {
-    file: Mutex<File>,
+    file: Mutex<DiagnosticFile>,
+}
+
+struct DiagnosticFile {
+    file: File,
+    bytes_reserved: u64,
 }
 
 impl FileDiagnosticSink {
@@ -77,8 +85,16 @@ impl FileDiagnosticSink {
             .mode(0o600)
             .open(path)?;
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        let mut bytes_reserved = file.metadata()?.len();
+        if bytes_reserved.saturating_add(MAX_DIAGNOSTIC_RECORD_BYTES) > MAX_DIAGNOSTIC_BYTES {
+            file.set_len(0)?;
+            bytes_reserved = 0;
+        }
         Ok(Self {
-            file: Mutex::new(file),
+            file: Mutex::new(DiagnosticFile {
+                file,
+                bytes_reserved,
+            }),
         })
     }
 }
@@ -93,21 +109,35 @@ impl DiagnosticSink for FileDiagnosticSink {
             .as_deref()
             .map(sanitize_metadata)
             .unwrap_or_else(|| "-".to_owned());
-        if let Ok(mut file) = self.file.lock() {
-            let _ = writeln!(
-                file,
-                "time={timestamp} category={} generation={} method={} request_id={} bytes={}",
-                sanitize_metadata(event.category),
-                event.generation,
-                method,
-                event
-                    .request_id
-                    .map_or_else(|| "-".to_owned(), |id| id.to_string()),
-                event
-                    .byte_count
-                    .map_or_else(|| "-".to_owned(), |count| count.to_string())
-            );
-            let _ = file.flush();
+        let line = format!(
+            "time={timestamp} category={} generation={} method={} request_id={} bytes={}",
+            sanitize_metadata(event.category),
+            event.generation,
+            method,
+            event
+                .request_id
+                .map_or_else(|| "-".to_owned(), |id| id.to_string()),
+            event
+                .byte_count
+                .map_or_else(|| "-".to_owned(), |count| count.to_string())
+        );
+        if let Ok(mut state) = self.file.lock() {
+            let line_bytes = line.len() as u64 + 1;
+            if state.bytes_reserved.saturating_add(line_bytes) > MAX_DIAGNOSTIC_BYTES {
+                if state.file.set_len(0).is_err() {
+                    return;
+                }
+                state.bytes_reserved = 0;
+                const ROTATION_MARKER: &str = "diagnostics_rotated\n";
+                if state.file.write_all(ROTATION_MARKER.as_bytes()).is_err() {
+                    return;
+                }
+                state.bytes_reserved = ROTATION_MARKER.len() as u64;
+            }
+            if writeln!(state.file, "{line}").is_ok() {
+                state.bytes_reserved += line_bytes;
+                let _ = state.file.flush();
+            }
         }
     }
 }
@@ -132,7 +162,10 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{redact_remote_message, DiagnosticEvent, DiagnosticSink, FileDiagnosticSink};
+    use super::{
+        redact_remote_message, DiagnosticEvent, DiagnosticSink, FileDiagnosticSink,
+        MAX_DIAGNOSTIC_BYTES,
+    };
 
     #[test]
     fn diagnostics_do_not_preserve_untrusted_payloads() {
@@ -154,8 +187,44 @@ mod tests {
             byte_count: Some(4),
         });
         let contents = fs::read_to_string(path).unwrap();
+        assert_eq!(contents.lines().count(), 1);
         assert!(contents.contains("method=methodTOKENsecret"));
-        assert!(!contents.contains('\n') || contents.ends_with('\n'));
+        assert!(contents.ends_with('\n'));
         assert!(!contents.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn diagnostic_file_stays_bounded_after_oversized_state_and_event_flood() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("diagnostics").join("agentharness.log");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, vec![b'x'; MAX_DIAGNOSTIC_BYTES as usize + 1]).unwrap();
+
+        let sink = FileDiagnosticSink::create(&path).unwrap();
+        for _ in 0..10_000 {
+            sink.record(DiagnosticEvent {
+                category: "stderr",
+                generation: u64::MAX,
+                method: Some("x".repeat(256)),
+                request_id: Some(u64::MAX),
+                byte_count: Some(usize::MAX),
+            });
+        }
+        sink.record(DiagnosticEvent {
+            category: "protocol_terminal",
+            generation: 9,
+            method: Some("turn/completed".to_owned()),
+            request_id: Some(7),
+            byte_count: None,
+        });
+        drop(sink);
+
+        let contents = fs::read(&path).unwrap();
+        assert!(contents.len() as u64 <= MAX_DIAGNOSTIC_BYTES);
+        assert!(contents.ends_with(b"\n"));
+        let text = String::from_utf8(contents).unwrap();
+        assert!(text.contains("diagnostics_rotated"));
+        assert!(text.contains("category=protocol_terminal"));
+        assert!(text.contains("method=turn/completed"));
     }
 }

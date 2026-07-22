@@ -95,9 +95,17 @@ mod tests {
         assert_eq!(parse("/resume"), Ok(Intent::Resume));
         assert_eq!(parse("/new"), Ok(Intent::NewThread));
         assert_eq!(parse("/thinking"), Ok(Intent::ToggleThinking));
+        assert_eq!(parse("/reasoning"), Ok(Intent::ShowReasoning));
         assert_eq!(parse("/login"), Ok(Intent::Login));
         assert_eq!(parse("/login browser"), Ok(Intent::Login));
         assert_eq!(parse("/login device"), Ok(Intent::LoginDevice));
+        assert_eq!(parse("/logout"), Ok(Intent::Logout));
+        assert_eq!(parse("/help"), Ok(Intent::Help));
+        assert_eq!(parse("/quit"), Ok(Intent::Quit));
+        assert_eq!(
+            parse("\n first line\nsecond line \t"),
+            Ok(Intent::SendMessage("first line\nsecond line".to_owned()))
+        );
     }
 
     #[test]
@@ -113,6 +121,15 @@ mod tests {
         assert_eq!(
             parse("/thinking hidden"),
             Err(ParseError::UnexpectedArgument("/thinking".to_owned()))
+        );
+        assert_eq!(parse(" \n\t "), Err(ParseError::Empty));
+        assert_eq!(
+            parse("/quit\nthis must stay local"),
+            Err(ParseError::UnexpectedArgument("/quit".to_owned()))
+        );
+        assert_eq!(
+            parse("/branch\nthis must stay local"),
+            Err(ParseError::UnknownCommand("/branch".to_owned()))
         );
         assert_eq!(
             parse("/login api-key").unwrap_err().to_string(),

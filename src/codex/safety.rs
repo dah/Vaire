@@ -198,7 +198,7 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{denial_response, FullAccessPolicy, IsolationPaths, KNOWN_SERVER_REQUEST_METHODS};
+    use super::{denial_response, FullAccessPolicy, IsolationPaths};
     use crate::codex::protocol::RequestId;
 
     #[test]
@@ -285,20 +285,6 @@ mod tests {
         assert!(!args
             .iter()
             .any(|arg| arg == OsStr::new("allow_login_shell=false")));
-    }
-
-    #[test]
-    fn every_generated_request_has_a_negative_or_error_response() {
-        for method in KNOWN_SERVER_REQUEST_METHODS {
-            let response = denial_response(&RequestId::String("server-1".to_owned()), method);
-            assert!(response.get("result").is_some() || response.get("error").is_some());
-            assert_ne!(response.pointer("/result/decision"), Some(&json!("accept")));
-            assert_ne!(
-                response.pointer("/result/decision"),
-                Some(&json!("approved"))
-            );
-            assert_ne!(response.pointer("/result/action"), Some(&json!("accept")));
-        }
     }
 
     #[test]

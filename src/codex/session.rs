@@ -5,18 +5,54 @@ use serde_json::{json, Value};
 use thiserror::Error;
 
 use super::protocol::{
-    parse_notification, AccountReadResponse, CancelLoginAccountParams, CancelLoginAccountResponse,
+    parse_notification, valid_identifier, validate_thread_snapshot, validate_turn_snapshot,
+    AccountReadResponse, CancelLoginAccountParams, CancelLoginAccountResponse,
     CancelLoginAccountStatus, InitializeParams, InitializeResponse, LoginAccountParams,
-    LoginAccountResponse, ModelInfo, ModelListParams, ModelListResponse, ProtocolEvent,
-    ReasoningSummary, ThreadDeleteParams, ThreadDeleteResponse, ThreadItemContent, ThreadListEntry,
-    ThreadListParams, ThreadListResponse, ThreadReadParams, ThreadResponse, ThreadResumeParams,
-    ThreadSnapshot, ThreadSourceKind, ThreadStartParams, TurnInterruptParams, TurnStartParams,
-    TurnStartResponse, UserInput,
+    LoginAccountResponse, LogoutAccountResponse, ModelInfo, ModelListParams, ModelListResponse,
+    ProtocolEvent, ReasoningSummary, ThreadDeleteParams, ThreadDeleteResponse, ThreadItemContent,
+    ThreadListEntry, ThreadListParams, ThreadListResponse, ThreadReadParams, ThreadResponse,
+    ThreadResumeParams, ThreadSnapshot, ThreadSourceKind, ThreadStartParams, TurnInterruptParams,
+    TurnInterruptResponse, TurnStartParams, TurnStartResponse, UserInput,
 };
 use super::safety::{FullAccessPolicy, IsolationPaths};
 use super::transport::{AppServerTransport, TransportError};
 use crate::app::{ModelChoice, ThreadChoice, TranscriptEntry, TranscriptRole};
 use crate::persistence::AccountScope;
+
+const MAX_PAGINATION_PAGES: usize = 256;
+const MAX_MODEL_PAGE_ITEMS: usize = 1_024;
+const MAX_THREAD_PAGE_ITEMS: usize = 50;
+const MAX_PAGINATION_ITEMS: usize = 16_384;
+const MAX_PAGINATION_RETAINED_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CURSOR_BYTES: usize = 16 * 1024;
+
+#[derive(Default)]
+struct PaginationBudget {
+    items: usize,
+    retained_bytes: usize,
+}
+
+impl PaginationBudget {
+    fn retain(&mut self, method: &'static str, bytes: usize) -> Result<(), SessionError> {
+        self.items = self.items.checked_add(1).ok_or_else(|| {
+            SessionError::Protocol(format!("{method} exceeded the retained item limit"))
+        })?;
+        self.retained_bytes = self.retained_bytes.checked_add(bytes).ok_or_else(|| {
+            SessionError::Protocol(format!("{method} exceeded the retained byte limit"))
+        })?;
+        if self.items > MAX_PAGINATION_ITEMS {
+            return Err(SessionError::Protocol(format!(
+                "{method} exceeded the retained item limit"
+            )));
+        }
+        if self.retained_bytes > MAX_PAGINATION_RETAINED_BYTES {
+            return Err(SessionError::Protocol(format!(
+                "{method} exceeded the retained byte limit"
+            )));
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AccountState {
@@ -122,14 +158,19 @@ impl SessionService {
                 "login did not return the ChatGPT browser flow".to_owned(),
             ));
         }
-        Ok(LoginChallenge {
-            login_id: response.login_id.ok_or_else(|| {
-                SessionError::Protocol("login response omitted loginId".to_owned())
-            })?,
-            auth_url: response.auth_url.ok_or_else(|| {
-                SessionError::Protocol("login response omitted authUrl".to_owned())
-            })?,
-        })
+        let login_id = response
+            .login_id
+            .filter(|value| valid_identifier(value))
+            .ok_or_else(|| {
+                SessionError::Protocol(
+                    "login response omitted or returned invalid loginId".to_owned(),
+                )
+            })?;
+        let auth_url = response
+            .auth_url
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| SessionError::Protocol("login response omitted authUrl".to_owned()))?;
+        Ok(LoginChallenge { login_id, auth_url })
     }
 
     pub async fn start_device_login(&self) -> Result<DeviceLoginChallenge, SessionError> {
@@ -147,16 +188,30 @@ impl SessionService {
                 "login did not return the ChatGPT device-code flow".to_owned(),
             ));
         }
-        Ok(DeviceLoginChallenge {
-            login_id: response.login_id.ok_or_else(|| {
-                SessionError::Protocol("device login response omitted loginId".to_owned())
-            })?,
-            verification_url: response.verification_url.ok_or_else(|| {
+        let login_id = response
+            .login_id
+            .filter(|value| valid_identifier(value))
+            .ok_or_else(|| {
+                SessionError::Protocol(
+                    "device login response omitted or returned invalid loginId".to_owned(),
+                )
+            })?;
+        let verification_url = response
+            .verification_url
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
                 SessionError::Protocol("device login response omitted verificationUrl".to_owned())
-            })?,
-            user_code: response.user_code.ok_or_else(|| {
+            })?;
+        let user_code = response
+            .user_code
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
                 SessionError::Protocol("device login response omitted userCode".to_owned())
-            })?,
+            })?;
+        Ok(DeviceLoginChallenge {
+            login_id,
+            verification_url,
+            user_code,
         })
     }
 
@@ -177,9 +232,12 @@ impl SessionService {
     }
 
     pub async fn logout(&self) -> Result<(), SessionError> {
-        self.transport
-            .request_default("account/logout", json!({}))
-            .await?;
+        let _: LogoutAccountResponse = decode(
+            "account/logout",
+            self.transport
+                .request_default("account/logout", json!({}))
+                .await?,
+        )?;
         Ok(())
     }
 
@@ -188,6 +246,8 @@ impl SessionService {
         let mut seen_cursors = HashSet::new();
         let mut seen_models = HashSet::new();
         let mut models = Vec::new();
+        let mut pages = 0;
+        let mut budget = PaginationBudget::default();
         loop {
             let response: ModelListResponse = decode(
                 "model/list",
@@ -201,19 +261,33 @@ impl SessionService {
                     )
                     .await?,
             )?;
+            pages += 1;
+            validate_page_len("model/list", response.data.len(), MAX_MODEL_PAGE_ITEMS)?;
             for model in response.data {
-                if !model.hidden && seen_models.insert(model.id.clone()) {
+                if model.hidden {
+                    continue;
+                }
+                if !valid_identifier(&model.id)
+                    || !valid_identifier(&model.default_reasoning_effort)
+                    || model
+                        .supported_reasoning_efforts
+                        .iter()
+                        .any(|option| !valid_identifier(&option.reasoning_effort))
+                {
+                    return Err(SessionError::Protocol(
+                        "model/list returned an invalid model or reasoning id".to_owned(),
+                    ));
+                }
+                if seen_models.insert(model.id.clone()) {
+                    budget.retain("model/list", model_retained_bytes(&model))?;
                     models.push(model);
                 }
             }
-            let Some(next) = response.next_cursor else {
+            let Some(next) =
+                next_cursor("model/list", pages, &mut seen_cursors, response.next_cursor)?
+            else {
                 break;
             };
-            if !seen_cursors.insert(next.clone()) {
-                return Err(SessionError::Protocol(
-                    "model/list returned a cursor cycle".to_owned(),
-                ));
-            }
             cursor = Some(next);
         }
         Ok(models)
@@ -224,6 +298,8 @@ impl SessionService {
         let mut seen_cursors = HashSet::new();
         let mut seen_threads = HashSet::new();
         let mut threads = Vec::new();
+        let mut pages = 0;
+        let mut budget = PaginationBudget::default();
         loop {
             let response: ThreadListResponse = decode(
                 "thread/list",
@@ -245,10 +321,12 @@ impl SessionService {
                     )
                     .await?,
             )?;
+            pages += 1;
+            validate_page_len("thread/list", response.data.len(), MAX_THREAD_PAGE_ITEMS)?;
             for thread in response.data {
-                if thread.id.trim().is_empty() {
+                if !valid_identifier(&thread.id) {
                     return Err(SessionError::Protocol(
-                        "thread/list returned an empty thread id".to_owned(),
+                        "thread/list returned an invalid thread id".to_owned(),
                     ));
                 }
                 if thread.cwd != self.paths.conversation {
@@ -257,18 +335,25 @@ impl SessionService {
                             .to_owned(),
                     ));
                 }
+                if !thread.source.is_supported_resume_source() {
+                    return Err(SessionError::Protocol(
+                        "thread/list returned a thread from an unsupported source".to_owned(),
+                    ));
+                }
                 if !thread.ephemeral && seen_threads.insert(thread.id.clone()) {
+                    budget.retain("thread/list", thread_retained_bytes(&thread))?;
                     threads.push(thread);
                 }
             }
-            let Some(next) = response.next_cursor else {
+            let Some(next) = next_cursor(
+                "thread/list",
+                pages,
+                &mut seen_cursors,
+                response.next_cursor,
+            )?
+            else {
                 break;
             };
-            if next.is_empty() || !seen_cursors.insert(next.clone()) {
-                return Err(SessionError::Protocol(
-                    "thread/list returned an invalid cursor cycle".to_owned(),
-                ));
-            }
             cursor = Some(next);
         }
         Ok(threads)
@@ -282,6 +367,9 @@ impl SessionService {
                 .request_default("thread/start", params)
                 .await?,
         )?;
+        validate_thread_snapshot(&response.thread).map_err(|_| {
+            SessionError::Protocol("thread/start returned an invalid thread snapshot".to_owned())
+        })?;
         Ok(response.thread)
     }
 
@@ -307,6 +395,9 @@ impl SessionService {
                 )
                 .await?,
         )?;
+        validate_thread_snapshot(&response.thread).map_err(|_| {
+            SessionError::Protocol("thread/resume returned an invalid thread snapshot".to_owned())
+        })?;
         if response.thread.id != thread_id {
             return Err(SessionError::Protocol(
                 "thread/resume returned a different thread id".to_owned(),
@@ -328,6 +419,9 @@ impl SessionService {
                 )
                 .await?,
         )?;
+        validate_thread_snapshot(&response.thread).map_err(|_| {
+            SessionError::Protocol("thread/read returned an invalid thread snapshot".to_owned())
+        })?;
         if response.thread.id != thread_id {
             return Err(SessionError::Protocol(
                 "thread/read returned a different thread id".to_owned(),
@@ -359,7 +453,7 @@ impl SessionService {
         effort: &str,
     ) -> Result<TurnStartResponse, SessionError> {
         let overrides = self.policy.turn_start_overrides(&self.paths.conversation);
-        decode(
+        let response: TurnStartResponse = decode(
             "turn/start",
             self.transport
                 .request_default(
@@ -376,19 +470,31 @@ impl SessionService {
                     },
                 )
                 .await?,
-        )
+        )?;
+        validate_turn_snapshot(&response.turn).map_err(|_| {
+            SessionError::Protocol("turn/start returned an invalid turn snapshot".to_owned())
+        })?;
+        if response.turn.status != super::protocol::TurnStatus::InProgress {
+            return Err(SessionError::Protocol(
+                "turn/start returned a terminal or unknown turn status".to_owned(),
+            ));
+        }
+        Ok(response)
     }
 
     pub async fn interrupt_turn(&self, thread_id: &str, turn_id: &str) -> Result<(), SessionError> {
-        self.transport
-            .request_default(
-                "turn/interrupt",
-                TurnInterruptParams {
-                    thread_id: thread_id.to_owned(),
-                    turn_id: turn_id.to_owned(),
-                },
-            )
-            .await?;
+        let _: TurnInterruptResponse = decode(
+            "turn/interrupt",
+            self.transport
+                .request_default(
+                    "turn/interrupt",
+                    TurnInterruptParams {
+                        thread_id: thread_id.to_owned(),
+                        turn_id: turn_id.to_owned(),
+                    },
+                )
+                .await?,
+        )?;
         Ok(())
     }
 
@@ -437,6 +543,81 @@ impl SessionService {
 
 fn decode<T: DeserializeOwned>(method: &'static str, value: Value) -> Result<T, SessionError> {
     serde_json::from_value(value).map_err(|_| SessionError::Decode { method })
+}
+
+fn next_cursor(
+    method: &'static str,
+    pages: usize,
+    seen: &mut HashSet<String>,
+    next: Option<String>,
+) -> Result<Option<String>, SessionError> {
+    let Some(next) = next else {
+        return Ok(None);
+    };
+    if next.is_empty() {
+        return Err(SessionError::Protocol(format!(
+            "{method} returned an empty pagination cursor"
+        )));
+    }
+    if next.len() > MAX_CURSOR_BYTES || next.chars().any(crate::text::is_terminal_unsafe) {
+        return Err(SessionError::Protocol(format!(
+            "{method} returned an invalid pagination cursor"
+        )));
+    }
+    if seen.contains(&next) {
+        return Err(SessionError::Protocol(format!(
+            "{method} returned a cursor cycle"
+        )));
+    }
+    if pages >= MAX_PAGINATION_PAGES {
+        return Err(SessionError::Protocol(format!(
+            "{method} exceeded the pagination limit"
+        )));
+    }
+    seen.insert(next.clone());
+    Ok(Some(next))
+}
+
+fn validate_page_len(
+    method: &'static str,
+    items: usize,
+    maximum: usize,
+) -> Result<(), SessionError> {
+    if items > maximum {
+        Err(SessionError::Protocol(format!(
+            "{method} exceeded the page item limit"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn model_retained_bytes(model: &ModelInfo) -> usize {
+    let option_bytes = model
+        .supported_reasoning_efforts
+        .iter()
+        .fold(0usize, |total, option| {
+            total
+                .saturating_add(option.reasoning_effort.len())
+                .saturating_add(option.description.len())
+        });
+    model
+        .id
+        .len()
+        .saturating_mul(2)
+        .saturating_add(model.display_name.len())
+        .saturating_add(model.default_reasoning_effort.len())
+        .saturating_add(option_bytes)
+}
+
+fn thread_retained_bytes(thread: &ThreadListEntry) -> usize {
+    thread
+        .id
+        .len()
+        .saturating_mul(2)
+        .saturating_add(thread.name.as_deref().map_or(0, str::len))
+        .saturating_add(thread.preview.len())
+        .saturating_add(thread.cwd.to_string_lossy().len())
 }
 
 pub fn model_choices(models: &[ModelInfo]) -> Vec<ModelChoice> {
@@ -526,10 +707,16 @@ pub fn history_entries(thread: &ThreadSnapshot) -> Vec<TranscriptEntry> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{history_entries, model_choices, thread_choices};
+    use std::collections::HashSet;
+
+    use super::{
+        history_entries, model_choices, next_cursor, thread_choices, validate_page_len,
+        PaginationBudget, SessionError, MAX_CURSOR_BYTES, MAX_PAGINATION_RETAINED_BYTES,
+        MAX_THREAD_PAGE_ITEMS,
+    };
     use crate::codex::protocol::{
-        ModelInfo, ReasoningEffortOption, ThreadItem, ThreadItemContent, ThreadListEntry,
-        ThreadSnapshot, TurnSnapshot, TurnStatus, UserInput,
+        ModelInfo, ReasoningEffortOption, SessionSource, SessionSourceName, ThreadItem,
+        ThreadItemContent, ThreadListEntry, ThreadSnapshot, TurnSnapshot, TurnStatus, UserInput,
     };
 
     #[test]
@@ -600,6 +787,7 @@ mod tests {
                 updated_at: 3,
                 cwd: PathBuf::from("/tmp/conversation"),
                 ephemeral: false,
+                source: SessionSource::Named(SessionSourceName::AppServer),
             },
             ThreadListEntry {
                 id: "preview".to_owned(),
@@ -609,6 +797,7 @@ mod tests {
                 updated_at: 2,
                 cwd: PathBuf::from("/tmp/conversation"),
                 ephemeral: false,
+                source: SessionSource::Named(SessionSourceName::Vscode),
             },
             ThreadListEntry {
                 id: "empty".to_owned(),
@@ -618,10 +807,39 @@ mod tests {
                 updated_at: 1,
                 cwd: PathBuf::from("/tmp/conversation"),
                 ephemeral: false,
+                source: SessionSource::Named(SessionSourceName::AppServer),
             },
         ]);
         assert_eq!(choices[0].title, "A name");
         assert_eq!(choices[1].title, "First line");
         assert_eq!(choices[2].title, "Untitled thread");
+    }
+
+    #[test]
+    fn pagination_limits_bound_page_shape_cursor_and_retained_memory() {
+        assert!(matches!(
+            validate_page_len("thread/list", MAX_THREAD_PAGE_ITEMS + 1, MAX_THREAD_PAGE_ITEMS),
+            Err(SessionError::Protocol(message)) if message.contains("page item limit")
+        ));
+
+        let mut seen = HashSet::new();
+        assert!(matches!(
+            next_cursor(
+                "model/list",
+                1,
+                &mut seen,
+                Some("x".repeat(MAX_CURSOR_BYTES + 1)),
+            ),
+            Err(SessionError::Protocol(message)) if message.contains("pagination cursor")
+        ));
+
+        let mut budget = PaginationBudget::default();
+        budget
+            .retain("model/list", MAX_PAGINATION_RETAINED_BYTES)
+            .unwrap();
+        assert!(matches!(
+            budget.retain("model/list", 1),
+            Err(SessionError::Protocol(message)) if message.contains("retained byte limit")
+        ));
     }
 }

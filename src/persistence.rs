@@ -1,13 +1,20 @@
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::text::is_terminal_unsafe;
+
 pub const PREFERENCES_VERSION: u32 = 1;
+const MAX_PREFERENCES_BYTES: usize = 1024 * 1024;
+const MAX_PREFERENCE_STRING_BYTES: usize = 16 * 1024;
+const MAX_EMAIL_BYTES: usize = 320;
+static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
@@ -18,7 +25,12 @@ pub enum AccountScope {
 impl AccountScope {
     pub fn from_chatgpt_email(email: &str) -> Option<Self> {
         let normalized = email.trim().to_ascii_lowercase();
-        (!normalized.is_empty()).then_some(Self::ChatgptEmail(normalized))
+        (!normalized.is_empty()
+            && normalized.len() <= MAX_EMAIL_BYTES
+            && !normalized
+                .chars()
+                .any(|value| is_terminal_unsafe(value) || value.is_whitespace()))
+        .then_some(Self::ChatgptEmail(normalized))
     }
 }
 
@@ -91,12 +103,99 @@ impl FilePreferences {
             )
         })
     }
+
+    fn create_temp_file(&self, parent: &Path) -> Result<(PathBuf, File), io::Error> {
+        let name = self
+            .path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("preferences");
+        for _ in 0..128 {
+            let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let path = parent.join(format!(".{name}.{}.{}.tmp", std::process::id(), sequence));
+            match OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(&path)
+            {
+                Ok(file) => return Ok((path, file)),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not allocate a unique preferences temporary file",
+        ))
+    }
+}
+
+fn valid_preference_string(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value == value.trim()
+        && value.len() <= MAX_PREFERENCE_STRING_BYTES
+        && !value.chars().any(is_terminal_unsafe)
+}
+
+fn valid_scope(scope: &AccountScope) -> bool {
+    match scope {
+        AccountScope::ChatgptEmail(email) => {
+            AccountScope::from_chatgpt_email(email).as_ref() == Some(scope)
+        }
+    }
+}
+
+fn valid_preferences(preferences: &PreferencesV1) -> bool {
+    if preferences.version != PREFERENCES_VERSION
+        || preferences
+            .account_scope
+            .as_ref()
+            .is_some_and(|scope| !valid_scope(scope))
+        || preferences
+            .thread_id
+            .as_deref()
+            .is_some_and(|value| !valid_preference_string(value))
+        || preferences
+            .model_id
+            .as_deref()
+            .is_some_and(|value| !valid_preference_string(value))
+        || preferences
+            .reasoning_effort
+            .as_deref()
+            .is_some_and(|value| !valid_preference_string(value))
+        || preferences
+            .thread_account_scopes
+            .iter()
+            .any(|(id, scope)| !valid_preference_string(id) || !valid_scope(scope))
+    {
+        return false;
+    }
+
+    match (
+        preferences.thread_id.as_ref(),
+        preferences.account_scope.as_ref(),
+    ) {
+        (Some(thread_id), Some(account_scope)) => preferences
+            .thread_account_scopes
+            .get(thread_id)
+            .is_none_or(|registered_scope| registered_scope == account_scope),
+        _ => true,
+    }
+}
+
+fn corrupt_load_outcome() -> LoadOutcome {
+    LoadOutcome {
+        preferences: PreferencesV1::default(),
+        notice: Some(LoadNotice::Corrupt),
+        may_overwrite: false,
+    }
 }
 
 impl PreferencesPort for FilePreferences {
     fn load(&self) -> Result<LoadOutcome, PersistenceError> {
-        let bytes = match fs::read(&self.path) {
-            Ok(bytes) => bytes,
+        let file = match File::open(&self.path) {
+            Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Ok(LoadOutcome {
                     preferences: PreferencesV1::default(),
@@ -106,21 +205,29 @@ impl PreferencesPort for FilePreferences {
             }
             Err(error) => return Err(error.into()),
         };
+        let mut bytes = Vec::new();
+        file.take((MAX_PREFERENCES_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > MAX_PREFERENCES_BYTES {
+            return Ok(corrupt_load_outcome());
+        }
 
         let raw: serde_json::Value = match serde_json::from_slice(&bytes) {
             Ok(value) => value,
-            Err(_) => {
-                return Ok(LoadOutcome {
-                    preferences: PreferencesV1::default(),
-                    notice: Some(LoadNotice::Corrupt),
-                    may_overwrite: false,
-                })
+            Err(_) => return Ok(corrupt_load_outcome()),
+        };
+        let version = match raw.get("version") {
+            None => 0,
+            Some(value) => {
+                let Some(version) = value
+                    .as_u64()
+                    .and_then(|version| u32::try_from(version).ok())
+                else {
+                    return Ok(corrupt_load_outcome());
+                };
+                version
             }
         };
-        let version = raw
-            .get("version")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0) as u32;
         if version != PREFERENCES_VERSION {
             return Ok(LoadOutcome {
                 preferences: PreferencesV1::default(),
@@ -130,46 +237,38 @@ impl PreferencesPort for FilePreferences {
         }
 
         match serde_json::from_value(raw) {
-            Ok(preferences) => Ok(LoadOutcome {
+            Ok(preferences) if valid_preferences(&preferences) => Ok(LoadOutcome {
                 preferences,
                 notice: None,
                 may_overwrite: true,
             }),
-            Err(_) => Ok(LoadOutcome {
-                preferences: PreferencesV1::default(),
-                notice: Some(LoadNotice::Corrupt),
-                may_overwrite: false,
-            }),
+            Ok(_) | Err(_) => Ok(corrupt_load_outcome()),
         }
     }
 
     fn save(&self, preferences: &PreferencesV1) -> Result<(), PersistenceError> {
-        if preferences.version != PREFERENCES_VERSION {
+        if !valid_preferences(preferences) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "cannot write an unsupported preferences version",
+                "cannot write invalid preferences",
+            )
+            .into());
+        }
+        let bytes = serde_json::to_vec_pretty(preferences)?;
+        // Include the trailing newline without arithmetic that could wrap at an adversarial
+        // boundary on a narrower target.
+        if bytes.len() >= MAX_PREFERENCES_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "preferences exceeded the size limit",
             )
             .into());
         }
         let parent = self.parent()?;
         fs::create_dir_all(parent)?;
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
-        let temp_path = parent.join(format!(
-            ".{}.{}.tmp",
-            self.path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("preferences"),
-            std::process::id()
-        ));
-        let bytes = serde_json::to_vec_pretty(preferences)?;
+        let (temp_path, mut file) = self.create_temp_file(parent)?;
         let write_result = (|| -> io::Result<()> {
-            let mut file = OpenOptions::new()
-                .create(true)
-                .truncate(true)
-                .write(true)
-                .mode(0o600)
-                .open(&temp_path)?;
             file.set_permissions(fs::Permissions::from_mode(0o600))?;
             file.write_all(&bytes)?;
             file.write_all(b"\n")?;
@@ -189,10 +288,11 @@ impl PreferencesPort for FilePreferences {
 mod tests {
     use super::{
         AccountScope, FilePreferences, LoadNotice, PreferencesPort, PreferencesV1,
-        PREFERENCES_VERSION,
+        MAX_PREFERENCES_BYTES, PREFERENCES_VERSION,
     };
     use std::collections::BTreeMap;
     use std::fs;
+    use std::os::unix::fs::symlink;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
@@ -250,5 +350,97 @@ mod tests {
         let future = store.load().unwrap();
         assert_eq!(future.notice, Some(LoadNotice::UnsupportedVersion(99)));
         assert!(!future.may_overwrite);
+    }
+
+    #[test]
+    fn rejects_semantically_corrupt_and_oversized_preferences_without_overwriting_them() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("preferences.json");
+        let store = FilePreferences::new(&path);
+        let malformed = [
+            br#"{"version":1,"account_scope":{"kind":"chatgpt_email","value":" USER@example.com "},"thread_id":null,"model_id":null,"reasoning_effort":null}"#.as_slice(),
+            br#"{"version":1,"account_scope":{"kind":"chatgpt_email","value":"a@example.com"},"thread_id":"thr","model_id":null,"reasoning_effort":null,"thread_account_scopes":{"thr":{"kind":"chatgpt_email","value":"b@example.com"}}}"#.as_slice(),
+            br#"{"version":1,"account_scope":null,"thread_id":" ","model_id":null,"reasoning_effort":null}"#.as_slice(),
+            br#"{"version":4294967297}"#.as_slice(),
+        ];
+        for bytes in malformed {
+            fs::write(&path, bytes).unwrap();
+            let outcome = store.load().unwrap();
+            assert_eq!(outcome.notice, Some(LoadNotice::Corrupt));
+            assert!(!outcome.may_overwrite);
+        }
+
+        fs::write(&path, vec![b' '; MAX_PREFERENCES_BYTES + 1]).unwrap();
+        let oversized = store.load().unwrap();
+        assert_eq!(oversized.notice, Some(LoadNotice::Corrupt));
+        assert!(!oversized.may_overwrite);
+
+        let valid = PreferencesV1::default();
+        store.save(&valid).unwrap();
+        let before = fs::read(&path).unwrap();
+        let mut too_large = valid;
+        too_large.model_id = Some("m".repeat(MAX_PREFERENCES_BYTES));
+        assert!(store.save(&too_large).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn atomic_save_never_follows_a_predictable_legacy_temp_symlink() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("preferences.json");
+        let victim = temp.path().join("victim.txt");
+        fs::write(&victim, b"must remain unchanged").unwrap();
+        let legacy_temp = temp
+            .path()
+            .join(format!(".preferences.json.{}.tmp", std::process::id()));
+        symlink(&victim, &legacy_temp).unwrap();
+
+        let store = FilePreferences::new(&path);
+        store.save(&PreferencesV1::default()).unwrap();
+
+        assert_eq!(fs::read(&victim).unwrap(), b"must remain unchanged");
+        assert!(!fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(store.load().unwrap().preferences, PreferencesV1::default());
+    }
+
+    #[test]
+    fn failed_atomic_replace_preserves_the_target_and_cleans_its_temp_file() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("preferences.json");
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("sentinel"), b"preserve me").unwrap();
+        let store = FilePreferences::new(&path);
+
+        assert!(store.save(&PreferencesV1::default()).is_err());
+
+        assert_eq!(fs::read(path.join("sentinel")).unwrap(), b"preserve me");
+        let temp_prefix = format!(".preferences.json.{}.", std::process::id());
+        assert!(fs::read_dir(temp.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&temp_prefix)
+        }));
+    }
+
+    #[test]
+    fn account_scope_constructor_rejects_non_identity_and_normalizes_valid_email() {
+        assert_eq!(
+            AccountScope::from_chatgpt_email(" USER@Example.COM "),
+            Some(AccountScope::ChatgptEmail("user@example.com".to_owned()))
+        );
+        for invalid in [
+            "",
+            "   ",
+            "a b@example.com",
+            "a\nb@example.com",
+            "spoof\u{202e}@example.com",
+        ] {
+            assert_eq!(AccountScope::from_chatgpt_email(invalid), None);
+        }
     }
 }

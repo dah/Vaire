@@ -47,6 +47,13 @@ inheritance. Codex's default name-based filtering of variables containing `KEY`,
 credential/config files, and authenticated CLIs may remain available to model-run commands.
 Sanitized diagnostics are written to the diagnostics subdirectory.
 
+To stay responsive when app-server or local state is unexpectedly large, AgentHarness enforces
+explicit resource ceilings. Drafts are limited to 128 KiB; the UI retains only a recent bounded
+transcript slice (at most 1 MiB and 2,048 entries), while Codex remains the source of truth for
+complete thread history. Protocol frames, saved preferences, and each rotating diagnostics file
+are also capped at 1 MiB. A limit violation is reported instead of allocating without bound or
+silently replacing the active thread.
+
 ## Commands and keys
 
 - **/login**, **/login browser**, **/login device**, **/logout**, **/new**, **/resume**,

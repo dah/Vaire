@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -25,6 +25,8 @@ use crate::diagnostics::{
 
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const EVENT_QUEUE_CAPACITY: usize = 64;
+pub const MAX_PENDING_REQUESTS: usize = 128;
+const RETIRED_REQUEST_CAPACITY: usize = 1_024;
 // Installed 0.144.6 schema notifications containing tool output the current UI does not render.
 // Item/turn terminal events remain queued so the conversation lifecycle still completes.
 const UNRENDERED_TOOL_PROGRESS_NOTIFICATIONS: [&str; 7] = [
@@ -82,7 +84,9 @@ impl RequestTimeouts {
     pub fn for_method(&self, method: &str) -> Duration {
         match method {
             "initialize" => self.initialize,
-            "account/read" | "account/login/start" | "account/logout" => self.auth,
+            "account/read" | "account/login/start" | "account/login/cancel" | "account/logout" => {
+                self.auth
+            }
             "model/list" => self.catalog,
             "thread/start" | "thread/resume" | "thread/read" | "thread/list" | "thread/delete" => {
                 self.thread
@@ -173,6 +177,50 @@ struct PendingRequest {
     deadline: Instant,
     method: String,
     reply: oneshot::Sender<Result<Value, TransportError>>,
+}
+
+struct OutboundRequestIds {
+    next: Option<u64>,
+}
+
+impl Default for OutboundRequestIds {
+    fn default() -> Self {
+        Self { next: Some(1) }
+    }
+}
+
+impl OutboundRequestIds {
+    fn allocate(&mut self) -> Result<u64, TransportError> {
+        let id = self.next.ok_or_else(|| {
+            TransportError::Protocol("app-server request id space was exhausted".to_owned())
+        })?;
+        self.next = id.checked_add(1);
+        Ok(id)
+    }
+}
+
+#[derive(Default)]
+struct RetiredRequestIds {
+    ids: HashSet<u64>,
+    order: VecDeque<u64>,
+}
+
+impl RetiredRequestIds {
+    fn insert(&mut self, id: u64) {
+        if !self.ids.insert(id) {
+            return;
+        }
+        self.order.push_back(id);
+        if self.order.len() > RETIRED_REQUEST_CAPACITY {
+            if let Some(expired) = self.order.pop_front() {
+                self.ids.remove(&expired);
+            }
+        }
+    }
+
+    fn remove(&mut self, id: u64) -> bool {
+        self.ids.remove(&id)
+    }
 }
 
 struct ConnectionRuntime {
@@ -303,11 +351,10 @@ impl AppServerTransport {
         params: T,
         timeout: Duration,
     ) -> Result<Value, TransportError> {
-        let params = serde_json::to_value(params)
-            .map_err(|error| TransportError::Protocol(error.to_string()))?;
+        let params = bounded_json_value(params)?;
         let (reply_tx, reply_rx) = oneshot::channel();
-        let deadline = Instant::now() + timeout;
-        match time::timeout(timeout, async {
+        let deadline = request_deadline(timeout)?;
+        match time::timeout_at(deadline, async {
             self.commands
                 .send(CommandMessage::Request {
                     method: method.into(),
@@ -331,12 +378,11 @@ impl AppServerTransport {
         method: impl Into<String>,
         params: T,
     ) -> Result<(), TransportError> {
-        let params = serde_json::to_value(params)
-            .map_err(|error| TransportError::Protocol(error.to_string()))?;
+        let params = bounded_json_value(params)?;
         let (reply_tx, reply_rx) = oneshot::channel();
         let timeout = self.timeouts.fallback;
-        let deadline = Instant::now() + timeout;
-        match time::timeout(timeout, async {
+        let deadline = request_deadline(timeout)?;
+        match time::timeout_at(deadline, async {
             self.commands
                 .send(CommandMessage::Notification {
                     method: method.into(),
@@ -467,16 +513,16 @@ async fn run_connection(runtime: ConnectionRuntime) {
         generation,
         diagnostics,
     } = runtime;
-    let mut next_id = 1_u64;
+    let mut request_ids = OutboundRequestIds::default();
     let mut pending = HashMap::<u64, PendingRequest>::new();
-    let mut retired = HashSet::<u64>::new();
+    let mut retired = RetiredRequestIds::default();
     let mut unusable_reason: Option<String> = None;
     let mut shutdown_reply = None;
     let mut timeout_tick = time::interval(Duration::from_millis(25));
 
     'connection: loop {
+        retire_cancelled_requests(&mut pending, &mut retired, generation, diagnostics.as_ref());
         tokio::select! {
-            biased;
             message = shutdown.recv() => {
                 if let Some(message) = message {
                     shutdown_reply = Some(message.reply);
@@ -490,8 +536,36 @@ async fn run_connection(runtime: ConnectionRuntime) {
                             let _ = reply.send(Err(TransportError::SafetyViolation(reason.clone())));
                             continue;
                         }
-                        let id = next_id;
-                        next_id = next_id.saturating_add(1);
+                        if Instant::now() >= deadline {
+                            let _ = reply.send(Err(TransportError::Timeout));
+                            continue;
+                        }
+                        retire_cancelled_requests(
+                            &mut pending,
+                            &mut retired,
+                            generation,
+                            diagnostics.as_ref(),
+                        );
+                        if pending.len() >= MAX_PENDING_REQUESTS {
+                            diagnostics.record(DiagnosticEvent {
+                                category: "request_overload",
+                                generation,
+                                method: Some(method),
+                                request_id: None,
+                                byte_count: None,
+                            });
+                            let _ = reply.send(Err(TransportError::Protocol(
+                                "too many concurrent app-server requests".to_owned(),
+                            )));
+                            continue;
+                        }
+                        let id = match request_ids.allocate() {
+                            Ok(id) => id,
+                            Err(error) => {
+                                let _ = reply.send(Err(error));
+                                continue;
+                            }
+                        };
                         diagnostics.record(DiagnosticEvent {
                             category: "request_sent",
                             generation,
@@ -500,12 +574,11 @@ async fn run_connection(runtime: ConnectionRuntime) {
                             byte_count: None,
                         });
                         let frame = json!({"id": id, "method": method, "params": params});
-                        if Instant::now() >= deadline {
-                            let _ = reply.send(Err(TransportError::Timeout));
-                            continue;
-                        }
                         if let Err(error) = write_frame_before(&mut stdin, &frame, deadline).await {
                             let _ = reply.send(Err(error.clone()));
+                            if matches!(error, TransportError::Protocol(_)) {
+                                continue;
+                            }
                             fail_pending(&mut pending, error);
                             break 'connection;
                         }
@@ -521,15 +594,18 @@ async fn run_connection(runtime: ConnectionRuntime) {
                             continue;
                         }
                         let frame = json!({"method": method, "params": params});
-                        let result = write_frame_before(&mut stdin, &frame, deadline).await;
-                        let failed = result.is_err();
-                        let _ = reply.send(result.clone());
-                        if failed {
-                            fail_pending(
-                                &mut pending,
-                                result.expect_err("checked error result"),
-                            );
-                            break 'connection;
+                        match write_frame_before(&mut stdin, &frame, deadline).await {
+                            Ok(()) => {
+                                let _ = reply.send(Ok(()));
+                            }
+                            Err(error) => {
+                                let _ = reply.send(Err(error.clone()));
+                                if matches!(error, TransportError::Protocol(_)) {
+                                    continue;
+                                }
+                                fail_pending(&mut pending, error);
+                                break 'connection;
+                            }
                         }
                     }
                     None => break 'connection,
@@ -552,7 +628,7 @@ async fn run_connection(runtime: ConnectionRuntime) {
                                     break 'connection;
                                 };
                                 let Some(request) = pending.remove(&id) else {
-                                    if retired.remove(&id) {
+                                    if retired.remove(id) {
                                         diagnostics.record(DiagnosticEvent {
                                             category: "stale_response",
                                             generation,
@@ -722,15 +798,81 @@ fn fail_pending(pending: &mut HashMap<u64, PendingRequest>, error: TransportErro
     }
 }
 
-async fn write_frame(stdin: &mut ChildStdin, frame: &Value) -> Result<(), TransportError> {
-    let mut bytes =
-        serde_json::to_vec(frame).map_err(|error| TransportError::Protocol(error.to_string()))?;
-    bytes.push(b'\n');
-    if bytes.len() > MAX_FRAME_BYTES {
+fn retire_cancelled_requests(
+    pending: &mut HashMap<u64, PendingRequest>,
+    retired: &mut RetiredRequestIds,
+    generation: u64,
+    diagnostics: &dyn DiagnosticSink,
+) {
+    let now = Instant::now();
+    let cancelled = pending
+        .iter()
+        .filter_map(|(id, request)| request.reply.is_closed().then_some(*id))
+        .collect::<Vec<_>>();
+    for id in cancelled {
+        if let Some(request) = pending.remove(&id) {
+            diagnostics.record(DiagnosticEvent {
+                category: if request.deadline <= now {
+                    "request_timeout"
+                } else {
+                    "request_cancelled"
+                },
+                generation,
+                method: Some(request.method),
+                request_id: Some(id),
+                byte_count: None,
+            });
+            retired.insert(id);
+        }
+    }
+}
+
+struct BoundedJsonWriter {
+    bytes: Vec<u8>,
+    exceeded: bool,
+}
+
+impl BoundedJsonWriter {
+    fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            exceeded: false,
+        }
+    }
+}
+
+impl std::io::Write for BoundedJsonWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        if self.bytes.len().saturating_add(buffer.len()) > MAX_FRAME_BYTES {
+            self.exceeded = true;
+            return Err(std::io::Error::other(
+                "serialized JSON exceeded the size limit",
+            ));
+        }
+        self.bytes.extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn bounded_json_value<T: Serialize>(value: T) -> Result<Value, TransportError> {
+    let mut writer = BoundedJsonWriter::new();
+    let result = serde_json::to_writer(&mut writer, &value);
+    if writer.exceeded {
         return Err(TransportError::Protocol(
-            "outbound JSON-RPC frame exceeded the size limit".to_owned(),
+            "outbound JSON-RPC params exceeded the size limit".to_owned(),
         ));
     }
+    result.map_err(|error| TransportError::Protocol(error.to_string()))?;
+    serde_json::from_slice(&writer.bytes)
+        .map_err(|error| TransportError::Protocol(error.to_string()))
+}
+
+async fn write_frame(stdin: &mut ChildStdin, frame: &Value) -> Result<(), TransportError> {
+    let bytes = encode_frame(frame)?;
     stdin
         .write_all(&bytes)
         .await
@@ -739,6 +881,19 @@ async fn write_frame(stdin: &mut ChildStdin, frame: &Value) -> Result<(), Transp
         .flush()
         .await
         .map_err(|error| TransportError::Io(error.to_string()))
+}
+
+fn encode_frame(frame: &Value) -> Result<Vec<u8>, TransportError> {
+    let mut writer = BoundedJsonWriter::new();
+    let result = serde_json::to_writer(&mut writer, frame);
+    if writer.exceeded {
+        return Err(TransportError::Protocol(
+            "outbound JSON-RPC frame exceeded the size limit".to_owned(),
+        ));
+    }
+    result.map_err(|error| TransportError::Protocol(error.to_string()))?;
+    writer.bytes.push(b'\n');
+    Ok(writer.bytes)
 }
 
 async fn write_frame_before(
@@ -754,6 +909,12 @@ async fn write_frame_before(
         Ok(result) => result,
         Err(_) => Err(TransportError::Timeout),
     }
+}
+
+fn request_deadline(timeout: Duration) -> Result<Instant, TransportError> {
+    Instant::now().checked_add(timeout).ok_or_else(|| {
+        TransportError::Protocol("request timeout exceeds the supported timeout range".to_owned())
+    })
 }
 
 async fn reap_child(child: &mut Child) -> Result<(), TransportError> {
@@ -773,5 +934,85 @@ async fn reap_child(child: &mut Child) -> Result<(), TransportError> {
                 )),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use serde_json::json;
+
+    use super::{
+        bounded_json_value, encode_frame, OutboundRequestIds, RequestTimeouts, RetiredRequestIds,
+        TransportError, MAX_FRAME_BYTES, RETIRED_REQUEST_CAPACITY,
+    };
+
+    #[test]
+    fn retired_request_correlation_is_bounded_and_keeps_the_newest_ids() {
+        let mut retired = RetiredRequestIds::default();
+        for id in 1..=(RETIRED_REQUEST_CAPACITY as u64 + 1) {
+            retired.insert(id);
+        }
+
+        assert_eq!(retired.ids.len(), RETIRED_REQUEST_CAPACITY);
+        assert!(!retired.remove(1));
+        assert!(retired.remove(RETIRED_REQUEST_CAPACITY as u64 + 1));
+    }
+
+    #[test]
+    fn login_cancellation_uses_the_authentication_timeout() {
+        let timeouts = RequestTimeouts {
+            auth: Duration::from_secs(37),
+            fallback: Duration::from_secs(3),
+            ..RequestTimeouts::default()
+        };
+        assert_eq!(
+            timeouts.for_method("account/login/cancel"),
+            Duration::from_secs(37)
+        );
+    }
+
+    #[test]
+    fn outbound_request_ids_never_saturate_into_duplicates() {
+        let mut ids = OutboundRequestIds {
+            next: Some(u64::MAX),
+        };
+        assert_eq!(ids.allocate().unwrap(), u64::MAX);
+        assert!(ids.allocate().is_err());
+    }
+
+    #[test]
+    fn outbound_serialization_is_bounded_and_frame_limit_excludes_the_delimiter() {
+        let template = json!({"method":"exact","params":{"value":""}});
+        let overhead = serde_json::to_vec(&template).unwrap().len();
+        let exact = json!({
+            "method":"exact",
+            "params":{"value":"x".repeat(MAX_FRAME_BYTES - overhead)}
+        });
+        let encoded = encode_frame(&exact).unwrap();
+        assert_eq!(encoded.len(), MAX_FRAME_BYTES + 1);
+        assert_eq!(encoded.last(), Some(&b'\n'));
+
+        let oversized = json!({
+            "method":"exact",
+            "params":{"value":"x".repeat(MAX_FRAME_BYTES - overhead + 1)}
+        });
+        assert!(matches!(
+            encode_frame(&oversized),
+            Err(TransportError::Protocol(message)) if message.contains("size limit")
+        ));
+        let oversized_method = json!({
+            "method":"x".repeat(MAX_FRAME_BYTES + 1),
+            "params":{}
+        });
+        assert!(matches!(
+            encode_frame(&oversized_method),
+            Err(TransportError::Protocol(message)) if message.contains("size limit")
+        ));
+        assert!(matches!(
+            bounded_json_value(json!({"value":"x".repeat(MAX_FRAME_BYTES)})),
+            Err(TransportError::Protocol(message)) if message.contains("size limit")
+        ));
     }
 }

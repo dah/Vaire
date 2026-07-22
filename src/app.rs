@@ -1,9 +1,24 @@
 use crate::command::HELP_TEXT;
 use crate::persistence::{AccountScope, PreferencesV1};
 use crate::text::sanitize_terminal_text;
+use std::collections::{BTreeMap, BTreeSet};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
-const MAX_THINKING_CHARS: usize = 32 * 1024;
+const MAX_THINKING_BYTES: usize = 32 * 1024;
 const MAX_THINKING_ENTRIES: usize = 128;
+const MAX_TRANSCRIPT_BYTES: usize = 1024 * 1024;
+const MAX_TRANSCRIPT_ENTRIES: usize = 2048;
+const MAX_TRANSCRIPT_NEWLINES: usize = 16 * 1024;
+const MAX_TRANSCRIPT_DISPLAY_COLUMNS: usize = 512 * 1024;
+// The interactive composer uses a tighter 128 KiB responsiveness bound. This reducer-level cap
+// also covers programmatic intents; after sanitization, JSON escaping can at most double retained
+// bytes, leaving ample envelope headroom under the transport's 1 MiB frame limit.
+const MAX_MESSAGE_BYTES: usize = 256 * 1024;
+// This bounded non-cryptographic fingerprint detects accidental stream/snapshot contradictions;
+// it is not used as an authenticity or security primitive.
+const TRANSCRIPT_HASH_OFFSET: u64 = 0xcbf29ce484222325;
+const TRANSCRIPT_HASH_PRIME: u64 = 0x100000001b3;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Intent {
@@ -104,6 +119,12 @@ pub struct TranscriptEntry {
     pub text: String,
     pub item_id: Option<String>,
     pub turn_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TranscriptTruncation {
+    pub dropped_bytes: usize,
+    pub dropped_hash: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -248,30 +269,110 @@ impl ThinkingState {
         let total = self
             .entries
             .iter()
-            .map(|entry| entry.text.chars().count())
-            .sum::<usize>();
-        let mut excess = total.saturating_sub(MAX_THINKING_CHARS);
+            .map(|entry| entry.text.len())
+            .fold(0usize, usize::saturating_add);
+        let mut excess = total.saturating_sub(MAX_THINKING_BYTES);
         for entry in &mut self.entries {
             if excess == 0 {
                 break;
             }
-            let available = entry.text.chars().count();
+            let available = entry.text.len();
             let remove = available.min(excess);
-            trim_chars_from_front(&mut entry.text, remove);
-            excess -= remove;
+            let removed = trim_utf8_bytes_from_front(&mut entry.text, remove);
+            excess = excess.saturating_sub(removed);
         }
     }
 }
 
-fn trim_chars_from_front(value: &mut String, count: usize) {
-    if count == 0 {
-        return;
+fn trim_utf8_bytes_from_front(value: &mut String, minimum_bytes: usize) -> usize {
+    if minimum_bytes == 0 {
+        return 0;
     }
-    let Some((byte_index, _)) = value.char_indices().nth(count) else {
-        value.clear();
-        return;
-    };
-    value.drain(..byte_index);
+    if minimum_bytes >= value.len() {
+        let removed = value.len();
+        *value = String::new();
+        return removed;
+    }
+    let mut byte_index = minimum_bytes;
+    while !value.is_char_boundary(byte_index) {
+        byte_index += 1;
+    }
+    *value = value[byte_index..].to_owned();
+    byte_index
+}
+
+fn extend_transcript_hash(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(TRANSCRIPT_HASH_PRIME);
+    }
+    hash
+}
+
+fn trim_bytes_from_front(
+    value: &mut String,
+    minimum_bytes: usize,
+    prefix_hash: u64,
+) -> (usize, u64) {
+    if minimum_bytes == 0 {
+        return (0, prefix_hash);
+    }
+    if minimum_bytes >= value.len() {
+        let removed = value.len();
+        let hash = extend_transcript_hash(prefix_hash, value.as_bytes());
+        *value = String::new();
+        return (removed, hash);
+    }
+    let mut byte_index = minimum_bytes;
+    while !value.is_char_boundary(byte_index) {
+        byte_index += 1;
+    }
+    let hash = extend_transcript_hash(prefix_hash, &value.as_bytes()[..byte_index]);
+    *value = value[byte_index..].to_owned();
+    (byte_index, hash)
+}
+
+fn prefix_bytes_for_newlines(entries: &[TranscriptEntry], mut newlines: usize) -> usize {
+    if newlines == 0 {
+        return 0;
+    }
+    let mut bytes = 0usize;
+    for entry in entries {
+        for (index, byte) in entry.text.bytes().enumerate() {
+            if byte == b'\n' {
+                newlines -= 1;
+                if newlines == 0 {
+                    return bytes.saturating_add(index + 1);
+                }
+            }
+        }
+        bytes = bytes.saturating_add(entry.text.len());
+    }
+    bytes
+}
+
+fn prefix_bytes_for_display_width(entries: &[TranscriptEntry], mut width: usize) -> usize {
+    if width == 0 {
+        return 0;
+    }
+    let mut bytes = 0usize;
+    for entry in entries {
+        for (index, grapheme) in entry.text.grapheme_indices(true) {
+            width = width.saturating_sub(UnicodeWidthStr::width(grapheme));
+            if width == 0 {
+                return bytes.saturating_add(index + grapheme.len());
+            }
+        }
+        bytes = bytes.saturating_add(entry.text.len());
+    }
+    bytes
+}
+
+fn transcript_item_key(entry: &TranscriptEntry) -> Option<(String, String)> {
+    if entry.role != TranscriptRole::Assistant {
+        return None;
+    }
+    Some((entry.turn_id.clone()?, entry.item_id.clone()?))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -480,10 +581,16 @@ pub struct AppState {
     pub context_remaining_percent: Option<u8>,
     pub context_suppressed_turn: Option<(String, String)>,
     pub transcript: Vec<TranscriptEntry>,
+    pub transcript_dropped_prefix_bytes: BTreeMap<(String, String), TranscriptTruncation>,
     pub thread_picker: Option<ThreadPickerState>,
     pub thinking: ThinkingState,
     pub preferences: PreferencesV1,
     pub notice: Option<String>,
+    /// The account identity captured when an eager `/new` operation began.
+    /// The outer option distinguishes no request from a request made while the
+    /// server reported no stable account identity.
+    pub pending_new_thread_scope: Option<Option<AccountScope>>,
+    pub pending_thread_deletions: Option<BTreeSet<String>>,
     pub shutting_down: bool,
 }
 
@@ -500,10 +607,13 @@ impl Default for AppState {
             context_remaining_percent: None,
             context_suppressed_turn: None,
             transcript: Vec::new(),
+            transcript_dropped_prefix_bytes: BTreeMap::new(),
             thread_picker: None,
             thinking: ThinkingState::default(),
             preferences: PreferencesV1::default(),
             notice: None,
+            pending_new_thread_scope: None,
+            pending_thread_deletions: None,
             shutting_down: false,
         }
     }
@@ -547,6 +657,9 @@ impl AppState {
     }
 
     pub fn reduce(&mut self, action: Action) -> Vec<Effect> {
+        if self.shutting_down {
+            return Vec::new();
+        }
         match action {
             Action::Intent(intent) => self.reduce_intent(intent),
             Action::Event(event) => self.reduce_event(event),
@@ -559,6 +672,8 @@ impl AppState {
             Intent::Help => self.notice = Some(HELP_TEXT.to_owned()),
             Intent::Quit => {
                 self.shutting_down = true;
+                self.pending_new_thread_scope = None;
+                self.pending_thread_deletions = None;
                 let mut effects = Vec::new();
                 if let TurnState::Streaming { thread_id, turn_id } = &self.turn {
                     effects.push(Effect::InterruptTurn {
@@ -642,6 +757,10 @@ impl AppState {
                 if let Some(reason) = self.thread_action_block_reason(false) {
                     self.notice = Some(reason);
                 } else {
+                    let AuthState::SignedIn { scope } = &self.auth else {
+                        unreachable!("thread_action_block_reason requires signed-in auth")
+                    };
+                    self.pending_new_thread_scope = Some(scope.clone());
                     self.notice = Some("Starting a new thread…".to_owned());
                     return vec![Effect::StartNewThread];
                 }
@@ -650,6 +769,7 @@ impl AppState {
                 if let Some(reason) = self.thread_action_block_reason(true) {
                     self.notice = Some(reason);
                 } else {
+                    self.pending_thread_deletions = None;
                     self.thread_picker = Some(ThreadPickerState::loading());
                     return vec![Effect::ListThreads];
                 }
@@ -669,17 +789,31 @@ impl AppState {
                 }
             }
             Intent::SendMessage(text) => {
+                let text = sanitize_terminal_text(&text);
+                if text.trim().is_empty() {
+                    self.notice = Some("enter a message or /help".to_owned());
+                    return Vec::new();
+                }
+                if text.len() > MAX_MESSAGE_BYTES {
+                    self.notice = Some(format!(
+                        "message is too large; keep it under {} KiB",
+                        MAX_MESSAGE_BYTES / 1024
+                    ));
+                    return Vec::new();
+                }
                 if let Some(reason) = self.send_block_reason() {
                     self.notice = Some(reason);
                 } else {
                     self.turn = TurnState::Starting;
                     self.thinking.clear_content();
+                    self.transcript_dropped_prefix_bytes.clear();
                     self.transcript.push(TranscriptEntry {
                         role: TranscriptRole::User,
                         text: text.clone(),
                         item_id: None,
                         turn_id: None,
                     });
+                    self.enforce_transcript_bound();
                     return vec![Effect::SendMessage { text }];
                 }
             }
@@ -719,6 +853,8 @@ impl AppState {
             }
             DomainEvent::ConnectionFailed(message) | DomainEvent::ProcessExited(message) => {
                 self.connection = ConnectionState::Failed(message.clone());
+                self.pending_new_thread_scope = None;
+                self.pending_thread_deletions = None;
                 if let Some(picker) = &mut self.thread_picker {
                     picker.phase = ThreadPickerPhase::Failed;
                     picker.confirmation = None;
@@ -746,12 +882,16 @@ impl AppState {
                     self.reset_context_window();
                     self.thinking.clear_content();
                 }
+                if self.pending_new_thread_scope.as_ref() != Some(&scope) {
+                    self.pending_new_thread_scope = None;
+                }
                 if switched_accounts {
                     // An account update can arrive while a turn is active. Detach the old turn
                     // before changing the displayed identity so every subsequently queued event
                     // from that turn becomes stale.
                     self.turn = TurnState::Idle;
                     self.thread_picker = None;
+                    self.pending_thread_deletions = None;
                 }
                 self.auth = AuthState::SignedIn {
                     scope: scope.clone(),
@@ -780,6 +920,8 @@ impl AppState {
             }
             DomainEvent::UnsupportedAccount(message) => {
                 self.auth = AuthState::Unsupported(message);
+                self.pending_new_thread_scope = None;
+                self.pending_thread_deletions = None;
                 self.turn = TurnState::Idle;
                 self.thread_picker = None;
                 self.thinking.clear_content();
@@ -793,11 +935,15 @@ impl AppState {
             DomainEvent::LoginStarted { login_id } => self.auth = AuthState::SigningIn { login_id },
             DomainEvent::LoginFailed(message) => {
                 self.auth = AuthState::SignedOut;
+                self.pending_new_thread_scope = None;
+                self.pending_thread_deletions = None;
                 self.notice = Some(message);
                 self.reset_context_window();
             }
             DomainEvent::LoggedOut => {
                 self.auth = AuthState::SignedOut;
+                self.pending_new_thread_scope = None;
+                self.pending_thread_deletions = None;
                 self.thread = ThreadState::None;
                 self.turn = TurnState::Idle;
                 self.thread_picker = None;
@@ -812,18 +958,34 @@ impl AppState {
                     self.invalidate_context_for_current_turn();
                 }
             }
-            DomainEvent::ResumeStarted { id } => self.thread = ThreadState::Resuming { id },
+            DomainEvent::ResumeStarted { id } => {
+                // Account loading already moves the reducer into `Resuming` before it emits the
+                // backend effect. Treat this echo as acknowledgement only, so a delayed event can
+                // never detach a newer active thread.
+                if !matches!(&self.thread, ThreadState::Resuming { id: expected } if expected == &id)
+                {
+                    return Vec::new();
+                }
+            }
             DomainEvent::ResumeSucceeded { id, history } => {
+                if !matches!(&self.thread, ThreadState::Resuming { id: expected } if expected == &id)
+                {
+                    return Vec::new();
+                }
                 self.reset_context_window();
                 self.thread = ThreadState::Ready { id: id.clone() };
                 self.turn = TurnState::Idle;
-                self.transcript = history;
+                self.replace_transcript(history);
                 self.thinking.clear_content();
                 self.preferences.thread_id = Some(id.clone());
                 self.register_thread_scope(&id);
                 return vec![Effect::Persist(self.preferences.clone())];
             }
             DomainEvent::ResumeFailed { id, message } => {
+                if !matches!(&self.thread, ThreadState::Resuming { id: expected } if expected == &id)
+                {
+                    return Vec::new();
+                }
                 self.thread = ThreadState::ResumeFailed {
                     id,
                     message: message.clone(),
@@ -831,11 +993,19 @@ impl AppState {
                 self.notice = Some(message);
             }
             DomainEvent::NewThreadSucceeded { id } => {
+                let Some(requested_scope) = self.pending_new_thread_scope.take() else {
+                    return Vec::new();
+                };
+                if !matches!(&self.auth, AuthState::SignedIn { scope } if scope == &requested_scope)
+                {
+                    return Vec::new();
+                }
                 self.reset_context_window();
                 self.thread = ThreadState::Ready { id: id.clone() };
                 self.turn = TurnState::Idle;
-                self.transcript.clear();
+                self.clear_transcript();
                 self.thread_picker = None;
+                self.pending_thread_deletions = None;
                 self.thinking.clear_content();
                 self.preferences.thread_id = Some(id.clone());
                 if let AuthState::SignedIn { scope } = &self.auth {
@@ -846,6 +1016,9 @@ impl AppState {
                 return vec![Effect::Persist(self.preferences.clone())];
             }
             DomainEvent::NewThreadFailed(message) => {
+                if self.pending_new_thread_scope.take().is_none() {
+                    return Vec::new();
+                }
                 self.notice = Some(format!(
                     "Could not start a new thread; the current thread was preserved: {message}"
                 ));
@@ -898,7 +1071,7 @@ impl AppState {
                     self.reset_context_window();
                     self.thread = ThreadState::Ready { id: id.clone() };
                     self.turn = TurnState::Idle;
-                    self.transcript = history;
+                    self.replace_transcript(history);
                     self.thread_picker = None;
                     self.thinking.clear_content();
                     self.preferences.thread_id = Some(id.clone());
@@ -926,19 +1099,41 @@ impl AppState {
                 deleted,
                 failures,
             } => {
-                let active_id = self.active_saved_thread_id().map(str::to_owned);
-                if let Some(picker) = &mut self.thread_picker {
-                    let expected = match picker.phase {
-                        ThreadPickerPhase::Deleting { requested } => requested,
+                let Some(expected_ids) = self.pending_thread_deletions.take() else {
+                    return Vec::new();
+                };
+                let phase_request_count =
+                    match self.thread_picker.as_ref().map(|picker| &picker.phase) {
+                        Some(ThreadPickerPhase::Deleting { requested }) => *requested,
                         _ => return Vec::new(),
                     };
-                    if expected != requested {
+                let mut reported_ids = BTreeSet::new();
+                let no_duplicate_results = deleted
+                    .iter()
+                    .chain(failures.iter().map(|failure| &failure.id))
+                    .all(|id| reported_ids.insert(id.clone()));
+                let result_count_matches = deleted
+                    .len()
+                    .checked_add(failures.len())
+                    .is_some_and(|count| count == requested);
+                let result_matches_request = phase_request_count == requested
+                    && requested == expected_ids.len()
+                    && result_count_matches
+                    && no_duplicate_results
+                    && reported_ids == expected_ids;
+                if !result_matches_request {
+                    if let Some(picker) = &mut self.thread_picker {
                         picker.phase = ThreadPickerPhase::Failed;
+                        picker.confirmation = None;
                         picker.message = Some(
                             "Thread deletion result did not match the requested scope".to_owned(),
                         );
-                        return Vec::new();
                     }
+                    return Vec::new();
+                }
+
+                let active_id = self.active_saved_thread_id().map(str::to_owned);
+                if let Some(picker) = &mut self.thread_picker {
                     let protected_reported = deleted
                         .iter()
                         .any(|id| active_id.as_deref() == Some(id.as_str()));
@@ -987,6 +1182,11 @@ impl AppState {
                 }
             }
             DomainEvent::ThreadStarted { id } => {
+                if !matches!(self.thread, ThreadState::None)
+                    || !matches!(self.turn, TurnState::Starting)
+                {
+                    return Vec::new();
+                }
                 self.reset_context_window();
                 self.thread = ThreadState::Ready { id: id.clone() };
                 self.preferences.thread_id = Some(id.clone());
@@ -1115,6 +1315,9 @@ impl AppState {
                 }
             }
             DomainEvent::TurnOperationFailed(message) => {
+                if !self.turn.is_active() {
+                    return Vec::new();
+                }
                 let turn_id = match &self.turn {
                     TurnState::Streaming { turn_id, .. } => Some(turn_id.clone()),
                     _ => None,
@@ -1128,6 +1331,13 @@ impl AppState {
             DomainEvent::SafetyViolation(method) => {
                 self.connection =
                     ConnectionState::Failed("runtime request boundary was triggered".to_owned());
+                self.pending_new_thread_scope = None;
+                self.pending_thread_deletions = None;
+                if let Some(picker) = &mut self.thread_picker {
+                    picker.phase = ThreadPickerPhase::Failed;
+                    picker.confirmation = None;
+                    picker.message = Some("Unexpected server request was denied".to_owned());
+                }
                 if self.turn.is_active() {
                     let turn_id = match &self.turn {
                         TurnState::Streaming { turn_id, .. } => Some(turn_id.clone()),
@@ -1151,6 +1361,9 @@ impl AppState {
     }
 
     fn thread_action_block_reason(&self, require_account_identity: bool) -> Option<String> {
+        if self.pending_new_thread_scope.is_some() {
+            return Some("wait for the new thread request to finish".to_owned());
+        }
         if self.thread_picker.is_some() {
             return Some(
                 "close the thread picker before starting another thread action".to_owned(),
@@ -1307,6 +1520,14 @@ impl AppState {
             .into_iter()
             .map(|target| target.id)
             .collect::<Vec<_>>();
+        let expected_ids = ids.iter().cloned().collect::<BTreeSet<_>>();
+        if expected_ids.len() != ids.len() {
+            picker.phase = ThreadPickerPhase::Failed;
+            picker.message =
+                Some("Deletion cancelled because the thread list was invalid".to_owned());
+            return Vec::new();
+        }
+        self.pending_thread_deletions = Some(expected_ids);
         picker.phase = ThreadPickerPhase::Deleting {
             requested: ids.len(),
         };
@@ -1392,6 +1613,9 @@ impl AppState {
         if self.models.is_empty() || self.selected_model.is_none() {
             return Some("model catalog is not ready".to_owned());
         }
+        if self.pending_new_thread_scope.is_some() {
+            return Some("wait for the new thread request to finish".to_owned());
+        }
         if self.turn.is_active() {
             return Some("wait for or interrupt the active turn".to_owned());
         }
@@ -1469,19 +1693,113 @@ impl AppState {
         Some((thread_id.clone(), turn_id.clone()))
     }
 
+    fn replace_transcript(&mut self, history: Vec<TranscriptEntry>) {
+        self.transcript = history;
+        for entry in &mut self.transcript {
+            entry.text = sanitize_terminal_text(&entry.text);
+        }
+        self.transcript_dropped_prefix_bytes.clear();
+        self.enforce_transcript_bound();
+    }
+
+    fn clear_transcript(&mut self) {
+        self.transcript.clear();
+        self.transcript.shrink_to_fit();
+        self.transcript_dropped_prefix_bytes.clear();
+    }
+
+    fn enforce_transcript_bound(&mut self) {
+        if self.transcript.len() > MAX_TRANSCRIPT_ENTRIES {
+            let keep_from = self.transcript.len() - MAX_TRANSCRIPT_ENTRIES;
+            for entry in &self.transcript[..keep_from] {
+                if let Some(key) = transcript_item_key(entry) {
+                    self.transcript_dropped_prefix_bytes.remove(&key);
+                }
+            }
+            self.transcript = self.transcript.split_off(keep_from);
+        }
+
+        let (total_bytes, total_newlines, total_display_columns) = self.transcript.iter().fold(
+            (0usize, 0usize, 0usize),
+            |(bytes, newlines, columns), entry| {
+                (
+                    bytes.saturating_add(entry.text.len()),
+                    newlines
+                        .saturating_add(entry.text.bytes().filter(|byte| *byte == b'\n').count()),
+                    columns.saturating_add(UnicodeWidthStr::width(entry.text.as_str())),
+                )
+            },
+        );
+        let byte_excess = total_bytes.saturating_sub(MAX_TRANSCRIPT_BYTES);
+        let newline_prefix = prefix_bytes_for_newlines(
+            &self.transcript,
+            total_newlines.saturating_sub(MAX_TRANSCRIPT_NEWLINES),
+        );
+        let display_prefix = prefix_bytes_for_display_width(
+            &self.transcript,
+            total_display_columns.saturating_sub(MAX_TRANSCRIPT_DISPLAY_COLUMNS),
+        );
+        let mut excess = byte_excess.max(newline_prefix).max(display_prefix);
+        if excess == 0 {
+            return;
+        }
+
+        let mut drop_entries = 0;
+        while let Some(entry) = self.transcript.get(drop_entries) {
+            let entry_bytes = entry.text.len();
+            if entry_bytes > excess {
+                break;
+            }
+            if let Some(key) = transcript_item_key(entry) {
+                self.transcript_dropped_prefix_bytes.remove(&key);
+            }
+            excess -= entry_bytes;
+            drop_entries += 1;
+        }
+        if drop_entries > 0 {
+            self.transcript = self.transcript.split_off(drop_entries);
+        }
+        if excess == 0 {
+            return;
+        }
+
+        if let Some(entry) = self.transcript.first_mut() {
+            let key = transcript_item_key(entry);
+            if let Some(key) = key {
+                let truncation = self.transcript_dropped_prefix_bytes.entry(key).or_insert(
+                    TranscriptTruncation {
+                        dropped_bytes: 0,
+                        dropped_hash: TRANSCRIPT_HASH_OFFSET,
+                    },
+                );
+                let (removed, hash) =
+                    trim_bytes_from_front(&mut entry.text, excess, truncation.dropped_hash);
+                truncation.dropped_bytes = truncation.dropped_bytes.saturating_add(removed);
+                truncation.dropped_hash = hash;
+            } else {
+                let _ = trim_bytes_from_front(&mut entry.text, excess, TRANSCRIPT_HASH_OFFSET);
+            }
+        }
+    }
+
     fn append_delta(&mut self, turn_id: &str, item_id: &str, delta: &str) {
+        let delta = sanitize_terminal_text(delta);
+        if delta.is_empty() {
+            return;
+        }
         if let Some(entry) = self.transcript.iter_mut().find(|entry| {
             entry.item_id.as_deref() == Some(item_id) && entry.turn_id.as_deref() == Some(turn_id)
         }) {
-            entry.text.push_str(delta);
+            entry.text.push_str(&delta);
         } else {
             self.transcript.push(TranscriptEntry {
                 role: TranscriptRole::Assistant,
-                text: delta.to_owned(),
+                text: delta,
                 item_id: Some(item_id.to_owned()),
                 turn_id: Some(turn_id.to_owned()),
             });
         }
+        self.enforce_transcript_bound();
     }
 
     fn reconcile_final(
@@ -1490,11 +1808,43 @@ impl AppState {
         item_id: &str,
         final_text: &str,
     ) -> Result<(), String> {
+        let final_text = sanitize_terminal_text(final_text);
+        let key = (turn_id.to_owned(), item_id.to_owned());
+        if let Some(truncation) = self.transcript_dropped_prefix_bytes.remove(&key) {
+            if let Some(entry) = self.transcript.iter_mut().find(|entry| {
+                entry.item_id.as_deref() == Some(item_id)
+                    && entry.turn_id.as_deref() == Some(turn_id)
+            }) {
+                let consistent = final_text
+                    .get(..truncation.dropped_bytes)
+                    .zip(final_text.get(truncation.dropped_bytes..))
+                    .is_some_and(|(prefix, suffix)| {
+                        extend_transcript_hash(TRANSCRIPT_HASH_OFFSET, prefix.as_bytes())
+                            == truncation.dropped_hash
+                            && suffix.starts_with(&entry.text)
+                    });
+                if !consistent {
+                    return Err("assistant final snapshot contradicted streamed text".to_owned());
+                }
+                entry.text = final_text.clone();
+            } else {
+                self.transcript.push(TranscriptEntry {
+                    role: TranscriptRole::Assistant,
+                    text: final_text.clone(),
+                    item_id: Some(item_id.to_owned()),
+                    turn_id: Some(turn_id.to_owned()),
+                });
+            }
+            self.enforce_transcript_bound();
+            return Ok(());
+        }
+
         if let Some(entry) = self.transcript.iter_mut().find(|entry| {
             entry.item_id.as_deref() == Some(item_id) && entry.turn_id.as_deref() == Some(turn_id)
         }) {
             if final_text.starts_with(&entry.text) {
                 entry.text.push_str(&final_text[entry.text.len()..]);
+                self.enforce_transcript_bound();
                 Ok(())
             } else {
                 Err("assistant final snapshot contradicted streamed text".to_owned())
@@ -1502,10 +1852,11 @@ impl AppState {
         } else {
             self.transcript.push(TranscriptEntry {
                 role: TranscriptRole::Assistant,
-                text: final_text.to_owned(),
+                text: final_text,
                 item_id: Some(item_id.to_owned()),
                 turn_id: Some(turn_id.to_owned()),
             });
+            self.enforce_transcript_bound();
             Ok(())
         }
     }
@@ -1859,6 +2210,23 @@ mod tests {
     }
 
     #[test]
+    fn invalid_or_oversized_messages_remain_local_and_preserve_conversation_state() {
+        for message in [
+            "\u{1b}\u{0007}".to_owned(),
+            "x".repeat(MAX_MESSAGE_BYTES + 1),
+        ] {
+            let mut state = thread_ready_state();
+            let transcript = state.transcript.clone();
+            assert!(state
+                .reduce(Action::Intent(Intent::SendMessage(message)))
+                .is_empty());
+            assert_eq!(state.transcript, transcript);
+            assert!(matches!(state.turn, TurnState::Completed { .. }));
+            assert!(state.notice.is_some());
+        }
+    }
+
+    #[test]
     fn same_account_refresh_preserves_ready_and_in_flight_resume_state() {
         let mut state = thread_ready_state();
         let scope = AccountScope::from_chatgpt_email("user@example.com");
@@ -2009,6 +2377,61 @@ mod tests {
         }));
 
         assert!(matches!(state.turn, TurnState::Idle));
+    }
+
+    #[test]
+    fn resume_results_are_correlated_and_cannot_cross_account_boundaries() {
+        let mut state = thread_ready_state();
+        let snapshot = state.clone();
+
+        assert!(state
+            .reduce(Action::Event(DomainEvent::ResumeStarted {
+                id: "thr-stale".to_owned(),
+            }))
+            .is_empty());
+        assert_eq!(state, snapshot);
+        assert!(state
+            .reduce(Action::Event(DomainEvent::ResumeSucceeded {
+                id: "thr-stale".to_owned(),
+                history: Vec::new(),
+            }))
+            .is_empty());
+        assert_eq!(state, snapshot);
+        assert!(state
+            .reduce(Action::Event(DomainEvent::ResumeFailed {
+                id: "thr-stale".to_owned(),
+                message: "late failure".to_owned(),
+            }))
+            .is_empty());
+        assert_eq!(state, snapshot);
+
+        state.thread = ThreadState::Resuming {
+            id: "thr-active".to_owned(),
+        };
+        state.reduce(Action::Event(DomainEvent::AccountLoaded(
+            AccountScope::from_chatgpt_email("other@example.com"),
+        )));
+        let account_switched = state.clone();
+
+        assert!(state
+            .reduce(Action::Event(DomainEvent::ResumeSucceeded {
+                id: "thr-active".to_owned(),
+                history: vec![TranscriptEntry {
+                    role: TranscriptRole::Assistant,
+                    text: "wrong account history".to_owned(),
+                    item_id: None,
+                    turn_id: None,
+                }],
+            }))
+            .is_empty());
+        assert_eq!(state, account_switched);
+        assert!(state
+            .reduce(Action::Event(DomainEvent::ResumeFailed {
+                id: "thr-active".to_owned(),
+                message: "late failure".to_owned(),
+            }))
+            .is_empty());
+        assert_eq!(state, account_switched);
     }
 
     #[test]
@@ -2191,6 +2614,10 @@ mod tests {
         assert_eq!(state.thinking.entries[0].text, "old reasoning");
         assert_eq!(state.context_remaining_percent, Some(68));
 
+        assert_eq!(
+            state.reduce(Action::Intent(Intent::NewThread)),
+            vec![Effect::StartNewThread]
+        );
         let effects = state.reduce(Action::Event(DomainEvent::NewThreadSucceeded {
             id: "thr-new".to_owned(),
         }));
@@ -2205,11 +2632,99 @@ mod tests {
     }
 
     #[test]
+    fn new_thread_creation_is_single_flight_and_scoped_to_the_starting_account() {
+        let mut state = thread_ready_state();
+        assert_eq!(
+            state.reduce(Action::Intent(Intent::NewThread)),
+            vec![Effect::StartNewThread]
+        );
+        assert!(state.reduce(Action::Intent(Intent::NewThread)).is_empty());
+        assert!(state
+            .reduce(Action::Intent(Intent::SendMessage("race".to_owned())))
+            .is_empty());
+        assert_eq!(state.transcript.len(), 1);
+
+        state.reduce(Action::Event(DomainEvent::AccountLoaded(
+            AccountScope::from_chatgpt_email("other@example.com"),
+        )));
+        let switched = state.clone();
+        assert!(state
+            .reduce(Action::Event(DomainEvent::NewThreadSucceeded {
+                id: "thr-created-for-old-account".to_owned(),
+            }))
+            .is_empty());
+        assert_eq!(state, switched);
+        assert!(state
+            .reduce(Action::Event(DomainEvent::NewThreadFailed(
+                "late failure from old account".to_owned(),
+            )))
+            .is_empty());
+        assert_eq!(state, switched);
+
+        assert_eq!(
+            state.reduce(Action::Intent(Intent::NewThread)),
+            vec![Effect::StartNewThread]
+        );
+        assert!(matches!(
+            state
+                .reduce(Action::Event(DomainEvent::NewThreadSucceeded {
+                    id: "thr-new-account".to_owned(),
+                }))
+                .as_slice(),
+            [Effect::Persist(_)]
+        ));
+        assert!(matches!(
+            state.thread,
+            ThreadState::Ready { ref id } if id == "thr-new-account"
+        ));
+    }
+
+    #[test]
+    fn implicit_thread_start_only_attaches_to_the_expected_first_message() {
+        let mut state = thread_ready_state();
+        let ready = state.clone();
+        assert!(state
+            .reduce(Action::Event(DomainEvent::ThreadStarted {
+                id: "thr-stale".to_owned(),
+            }))
+            .is_empty());
+        assert_eq!(state, ready);
+
+        state.thread = ThreadState::None;
+        state.turn = TurnState::Idle;
+        let idle = state.clone();
+        assert!(state
+            .reduce(Action::Event(DomainEvent::ThreadStarted {
+                id: "thr-unrequested".to_owned(),
+            }))
+            .is_empty());
+        assert_eq!(state, idle);
+
+        state.turn = TurnState::Starting;
+        assert!(matches!(
+            state
+                .reduce(Action::Event(DomainEvent::ThreadStarted {
+                    id: "thr-expected".to_owned(),
+                }))
+                .as_slice(),
+            [Effect::Persist(_)]
+        ));
+        assert!(matches!(
+            state.thread,
+            ThreadState::Ready { ref id } if id == "thr-expected"
+        ));
+    }
+
+    #[test]
     fn successful_new_thread_rejects_every_stale_old_turn_event() {
         let mut state = thread_ready_state();
         seed_thinking(&mut state, "old reasoning");
         state.context_remaining_percent = Some(68);
 
+        assert_eq!(
+            state.reduce(Action::Intent(Intent::NewThread)),
+            vec![Effect::StartNewThread]
+        );
         state.reduce(Action::Event(DomainEvent::NewThreadSucceeded {
             id: "thr-new".to_owned(),
         }));
@@ -2417,9 +2932,9 @@ mod tests {
         seed_thinking(&mut state, "current thread reasoning");
         state.context_remaining_percent = Some(66);
 
-        state.reduce(Action::Event(DomainEvent::ResumeStarted {
+        state.thread = ThreadState::Resuming {
             id: "thr-old".to_owned(),
-        }));
+        };
         state.reduce(Action::Event(DomainEvent::ResumeFailed {
             id: "thr-old".to_owned(),
             message: "temporary failure".to_owned(),
@@ -2427,6 +2942,9 @@ mod tests {
         assert_eq!(state.thinking.entries[0].text, "current thread reasoning");
         assert_eq!(state.context_remaining_percent, Some(66));
 
+        state.thread = ThreadState::Resuming {
+            id: "thr-old".to_owned(),
+        };
         state.reduce(Action::Event(DomainEvent::ResumeSucceeded {
             id: "thr-old".to_owned(),
             history: Vec::new(),
@@ -2571,7 +3089,7 @@ mod tests {
         );
         state.reduce(Action::Event(DomainEvent::ThreadDeletionFinished {
             requested: 2,
-            deleted: vec!["thr-active".to_owned(), "thr-old-a".to_owned()],
+            deleted: vec!["thr-old-a".to_owned()],
             failures: vec![ThreadDeletionFailure {
                 id: "thr-old-b".to_owned(),
                 message: "permission denied".to_owned(),
@@ -2588,11 +3106,47 @@ mod tests {
             vec!["thr-active", "thr-old-b"]
         );
         assert!(picker.message.as_deref().unwrap().contains("failed"));
-        assert!(picker
+        assert!(!picker
             .message
             .as_deref()
             .unwrap()
             .contains("active saved thread"));
+    }
+
+    #[test]
+    fn deletion_results_must_exactly_match_the_confirmed_target_set() {
+        let mut state = thread_ready_state();
+        state.thread_picker = Some(ThreadPickerState {
+            phase: ThreadPickerPhase::Ready,
+            threads: vec![
+                thread("thr-active", "Current", 30),
+                thread("thr-old-a", "Old A", 20),
+                thread("thr-old-b", "Old B", 10),
+            ],
+            selected: 1,
+            confirmation: None,
+            message: None,
+        });
+        state.reduce(Action::Intent(Intent::ThreadPickerRequestDelete));
+        assert_eq!(
+            state.reduce(Action::Intent(Intent::ThreadPickerConfirmDelete)),
+            vec![Effect::DeleteThreads {
+                ids: vec!["thr-old-a".to_owned()]
+            }]
+        );
+        let preferences = state.preferences.clone();
+
+        state.reduce(Action::Event(DomainEvent::ThreadDeletionFinished {
+            requested: 1,
+            deleted: vec!["thr-old-b".to_owned()],
+            failures: vec![],
+        }));
+
+        let picker = state.thread_picker.as_ref().unwrap();
+        assert!(matches!(picker.phase, ThreadPickerPhase::Failed));
+        assert_eq!(picker.threads.len(), 3);
+        assert_eq!(state.preferences, preferences);
+        assert!(picker.message.as_deref().unwrap().contains("did not match"));
     }
 
     #[test]
@@ -2659,6 +3213,15 @@ mod tests {
             thread_id: "thr".to_owned(),
             turn_id: "turn".to_owned(),
             item_id: "item".to_owned(),
+            delta: "\u{1b}\u{0007}".to_owned(),
+        }));
+        assert!(state.is_waiting_for_assistant_text());
+        assert_eq!(state.transcript.len(), 1);
+
+        state.reduce(Action::Event(DomainEvent::AgentDelta {
+            thread_id: "thr".to_owned(),
+            turn_id: "turn".to_owned(),
+            item_id: "item".to_owned(),
             delta: "reply".to_owned(),
         }));
         assert!(!state.is_waiting_for_assistant_text());
@@ -2717,16 +3280,10 @@ mod tests {
         assert!(!unsupported_account.is_waiting_for_assistant_text());
 
         let mut resuming = waiting_turn_state();
-        resuming.reduce(Action::Event(DomainEvent::ResumeStarted {
+        resuming.thread = ThreadState::Resuming {
             id: "other-thread".to_owned(),
-        }));
+        };
         assert!(!resuming.is_waiting_for_assistant_text());
-
-        let mut changed_thread = waiting_turn_state();
-        changed_thread.reduce(Action::Event(DomainEvent::ThreadStarted {
-            id: "other-thread".to_owned(),
-        }));
-        assert!(!changed_thread.is_waiting_for_assistant_text());
 
         let mut shutting_down = waiting_turn_state();
         shutting_down.reduce(Action::Intent(Intent::Quit));
@@ -2776,6 +3333,130 @@ mod tests {
             outcome: TurnOutcome::Interrupted,
         }));
         assert!(matches!(state.turn, TurnState::Interrupted { .. }));
+    }
+
+    #[test]
+    fn transcript_retention_is_bounded_without_breaking_stream_reconciliation() {
+        let mut state = AppState {
+            thread: ThreadState::Ready {
+                id: "thr".to_owned(),
+            },
+            turn: TurnState::Streaming {
+                thread_id: "thr".to_owned(),
+                turn_id: "turn".to_owned(),
+            },
+            ..AppState::default()
+        };
+        let streamed = format!("prefix-{}", "界".repeat(MAX_TRANSCRIPT_BYTES / 3 + 100));
+        state.reduce(Action::Event(DomainEvent::AgentDelta {
+            thread_id: "thr".to_owned(),
+            turn_id: "turn".to_owned(),
+            item_id: "item".to_owned(),
+            delta: streamed.clone(),
+        }));
+        assert!(
+            state
+                .transcript
+                .iter()
+                .map(|entry| entry.text.len())
+                .sum::<usize>()
+                <= MAX_TRANSCRIPT_BYTES
+        );
+        assert!(state
+            .transcript_dropped_prefix_bytes
+            .contains_key(&("turn".to_owned(), "item".to_owned())));
+        assert_eq!(state.transcript_dropped_prefix_bytes.len(), 1);
+
+        let mut contradicted = state.clone();
+        let mut contradictory_final = streamed.clone();
+        contradictory_final.replace_range(..1, "X");
+        contradicted.reduce(Action::Event(DomainEvent::AgentCompleted {
+            thread_id: "thr".to_owned(),
+            turn_id: "turn".to_owned(),
+            item_id: "item".to_owned(),
+            text: contradictory_final,
+        }));
+        assert!(matches!(contradicted.turn, TurnState::Failed { .. }));
+
+        let final_text = format!("{streamed}-tail");
+        state.reduce(Action::Event(DomainEvent::AgentCompleted {
+            thread_id: "thr".to_owned(),
+            turn_id: "turn".to_owned(),
+            item_id: "item".to_owned(),
+            text: final_text,
+        }));
+        assert!(matches!(state.turn, TurnState::Streaming { .. }));
+        assert!(state.transcript.last().unwrap().text.ends_with("-tail"));
+        assert!(
+            state
+                .transcript
+                .iter()
+                .map(|entry| entry.text.len())
+                .sum::<usize>()
+                <= MAX_TRANSCRIPT_BYTES
+        );
+
+        state.thread = ThreadState::Resuming {
+            id: "thr-history".to_owned(),
+        };
+        let history = (0..=MAX_TRANSCRIPT_ENTRIES)
+            .map(|index| TranscriptEntry {
+                role: TranscriptRole::User,
+                text: format!("history-{index}"),
+                item_id: None,
+                turn_id: None,
+            })
+            .collect();
+        state.reduce(Action::Event(DomainEvent::ResumeSucceeded {
+            id: "thr-history".to_owned(),
+            history,
+        }));
+        assert_eq!(state.transcript.len(), MAX_TRANSCRIPT_ENTRIES);
+        assert_eq!(state.transcript.first().unwrap().text, "history-1");
+    }
+
+    #[test]
+    fn transcript_retention_bounds_newline_and_display_width_floods() {
+        let mut state = AppState {
+            thread: ThreadState::Ready {
+                id: "thr".to_owned(),
+            },
+            turn: TurnState::Streaming {
+                thread_id: "thr".to_owned(),
+                turn_id: "turn".to_owned(),
+            },
+            ..AppState::default()
+        };
+        state.reduce(Action::Event(DomainEvent::AgentDelta {
+            thread_id: "thr".to_owned(),
+            turn_id: "turn".to_owned(),
+            item_id: "newlines".to_owned(),
+            delta: format!("HEAD{}TAIL", "\n".repeat(MAX_TRANSCRIPT_NEWLINES + 70_000)),
+        }));
+        let retained = &state.transcript.last().unwrap().text;
+        assert!(retained.bytes().filter(|byte| *byte == b'\n').count() <= MAX_TRANSCRIPT_NEWLINES);
+        assert!(retained.ends_with("TAIL"));
+
+        state.reduce(Action::Event(DomainEvent::AgentDelta {
+            thread_id: "thr".to_owned(),
+            turn_id: "turn".to_owned(),
+            item_id: "wide".to_owned(),
+            delta: format!(
+                "{}WIDTH-TAIL",
+                "x".repeat(MAX_TRANSCRIPT_DISPLAY_COLUMNS + 1_000)
+            ),
+        }));
+        let columns = state.transcript.iter().fold(0usize, |total, entry| {
+            total.saturating_add(UnicodeWidthStr::width(entry.text.as_str()))
+        });
+        assert!(columns <= MAX_TRANSCRIPT_DISPLAY_COLUMNS);
+        assert!(state
+            .transcript
+            .last()
+            .unwrap()
+            .text
+            .ends_with("WIDTH-TAIL"));
+        assert!(state.transcript_dropped_prefix_bytes.len() <= 1);
     }
 
     #[test]
@@ -2936,7 +3617,7 @@ mod tests {
         state.thinking.visible = true;
         let oversized = format!(
             "discard\u{0007}{}tail",
-            "界".repeat(MAX_THINKING_CHARS + 20)
+            "界".repeat(MAX_THINKING_BYTES / 3 + 20)
         );
         state.reduce(Action::Event(DomainEvent::ThinkingDelta {
             thread_id: "thr".to_owned(),
@@ -2947,7 +3628,8 @@ mod tests {
             delta: oversized,
         }));
         let retained = &state.thinking.entries[0].text;
-        assert_eq!(retained.chars().count(), MAX_THINKING_CHARS);
+        assert!(retained.len() <= MAX_THINKING_BYTES);
+        assert!(retained.len() >= MAX_THINKING_BYTES.saturating_sub(2));
         assert!(retained.ends_with("tail"));
         assert!(!retained.contains('\u{0007}'));
 
@@ -2965,6 +3647,41 @@ mod tests {
     }
 
     #[test]
+    fn thinking_entry_count_evicts_exactly_the_oldest_active_turn_entries() {
+        let mut state = AppState {
+            turn: TurnState::Streaming {
+                thread_id: "thr".to_owned(),
+                turn_id: "turn".to_owned(),
+            },
+            ..AppState::default()
+        };
+
+        for index in 0..=(MAX_THINKING_ENTRIES as i64 + 1) {
+            state.reduce(Action::Event(DomainEvent::ThinkingDelta {
+                thread_id: "thr".to_owned(),
+                turn_id: "turn".to_owned(),
+                item_id: format!("why-{index}"),
+                kind: ThinkingKind::Summary,
+                index,
+                delta: index.to_string(),
+            }));
+        }
+
+        assert_eq!(state.thinking.entries.len(), MAX_THINKING_ENTRIES);
+        assert_eq!(state.thinking.entries[0].item_id, "why-2");
+        assert_eq!(state.thinking.entries[0].text, "2");
+        assert_eq!(
+            state.thinking.entries.last().unwrap().item_id,
+            format!("why-{}", MAX_THINKING_ENTRIES + 1)
+        );
+        assert!(state
+            .thinking
+            .entries
+            .iter()
+            .all(|entry| entry.turn_id == "turn"));
+    }
+
+    #[test]
     fn quitting_interrupts_before_the_ordered_shutdown_path() {
         let mut state = AppState {
             turn: TurnState::Streaming {
@@ -2979,5 +3696,65 @@ mod tests {
             [Effect::InterruptTurn { .. }, Effect::Shutdown]
         ));
         assert!(state.shutting_down);
+    }
+
+    #[test]
+    fn settled_turns_and_shutdown_ignore_late_mutating_results() {
+        let mut state = thread_ready_state();
+        let settled = state.clone();
+        assert!(state
+            .reduce(Action::Event(DomainEvent::TurnOperationFailed(
+                "late interrupt failure".to_owned(),
+            )))
+            .is_empty());
+        assert_eq!(state, settled);
+
+        let effects = state.reduce(Action::Intent(Intent::Quit));
+        assert_eq!(effects, vec![Effect::Shutdown]);
+        let shutting_down = state.clone();
+        for action in [
+            Action::Intent(Intent::Quit),
+            Action::Intent(Intent::NewThread),
+            Action::Intent(Intent::SendMessage("too late".to_owned())),
+            Action::Event(DomainEvent::NewThreadSucceeded {
+                id: "thr-too-late".to_owned(),
+            }),
+            Action::Event(DomainEvent::ResumeSucceeded {
+                id: "thr-too-late".to_owned(),
+                history: Vec::new(),
+            }),
+        ] {
+            assert!(state.reduce(action).is_empty());
+            assert_eq!(state, shutting_down);
+        }
+    }
+
+    #[test]
+    fn safety_violation_settles_busy_picker_and_pending_thread_work() {
+        let mut state = thread_ready_state();
+        assert_eq!(
+            state.reduce(Action::Intent(Intent::NewThread)),
+            vec![Effect::StartNewThread]
+        );
+        state.thread_picker = Some(ThreadPickerState {
+            phase: ThreadPickerPhase::Deleting { requested: 1 },
+            threads: vec![thread("thr-old", "Old", 1)],
+            selected: 0,
+            confirmation: None,
+            message: None,
+        });
+
+        state.reduce(Action::Event(DomainEvent::SafetyViolation(
+            "unknown/request".to_owned(),
+        )));
+
+        let picker = state.thread_picker.as_ref().unwrap();
+        assert!(matches!(picker.phase, ThreadPickerPhase::Failed));
+        assert!(picker.message.as_deref().unwrap().contains("denied"));
+        let snapshot = state.clone();
+        state.reduce(Action::Event(DomainEvent::NewThreadSucceeded {
+            id: "thr-too-late".to_owned(),
+        }));
+        assert_eq!(state, snapshot);
     }
 }
