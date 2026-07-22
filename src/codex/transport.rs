@@ -25,6 +25,17 @@ use crate::diagnostics::{
 
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const EVENT_QUEUE_CAPACITY: usize = 64;
+// Installed 0.144.6 schema notifications containing tool output the current UI does not render.
+// Item/turn terminal events remain queued so the conversation lifecycle still completes.
+const UNRENDERED_TOOL_PROGRESS_NOTIFICATIONS: [&str; 7] = [
+    "command/exec/outputDelta",
+    "process/outputDelta",
+    "turn/diff/updated",
+    "item/commandExecution/outputDelta",
+    "item/commandExecution/terminalInteraction",
+    "item/fileChange/outputDelta",
+    "item/fileChange/patchUpdated",
+];
 const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -552,6 +563,9 @@ async fn run_connection(runtime: ConnectionRuntime) {
                                 let _ = request.reply.send(result);
                             }
                             Ok(InboundMessage::Notification { method, params }) => {
+                                if is_unrendered_tool_progress(&method) {
+                                    continue 'connection;
+                                }
                                 if unusable_reason.is_none() && !send_event(
                                     &events,
                                     generation,
@@ -644,6 +658,10 @@ async fn run_connection(runtime: ConnectionRuntime) {
     if let Some(reply) = shutdown_reply {
         let _ = reply.send(shutdown_result);
     }
+}
+
+fn is_unrendered_tool_progress(method: &str) -> bool {
+    UNRENDERED_TOOL_PROGRESS_NOTIFICATIONS.contains(&method)
 }
 
 fn remote_error(error: RpcErrorObject) -> TransportError {
