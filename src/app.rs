@@ -500,6 +500,42 @@ impl Default for AppState {
 }
 
 impl AppState {
+    /// Returns whether the active turn is waiting for its first visible assistant payload.
+    ///
+    /// This is deliberately derived from turn and transcript state. The activity indicator is
+    /// presentation-only and must never be inserted into conversation history or preferences.
+    pub fn is_waiting_for_assistant_text(&self) -> bool {
+        if self.shutting_down
+            || !matches!(self.connection, ConnectionState::Ready { .. })
+            || !matches!(self.auth, AuthState::SignedIn { .. })
+        {
+            return false;
+        }
+
+        match &self.turn {
+            TurnState::Starting => {
+                matches!(self.thread, ThreadState::None | ThreadState::Ready { .. })
+            }
+            TurnState::Streaming { thread_id, turn_id } => {
+                let active_thread_matches =
+                    matches!(&self.thread, ThreadState::Ready { id } if id == thread_id);
+                active_thread_matches
+                    && !self
+                        .transcript
+                        .iter()
+                        .rev()
+                        .take_while(|entry| entry.role == TranscriptRole::Assistant)
+                        .any(|entry| {
+                            entry.turn_id.as_deref() == Some(turn_id) && !entry.text.is_empty()
+                        })
+            }
+            TurnState::Idle
+            | TurnState::Completed { .. }
+            | TurnState::Interrupted { .. }
+            | TurnState::Failed { .. } => false,
+        }
+    }
+
     pub fn reduce(&mut self, action: Action) -> Vec<Effect> {
         match action {
             Action::Intent(intent) => self.reduce_intent(intent),
@@ -1411,6 +1447,21 @@ mod tests {
         }
     }
 
+    fn waiting_turn_state() -> AppState {
+        AppState {
+            connection: ConnectionState::Ready { generation: 1 },
+            auth: AuthState::SignedIn { scope: None },
+            thread: ThreadState::Ready {
+                id: "thr".to_owned(),
+            },
+            turn: TurnState::Streaming {
+                thread_id: "thr".to_owned(),
+                turn_id: "turn".to_owned(),
+            },
+            ..AppState::default()
+        }
+    }
+
     #[test]
     fn signed_out_send_is_local_and_same_account_auto_resumes() {
         let mut state = AppState::default();
@@ -1873,6 +1924,140 @@ mod tests {
         )])));
         assert_eq!(state.selected_model.as_deref(), Some("m1"));
         assert_eq!(state.notice, None);
+    }
+
+    #[test]
+    fn assistant_activity_starts_with_the_turn_and_stops_on_first_nonempty_text() {
+        let mut state = AppState {
+            connection: ConnectionState::Ready { generation: 1 },
+            auth: AuthState::SignedIn { scope: None },
+            thread: ThreadState::Ready {
+                id: "thr".to_owned(),
+            },
+            models: vec![model("m1", true, &["high"], "high")],
+            selected_model: Some("m1".to_owned()),
+            selected_reasoning: Some("high".to_owned()),
+            ..AppState::default()
+        };
+        let preferences = state.preferences.clone();
+
+        assert_eq!(
+            state.reduce(Action::Intent(Intent::SendMessage("hello".to_owned()))),
+            vec![Effect::SendMessage {
+                text: "hello".to_owned(),
+            }]
+        );
+        assert!(state.is_waiting_for_assistant_text());
+        assert_eq!(state.transcript.len(), 1);
+        assert_eq!(state.transcript[0].role, TranscriptRole::User);
+
+        state.reduce(Action::Event(DomainEvent::TurnStarted {
+            thread_id: "thr".to_owned(),
+            turn_id: "turn".to_owned(),
+        }));
+        assert!(state.is_waiting_for_assistant_text());
+
+        state.reduce(Action::Event(DomainEvent::AgentDelta {
+            thread_id: "other".to_owned(),
+            turn_id: "turn".to_owned(),
+            item_id: "stale".to_owned(),
+            delta: "ignore me".to_owned(),
+        }));
+        assert!(state.is_waiting_for_assistant_text());
+
+        state.reduce(Action::Event(DomainEvent::AgentDelta {
+            thread_id: "thr".to_owned(),
+            turn_id: "turn".to_owned(),
+            item_id: "item".to_owned(),
+            delta: String::new(),
+        }));
+        assert!(state.is_waiting_for_assistant_text());
+
+        state.reduce(Action::Event(DomainEvent::AgentDelta {
+            thread_id: "thr".to_owned(),
+            turn_id: "turn".to_owned(),
+            item_id: "item".to_owned(),
+            delta: "reply".to_owned(),
+        }));
+        assert!(!state.is_waiting_for_assistant_text());
+        assert_eq!(state.transcript.last().unwrap().text, "reply");
+        assert_eq!(state.preferences, preferences);
+        assert!(state
+            .transcript
+            .iter()
+            .all(|entry| !entry.text.contains('~')));
+    }
+
+    #[test]
+    fn assistant_activity_stops_on_all_turn_terminal_states() {
+        for outcome in [
+            TurnOutcome::Completed,
+            TurnOutcome::Interrupted,
+            TurnOutcome::Failed("model failed".to_owned()),
+        ] {
+            let mut state = waiting_turn_state();
+            assert!(state.is_waiting_for_assistant_text());
+            state.reduce(Action::Event(DomainEvent::TurnFinished {
+                thread_id: "thr".to_owned(),
+                turn_id: "turn".to_owned(),
+                outcome,
+            }));
+            assert!(!state.is_waiting_for_assistant_text());
+        }
+
+        let mut operation_failed = waiting_turn_state();
+        operation_failed.reduce(Action::Event(DomainEvent::TurnOperationFailed(
+            "request failed".to_owned(),
+        )));
+        assert!(!operation_failed.is_waiting_for_assistant_text());
+
+        for event in [
+            DomainEvent::ConnectionFailed("disconnected".to_owned()),
+            DomainEvent::ProcessExited("exited".to_owned()),
+            DomainEvent::SafetyViolation("tool/request".to_owned()),
+        ] {
+            let mut state = waiting_turn_state();
+            state.reduce(Action::Event(event));
+            assert!(!state.is_waiting_for_assistant_text());
+        }
+    }
+
+    #[test]
+    fn assistant_activity_stops_on_account_thread_and_shutdown_transitions() {
+        let mut logged_out = waiting_turn_state();
+        logged_out.reduce(Action::Event(DomainEvent::LoggedOut));
+        assert!(!logged_out.is_waiting_for_assistant_text());
+
+        let mut unsupported_account = waiting_turn_state();
+        unsupported_account.reduce(Action::Event(DomainEvent::UnsupportedAccount(
+            "api key".to_owned(),
+        )));
+        assert!(!unsupported_account.is_waiting_for_assistant_text());
+
+        let mut resuming = waiting_turn_state();
+        resuming.reduce(Action::Event(DomainEvent::ResumeStarted {
+            id: "other-thread".to_owned(),
+        }));
+        assert!(!resuming.is_waiting_for_assistant_text());
+
+        let mut changed_thread = waiting_turn_state();
+        changed_thread.reduce(Action::Event(DomainEvent::ThreadStarted {
+            id: "other-thread".to_owned(),
+        }));
+        assert!(!changed_thread.is_waiting_for_assistant_text());
+
+        let mut shutting_down = waiting_turn_state();
+        shutting_down.reduce(Action::Intent(Intent::Quit));
+        assert!(!shutting_down.is_waiting_for_assistant_text());
+
+        let mut first_thread = waiting_turn_state();
+        first_thread.thread = ThreadState::None;
+        first_thread.turn = TurnState::Starting;
+        assert!(first_thread.is_waiting_for_assistant_text());
+        first_thread.reduce(Action::Event(DomainEvent::ThreadStarted {
+            id: "thr-new".to_owned(),
+        }));
+        assert!(first_thread.is_waiting_for_assistant_text());
     }
 
     #[test]
