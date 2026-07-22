@@ -4,11 +4,14 @@ use std::collections::VecDeque;
 
 use thiserror::Error;
 
-use crate::app::{Action, AppState, DomainEvent, Effect, Intent, ThreadState, TurnOutcome};
+use crate::app::{
+    Action, AppState, DomainEvent, Effect, Intent, ThreadDeletionFailure, ThreadState, TurnOutcome,
+};
 use crate::codex::protocol::CancelLoginAccountStatus;
 use crate::codex::protocol::{ProtocolEvent, TurnStatus};
 use crate::codex::session::{
-    history_entries, model_choices, AccountState, SessionError, SessionEvent, SessionService,
+    history_entries, model_choices, thread_choices, AccountState, SessionError, SessionEvent,
+    SessionService,
 };
 use crate::codex::transport::TransportError;
 use crate::persistence::{LoadNotice, PersistenceError, PreferencesPort};
@@ -255,6 +258,46 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                         Vec::new()
                     }
                 },
+                Effect::StartNewThread => {
+                    let model = self.selected_model()?;
+                    match self.session.start_thread(&model).await {
+                        Ok(thread) => {
+                            self.state
+                                .reduce(Action::Event(DomainEvent::NewThreadSucceeded {
+                                    id: thread.id,
+                                }))
+                        }
+                        Err(error) => {
+                            let fatal = is_fatal_transport(&error);
+                            let mut effects =
+                                self.state
+                                    .reduce(Action::Event(DomainEvent::NewThreadFailed(
+                                        error.to_string(),
+                                    )));
+                            if fatal {
+                                effects.extend(self.state.reduce(Action::Event(
+                                    DomainEvent::ConnectionFailed(
+                                        "app-server connection became unusable while starting a new thread; restart AgentHarness"
+                                            .to_owned(),
+                                    ),
+                                )));
+                            }
+                            effects
+                        }
+                    }
+                }
+                Effect::ListThreads => match self.session.list_threads().await {
+                    Ok(threads) => self
+                        .state
+                        .reduce(Action::Event(DomainEvent::ThreadListLoaded(
+                            thread_choices(threads),
+                        ))),
+                    Err(error) => self
+                        .state
+                        .reduce(Action::Event(DomainEvent::ThreadListFailed(
+                            error.to_string(),
+                        ))),
+                },
                 Effect::ResumeThread { id } => {
                     self.state
                         .reduce(Action::Event(DomainEvent::ResumeStarted { id: id.clone() }));
@@ -273,6 +316,37 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                         })),
                     }
                 }
+                Effect::SwitchThread { id } => {
+                    let model = self.selected_model()?;
+                    match self.session.resume_thread(&id, &model).await {
+                        Ok(thread) => {
+                            self.state
+                                .reduce(Action::Event(DomainEvent::ThreadSwitchSucceeded {
+                                    id,
+                                    history: history_entries(&thread),
+                                }))
+                        }
+                        Err(error) => {
+                            let fatal = is_fatal_transport(&error);
+                            let mut effects =
+                                self.state
+                                    .reduce(Action::Event(DomainEvent::ThreadSwitchFailed {
+                                        id,
+                                        message: error.to_string(),
+                                    }));
+                            if fatal {
+                                effects.extend(self.state.reduce(Action::Event(
+                                    DomainEvent::ConnectionFailed(
+                                        "app-server connection became unusable while resuming a thread; restart AgentHarness"
+                                            .to_owned(),
+                                    ),
+                                )));
+                            }
+                            effects
+                        }
+                    }
+                }
+                Effect::DeleteThreads { ids } => self.delete_threads(ids).await,
                 Effect::SendMessage { text } => match self.send_message(&text).await {
                     Ok(effects) => effects,
                     Err(error) => self.reduce_mutating_error(error),
@@ -335,6 +409,68 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
             thread_id,
             turn_id: response.turn.id,
         })))
+    }
+
+    async fn delete_threads(&mut self, ids: Vec<String>) -> Vec<Effect> {
+        let requested = ids.len();
+        let active_id = self.state.preferences.thread_id.clone().or_else(|| {
+            if let ThreadState::Ready { id } = &self.state.thread {
+                Some(id.clone())
+            } else {
+                None
+            }
+        });
+        let mut deleted = Vec::new();
+        let mut failures = Vec::new();
+        let mut fatal_message = None;
+        let mut pending = ids.into_iter();
+        while let Some(id) = pending.next() {
+            if active_id.as_deref() == Some(id.as_str()) {
+                failures.push(ThreadDeletionFailure {
+                    id,
+                    message: "active saved thread is protected".to_owned(),
+                });
+                continue;
+            }
+            match self.session.delete_thread(&id).await {
+                Ok(()) => deleted.push(id),
+                Err(error) => {
+                    let fatal = is_fatal_transport(&error);
+                    failures.push(ThreadDeletionFailure {
+                        id,
+                        message: error.to_string(),
+                    });
+                    if fatal {
+                        for skipped in pending {
+                            failures.push(ThreadDeletionFailure {
+                                id: skipped,
+                                message: "not attempted because the app-server connection became unusable"
+                                    .to_owned(),
+                            });
+                        }
+                        fatal_message = Some(
+                            "app-server connection became unusable during thread deletion; restart AgentHarness"
+                                .to_owned(),
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+        let mut effects = self
+            .state
+            .reduce(Action::Event(DomainEvent::ThreadDeletionFinished {
+                requested,
+                deleted,
+                failures,
+            }));
+        if let Some(message) = fatal_message {
+            effects.extend(
+                self.state
+                    .reduce(Action::Event(DomainEvent::ConnectionFailed(message))),
+            );
+        }
+        effects
     }
 
     async fn cancel_login(&mut self, login_id: &str) -> Vec<Effect> {
@@ -512,6 +648,13 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                 )))
         }
     }
+}
+
+fn is_fatal_transport(error: &SessionError) -> bool {
+    matches!(
+        error,
+        SessionError::Transport(TransportError::Timeout | TransportError::SafetyViolation(_))
+    )
 }
 
 fn load_notice_message(notice: Option<LoadNotice>) -> Option<String> {

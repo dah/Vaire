@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -28,6 +29,8 @@ pub struct PreferencesV1 {
     pub thread_id: Option<String>,
     pub model_id: Option<String>,
     pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub thread_account_scopes: BTreeMap<String, AccountScope>,
 }
 
 impl Default for PreferencesV1 {
@@ -38,6 +41,7 @@ impl Default for PreferencesV1 {
             thread_id: None,
             model_id: None,
             reasoning_effort: None,
+            thread_account_scopes: BTreeMap::new(),
         }
     }
 }
@@ -187,6 +191,7 @@ mod tests {
         AccountScope, FilePreferences, LoadNotice, PreferencesPort, PreferencesV1,
         PREFERENCES_VERSION,
     };
+    use std::collections::BTreeMap;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
@@ -202,6 +207,10 @@ mod tests {
             thread_id: Some("thr-1".to_owned()),
             model_id: Some("model-1".to_owned()),
             reasoning_effort: Some("high".to_owned()),
+            thread_account_scopes: BTreeMap::from([(
+                "thr-1".to_owned(),
+                AccountScope::from_chatgpt_email("user@example.com").unwrap(),
+            )]),
         };
         store.save(&preferences).unwrap();
         assert_eq!(store.load().unwrap().preferences, preferences);
@@ -225,6 +234,14 @@ mod tests {
         let path = temp.path().join("preferences.json");
         let store = FilePreferences::new(&path);
         assert_eq!(store.load().unwrap().notice, Some(LoadNotice::Missing));
+        fs::write(
+            &path,
+            br#"{"version":1,"account_scope":null,"thread_id":null,"model_id":null,"reasoning_effort":null}"#,
+        )
+        .unwrap();
+        let prior_v1 = store.load().unwrap();
+        assert_eq!(prior_v1.notice, None);
+        assert!(prior_v1.preferences.thread_account_scopes.is_empty());
         fs::write(&path, b"{not-json").unwrap();
         let corrupt = store.load().unwrap();
         assert_eq!(corrupt.notice, Some(LoadNotice::Corrupt));

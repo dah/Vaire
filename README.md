@@ -1,6 +1,6 @@
 # AgentHarness
 
-AgentHarness is a small macOS-first terminal chat client for one Codex conversation. It uses the
+AgentHarness is a small macOS-first terminal chat client with one active Codex conversation. It uses the
 installed Codex app-server and the Codex-owned ChatGPT subscription login flow; it does not offer
 API-key login or tool/approval UI.
 
@@ -19,14 +19,20 @@ OpenAI page fails, run **/logout** to cancel the pending attempt and use **/logi
 opens the device verification page and displays the one-time code in the TUI. AgentHarness stores its
 non-secret preferences and dedicated Codex runtime under
 ~/Library/Application Support/AgentHarness/; Codex owns credentials in that dedicated home.
-Preferences may include the normalized ChatGPT email used to prevent cross-account thread resume;
-the preferences file and its directory are owner-only.
+Preferences may include the normalized ChatGPT email and a non-secret thread-to-account registry
+used to prevent cross-account thread listing or resume; the preferences file and its directory are
+owner-only.
 Sanitized diagnostics are written to the diagnostics subdirectory.
 
 ## Commands and keys
 
-- **/login**, **/login device**, **/logout**, **/resume**, **/help**, **/quit**
+- **/login**, **/login device**, **/logout**, **/new**, **/resume**, **/help**, **/quit**
 - **/model [id]** and **/reasoning [value]** use choices reported by app-server
+- **/new** eagerly creates a fresh thread without deleting the previous one
+- **/resume** opens the saved-thread picker; arrows or **j/k** navigate and **Enter** resumes
+- In the thread picker, **d** requests deletion of the selected inactive thread and **D** requests
+  deletion of all inactive threads. Both actions show their exact scope and require a second
+  **Enter** confirmation; **Escape** cancels. The active saved thread is always protected.
 - **Enter** sends; **Alt-Enter** inserts a newline
 - **PageUp/PageDown**, arrow keys, **Home**, and **End** scroll the transcript
 - **Escape** closes local help/errors, or interrupts an active turn

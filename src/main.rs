@@ -56,7 +56,7 @@ async fn event_loop(
                     if !event::poll(Duration::ZERO)? {
                         break;
                     }
-                    if let Some(intent) = ui.handle_event(event::read()?) {
+                    if let Some(intent) = ui.handle_event_for_state(event::read()?, &state) {
                         if matches!(intent, Intent::Quit) {
                             state.shutting_down = true;
                             runtime.request_shutdown();
