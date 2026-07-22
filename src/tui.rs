@@ -10,11 +10,13 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{
     app::{
-        AppState, AuthState, ConnectionState, Intent, ThreadDeleteConfirmation, ThreadPickerPhase,
-        ThreadPickerState, ThreadState, TranscriptRole, TurnState,
+        AppState, AuthState, ConnectionState, Intent, ThinkingKind, ThreadDeleteConfirmation,
+        ThreadPickerPhase, ThreadPickerState, ThreadState, TranscriptRole, TurnState,
     },
     command::{parse, HELP_TEXT},
 };
+
+pub use crate::text::sanitize_terminal_text;
 
 const MIN_WIDTH: u16 = 36;
 const MIN_HEIGHT: u16 = 9;
@@ -156,21 +158,6 @@ impl UiState {
     }
 }
 
-/// Removes terminal control characters before any text is measured or rendered.
-/// Newlines remain as layout separators; tabs become spaces.
-pub fn sanitize_terminal_text(value: &str) -> String {
-    let mut sanitized = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '\n' => sanitized.push('\n'),
-            '\t' => sanitized.push_str("    "),
-            character if character.is_control() => {}
-            character => sanitized.push(character),
-        }
-    }
-    sanitized
-}
-
 pub fn render(frame: &mut Frame<'_>, state: &AppState, ui: &UiState) {
     let area = frame.area();
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
@@ -218,7 +205,17 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, ui: &UiState) {
         ),
         regions[0],
     );
-    render_transcript(frame, regions[1], state, ui.scroll_from_bottom);
+    if state.thinking.visible {
+        let thinking_width = (regions[1].width / 3).clamp(16, 42);
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(18), Constraint::Length(thinking_width)])
+            .split(regions[1]);
+        render_transcript(frame, body[0], state, ui.scroll_from_bottom);
+        render_thinking(frame, body[1], state);
+    } else {
+        render_transcript(frame, regions[1], state, ui.scroll_from_bottom);
+    }
     render_composer(
         frame,
         regions[2],
@@ -434,6 +431,73 @@ fn render_transcript(
     let from_bottom = scroll_from_bottom.min(max_top);
     let top = max_top.saturating_sub(from_bottom).min(u16::MAX as usize) as u16;
     frame.render_widget(paragraph.scroll((top, 0)), area);
+}
+
+fn render_thinking(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let mut lines = vec![Line::from(Span::styled(
+        "Only text emitted by Codex.",
+        Style::default().fg(Color::DarkGray),
+    ))];
+    let populated = state
+        .thinking
+        .entries
+        .iter()
+        .filter(|entry| !entry.text.is_empty())
+        .collect::<Vec<_>>();
+
+    if populated.is_empty() {
+        let message = match &state.turn {
+            TurnState::Starting | TurnState::Streaming { .. } => "Awaiting emitted reasoning…",
+            TurnState::Failed { .. } => "No thinking text was emitted before this turn failed.",
+            _ => "No thinking text has been emitted for this turn.",
+        };
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            message,
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for entry in populated {
+            lines.push(Line::from(""));
+            let label = match entry.kind {
+                ThinkingKind::Summary => "Summary",
+                ThinkingKind::EmittedText => "Emitted text",
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{label}:"),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            let text = sanitize_terminal_text(&entry.text);
+            lines.extend(text.lines().map(|line| Line::from(line.to_owned())));
+        }
+        if matches!(state.turn, TurnState::Failed { .. }) {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Turn failed.",
+                Style::default().fg(Color::Red),
+            )));
+        }
+    }
+
+    let block = Block::default().title(" Thinking ").borders(Borders::ALL);
+    let inner = block.inner(area);
+    let wrap_width = inner.width.max(1) as usize;
+    let line_count = lines
+        .iter()
+        .map(|line| line.width().max(1).div_ceil(wrap_width))
+        .sum::<usize>();
+    let top = line_count
+        .saturating_sub(inner.height as usize)
+        .min(u16::MAX as usize) as u16;
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false })
+            .scroll((top, 0)),
+        area,
+    );
 }
 
 fn render_composer(frame: &mut Frame<'_>, area: Rect, wrapped: &WrappedText, show_cursor: bool) {
@@ -666,9 +730,9 @@ mod tests {
 
     use super::{render, sanitize_terminal_text, UiState};
     use crate::app::{
-        Action, AppState, AuthState, ConnectionState, DomainEvent, Intent, ThreadChoice,
-        ThreadDeleteConfirmation, ThreadPickerPhase, ThreadPickerState, ThreadState,
-        TranscriptEntry, TranscriptRole, TurnState,
+        Action, AppState, AuthState, ConnectionState, DomainEvent, Intent, ThinkingEntry,
+        ThinkingKind, ThreadChoice, ThreadDeleteConfirmation, ThreadPickerPhase, ThreadPickerState,
+        ThreadState, TranscriptEntry, TranscriptRole, TurnState,
     };
 
     fn draw(state: &AppState, ui: &UiState, width: u16, height: u16) -> Terminal<TestBackend> {
@@ -850,6 +914,59 @@ mod tests {
     }
 
     #[test]
+    fn thinking_panel_renders_closed_open_narrow_streaming_and_error_states() {
+        let mut state = ready();
+        let closed = screen(&state, &UiState::default(), 100, 20);
+        assert!(!closed.contains("Only text emitted by Codex"));
+
+        state.thinking.visible = true;
+        state.turn = TurnState::Streaming {
+            thread_id: "thread".to_owned(),
+            turn_id: "turn".to_owned(),
+        };
+        let awaiting = screen(&state, &UiState::default(), 100, 20);
+        assert!(awaiting.contains("Thinking"));
+        assert!(awaiting.contains("Awaiting emitted reasoning"));
+
+        state.thinking.entries.push(ThinkingEntry {
+            turn_id: "turn".to_owned(),
+            item_id: "why".to_owned(),
+            kind: ThinkingKind::Summary,
+            index: 0,
+            text: "Checking facts safely".to_owned(),
+            completed: false,
+        });
+        let normal = screen(&state, &UiState::default(), 100, 20);
+        assert!(normal.contains("Only text emitted by Codex"));
+        assert!(normal.contains("Summary:"));
+        assert!(normal.contains("Checking facts safely"));
+
+        let narrow = screen(&state, &UiState::default(), 52, 16);
+        assert!(narrow.contains("Conversation"));
+        assert!(narrow.contains("Thinking"));
+        assert!(narrow.contains("Summary:"));
+        assert!(narrow.contains("Message"));
+
+        let minimum_width = screen(&state, &UiState::default(), 36, 12);
+        assert!(minimum_width.contains("Conversation"));
+        assert!(minimum_width.contains("Thinking"));
+        assert!(minimum_width.contains("Message"));
+
+        state.turn = TurnState::Failed {
+            turn_id: Some("turn".to_owned()),
+            message: "model failed".to_owned(),
+        };
+        let failed = screen(&state, &UiState::default(), 100, 20);
+        assert!(failed.contains("Turn failed."));
+        assert!(failed.contains("Checking facts safely"));
+
+        state.thinking.entries.clear();
+        let empty_failure = screen(&state, &UiState::default(), 100, 20);
+        assert!(empty_failure.contains("No thinking text"));
+        assert!(empty_failure.contains("turn failed"));
+    }
+
+    #[test]
     fn input_supports_multiline_help_interrupt_scroll_and_quit() {
         let mut ui = UiState::default();
         ui.handle_event(Event::Key(KeyEvent::new(
@@ -923,6 +1040,7 @@ mod tests {
     #[test]
     fn thread_picker_keys_are_modal_and_confirmation_is_a_second_action() {
         let mut state = ready();
+        state.thinking.visible = true;
         state.thread_picker = Some(ThreadPickerState {
             phase: ThreadPickerPhase::Ready,
             threads: vec![ThreadChoice {
@@ -934,7 +1052,10 @@ mod tests {
             confirmation: None,
             message: None,
         });
-        let mut ui = UiState::default();
+        let mut ui = UiState {
+            composer: "draft message".to_owned(),
+            ..UiState::default()
+        };
         assert_eq!(
             ui.handle_event_for_state(
                 Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
@@ -956,7 +1077,11 @@ mod tests {
             ),
             Some(Intent::ThreadPickerRequestClearInactive)
         );
-        assert!(ui.composer.is_empty());
+        assert_eq!(ui.composer, "draft message");
+
+        let combined = screen(&state, &ui, 36, 12);
+        assert!(combined.contains("Saved threads"));
+        assert!(!combined.contains("draft message"));
 
         state.thread_picker.as_mut().unwrap().confirmation =
             Some(ThreadDeleteConfirmation::Selected {

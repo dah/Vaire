@@ -8,9 +8,10 @@ use super::protocol::{
     parse_notification, AccountReadResponse, CancelLoginAccountParams, CancelLoginAccountResponse,
     CancelLoginAccountStatus, InitializeParams, InitializeResponse, LoginAccountParams,
     LoginAccountResponse, ModelInfo, ModelListParams, ModelListResponse, ProtocolEvent,
-    ThreadDeleteParams, ThreadDeleteResponse, ThreadListEntry, ThreadListParams,
-    ThreadListResponse, ThreadReadParams, ThreadResponse, ThreadResumeParams, ThreadSnapshot,
-    ThreadStartParams, TurnInterruptParams, TurnStartParams, TurnStartResponse, UserInput,
+    ReasoningSummary, ThreadDeleteParams, ThreadDeleteResponse, ThreadItemContent, ThreadListEntry,
+    ThreadListParams, ThreadListResponse, ThreadReadParams, ThreadResponse, ThreadResumeParams,
+    ThreadSnapshot, ThreadStartParams, TurnInterruptParams, TurnStartParams, TurnStartResponse,
+    UserInput,
 };
 use super::safety::{ConversationSafetyPolicy, IsolationPaths};
 use super::transport::{AppServerTransport, TransportError};
@@ -365,6 +366,7 @@ impl SessionService {
                         input: vec![UserInput::text(text)],
                         model: model.to_owned(),
                         effort: effort.to_owned(),
+                        summary: ReasoningSummary::Auto,
                         approval_policy: "never".to_owned(),
                         cwd: self.paths.conversation.clone(),
                         sandbox_policy: overrides["sandboxPolicy"].clone(),
@@ -485,14 +487,16 @@ pub fn history_entries(thread: &ThreadSnapshot) -> Vec<TranscriptEntry> {
             match item.kind.as_str() {
                 "userMessage" => {
                     for input in &item.content {
-                        if input.kind == "text" {
-                            if let Some(text) = &input.text {
-                                entries.push(TranscriptEntry {
-                                    role: TranscriptRole::User,
-                                    text: text.clone(),
-                                    item_id: Some(item.id.clone()),
-                                    turn_id: Some(turn.id.clone()),
-                                });
+                        if let ThreadItemContent::UserInput(input) = input {
+                            if input.kind == "text" {
+                                if let Some(text) = &input.text {
+                                    entries.push(TranscriptEntry {
+                                        role: TranscriptRole::User,
+                                        text: text.clone(),
+                                        item_id: Some(item.id.clone()),
+                                        turn_id: Some(turn.id.clone()),
+                                    });
+                                }
                             }
                         }
                     }
@@ -520,8 +524,8 @@ mod tests {
 
     use super::{history_entries, model_choices, thread_choices};
     use crate::codex::protocol::{
-        ModelInfo, ReasoningEffortOption, ThreadItem, ThreadListEntry, ThreadSnapshot,
-        TurnSnapshot, TurnStatus, UserInput,
+        ModelInfo, ReasoningEffortOption, ThreadItem, ThreadItemContent, ThreadListEntry,
+        ThreadSnapshot, TurnSnapshot, TurnStatus, UserInput,
     };
 
     #[test]
@@ -549,19 +553,29 @@ mod tests {
                         id: "u".to_owned(),
                         kind: "userMessage".to_owned(),
                         text: None,
-                        content: vec![UserInput::text("hello")],
+                        content: vec![UserInput::text("hello").into()],
+                        summary: vec![],
                     },
                     ThreadItem {
                         id: "tool".to_owned(),
                         kind: "commandExecution".to_owned(),
                         text: None,
                         content: vec![],
+                        summary: vec![],
+                    },
+                    ThreadItem {
+                        id: "why".to_owned(),
+                        kind: "reasoning".to_owned(),
+                        text: None,
+                        content: vec![ThreadItemContent::Text("emitted detail".to_owned())],
+                        summary: vec!["checked facts".to_owned()],
                     },
                     ThreadItem {
                         id: "a".to_owned(),
                         kind: "agentMessage".to_owned(),
                         text: Some("hi".to_owned()),
                         content: vec![],
+                        summary: vec![],
                     },
                 ],
             }],

@@ -1,5 +1,9 @@
 use crate::command::HELP_TEXT;
 use crate::persistence::{AccountScope, PreferencesV1};
+use crate::text::sanitize_terminal_text;
+
+const MAX_THINKING_CHARS: usize = 32 * 1024;
+const MAX_THINKING_ENTRIES: usize = 128;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Intent {
@@ -12,6 +16,7 @@ pub enum Intent {
     SelectModel(String),
     ShowReasoning,
     SelectReasoning(String),
+    ToggleThinking,
     Resume,
     ThreadPickerMoveUp,
     ThreadPickerMoveDown,
@@ -99,6 +104,174 @@ pub struct TranscriptEntry {
     pub text: String,
     pub item_id: Option<String>,
     pub turn_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ThinkingKind {
+    Summary,
+    EmittedText,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThinkingEntry {
+    pub turn_id: String,
+    pub item_id: String,
+    pub kind: ThinkingKind,
+    pub index: i64,
+    pub text: String,
+    pub completed: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ThinkingState {
+    pub visible: bool,
+    pub entries: Vec<ThinkingEntry>,
+}
+
+impl ThinkingState {
+    fn clear_content(&mut self) {
+        self.entries.clear();
+    }
+
+    fn ensure_entry(
+        &mut self,
+        turn_id: &str,
+        item_id: &str,
+        kind: ThinkingKind,
+        index: i64,
+    ) -> Option<&mut ThinkingEntry> {
+        if index < 0 {
+            return None;
+        }
+        if let Some(position) = self.entries.iter().position(|entry| {
+            entry.turn_id == turn_id
+                && entry.item_id == item_id
+                && entry.kind == kind
+                && entry.index == index
+        }) {
+            return self.entries.get_mut(position);
+        }
+        if self.entries.len() >= MAX_THINKING_ENTRIES {
+            self.entries.remove(0);
+        }
+        self.entries.push(ThinkingEntry {
+            turn_id: turn_id.to_owned(),
+            item_id: item_id.to_owned(),
+            kind,
+            index,
+            text: String::new(),
+            completed: false,
+        });
+        self.entries.last_mut()
+    }
+
+    fn add_part(&mut self, turn_id: &str, item_id: &str, index: i64) {
+        self.ensure_entry(turn_id, item_id, ThinkingKind::Summary, index);
+    }
+
+    fn append_delta(
+        &mut self,
+        turn_id: &str,
+        item_id: &str,
+        kind: ThinkingKind,
+        index: i64,
+        delta: &str,
+    ) {
+        let delta = sanitize_terminal_text(delta);
+        if delta.is_empty() {
+            return;
+        }
+        if let Some(entry) = self.ensure_entry(turn_id, item_id, kind, index) {
+            entry.text.push_str(&delta);
+        }
+        self.enforce_bound();
+    }
+
+    fn reconcile_item(
+        &mut self,
+        turn_id: &str,
+        item_id: &str,
+        summary: &[String],
+        content: &[String],
+    ) {
+        for (index, final_text) in summary.iter().enumerate() {
+            self.reconcile_entry(
+                turn_id,
+                item_id,
+                ThinkingKind::Summary,
+                index as i64,
+                final_text,
+            );
+        }
+        for (index, final_text) in content.iter().enumerate() {
+            self.reconcile_entry(
+                turn_id,
+                item_id,
+                ThinkingKind::EmittedText,
+                index as i64,
+                final_text,
+            );
+        }
+        for entry in &mut self.entries {
+            if entry.turn_id == turn_id && entry.item_id == item_id {
+                entry.completed = true;
+            }
+        }
+        self.enforce_bound();
+    }
+
+    fn reconcile_entry(
+        &mut self,
+        turn_id: &str,
+        item_id: &str,
+        kind: ThinkingKind,
+        index: i64,
+        final_text: &str,
+    ) {
+        let final_text = sanitize_terminal_text(final_text);
+        let Some(entry) = self.ensure_entry(turn_id, item_id, kind, index) else {
+            return;
+        };
+        if final_text.is_empty() {
+            return;
+        }
+        // The completed item is authoritative. A matching stream receives only its missing
+        // suffix; a contradictory stream is replaced so it can never be duplicated.
+        if final_text.starts_with(&entry.text) {
+            entry.text.push_str(&final_text[entry.text.len()..]);
+        } else {
+            entry.text = final_text;
+        }
+    }
+
+    fn enforce_bound(&mut self) {
+        let total = self
+            .entries
+            .iter()
+            .map(|entry| entry.text.chars().count())
+            .sum::<usize>();
+        let mut excess = total.saturating_sub(MAX_THINKING_CHARS);
+        for entry in &mut self.entries {
+            if excess == 0 {
+                break;
+            }
+            let available = entry.text.chars().count();
+            let remove = available.min(excess);
+            trim_chars_from_front(&mut entry.text, remove);
+            excess -= remove;
+        }
+    }
+}
+
+fn trim_chars_from_front(value: &mut String, count: usize) {
+    if count == 0 {
+        return;
+    }
+    let Some((byte_index, _)) = value.char_indices().nth(count) else {
+        value.clear();
+        return;
+    };
+    value.drain(..byte_index);
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -252,6 +425,27 @@ pub enum DomainEvent {
         item_id: String,
         text: String,
     },
+    ThinkingSummaryPartAdded {
+        thread_id: String,
+        turn_id: String,
+        item_id: String,
+        summary_index: i64,
+    },
+    ThinkingDelta {
+        thread_id: String,
+        turn_id: String,
+        item_id: String,
+        kind: ThinkingKind,
+        index: i64,
+        delta: String,
+    },
+    ThinkingCompleted {
+        thread_id: String,
+        turn_id: String,
+        item_id: String,
+        summary: Vec<String>,
+        content: Vec<String>,
+    },
     TurnFinished {
         thread_id: String,
         turn_id: String,
@@ -279,6 +473,7 @@ pub struct AppState {
     pub selected_reasoning: Option<String>,
     pub transcript: Vec<TranscriptEntry>,
     pub thread_picker: Option<ThreadPickerState>,
+    pub thinking: ThinkingState,
     pub preferences: PreferencesV1,
     pub notice: Option<String>,
     pub shutting_down: bool,
@@ -296,6 +491,7 @@ impl Default for AppState {
             selected_reasoning: None,
             transcript: Vec::new(),
             thread_picker: None,
+            thinking: ThinkingState::default(),
             preferences: PreferencesV1::default(),
             notice: None,
             shutting_down: false,
@@ -343,6 +539,9 @@ impl AppState {
                     || "select a model first".to_owned(),
                     |model| model.supported_reasoning_efforts.join(", "),
                 ));
+            }
+            Intent::ToggleThinking => {
+                self.thinking.visible = !self.thinking.visible;
             }
             Intent::SelectModel(id) => {
                 let Some(model) = self.models.iter().find(|model| model.id == id).cloned() else {
@@ -424,6 +623,7 @@ impl AppState {
                     self.notice = Some(reason);
                 } else {
                     self.turn = TurnState::Starting;
+                    self.thinking.clear_content();
                     self.transcript.push(TranscriptEntry {
                         role: TranscriptRole::User,
                         text: text.clone(),
@@ -478,6 +678,7 @@ impl AppState {
                 }
             }
             DomainEvent::AccountLoaded(scope) => {
+                self.thinking.clear_content();
                 let completed_login = matches!(self.auth, AuthState::SigningIn { .. });
                 let picker_was_open = self.thread_picker.is_some();
                 self.auth = AuthState::SignedIn {
@@ -511,6 +712,7 @@ impl AppState {
                 self.thread = ThreadState::None;
                 self.turn = TurnState::Idle;
                 self.thread_picker = None;
+                self.thinking.clear_content();
             }
             DomainEvent::CatalogLoaded(models) => {
                 self.models = models;
@@ -520,6 +722,7 @@ impl AppState {
             DomainEvent::ResumeSucceeded { id, history } => {
                 self.thread = ThreadState::Ready { id: id.clone() };
                 self.transcript = history;
+                self.thinking.clear_content();
                 self.preferences.thread_id = Some(id.clone());
                 self.register_thread_scope(&id);
                 return vec![Effect::Persist(self.preferences.clone())];
@@ -536,6 +739,7 @@ impl AppState {
                 self.turn = TurnState::Idle;
                 self.transcript.clear();
                 self.thread_picker = None;
+                self.thinking.clear_content();
                 self.preferences.thread_id = Some(id.clone());
                 if let AuthState::SignedIn { scope } = &self.auth {
                     self.preferences.account_scope = scope.clone();
@@ -598,6 +802,7 @@ impl AppState {
                     self.turn = TurnState::Idle;
                     self.transcript = history;
                     self.thread_picker = None;
+                    self.thinking.clear_content();
                     self.preferences.thread_id = Some(id.clone());
                     if let AuthState::SignedIn { scope } = &self.auth {
                         self.preferences.account_scope = scope.clone();
@@ -733,6 +938,41 @@ impl AppState {
                         };
                         self.notice = Some(message);
                     }
+                }
+            }
+            DomainEvent::ThinkingSummaryPartAdded {
+                thread_id,
+                turn_id,
+                item_id,
+                summary_index,
+            } => {
+                if self.matches_active(&thread_id, &turn_id) {
+                    self.thinking.add_part(&turn_id, &item_id, summary_index);
+                }
+            }
+            DomainEvent::ThinkingDelta {
+                thread_id,
+                turn_id,
+                item_id,
+                kind,
+                index,
+                delta,
+            } => {
+                if self.matches_active(&thread_id, &turn_id) {
+                    self.thinking
+                        .append_delta(&turn_id, &item_id, kind, index, &delta);
+                }
+            }
+            DomainEvent::ThinkingCompleted {
+                thread_id,
+                turn_id,
+                item_id,
+                summary,
+                content,
+            } => {
+                if self.matches_active(&thread_id, &turn_id) {
+                    self.thinking
+                        .reconcile_item(&turn_id, &item_id, &summary, &content);
                 }
             }
             DomainEvent::TurnFinished {
@@ -1112,6 +1352,18 @@ mod tests {
         }
     }
 
+    fn seed_thinking(state: &mut AppState, text: &str) {
+        state.thinking.visible = true;
+        state.thinking.entries.push(ThinkingEntry {
+            turn_id: "turn-old".to_owned(),
+            item_id: "thinking-old".to_owned(),
+            kind: ThinkingKind::Summary,
+            index: 0,
+            text: text.to_owned(),
+            completed: true,
+        });
+    }
+
     fn thread_ready_state() -> AppState {
         let scope = AccountScope::from_chatgpt_email("user@example.com");
         AppState {
@@ -1310,12 +1562,14 @@ mod tests {
     #[test]
     fn new_thread_is_eager_and_only_replaces_state_after_success() {
         let mut state = thread_ready_state();
+        seed_thinking(&mut state, "old reasoning");
         assert_eq!(
             state.reduce(Action::Intent(Intent::NewThread)),
             vec![Effect::StartNewThread]
         );
         assert_eq!(state.preferences.thread_id.as_deref(), Some("thr-active"));
         assert_eq!(state.transcript[0].text, "old conversation");
+        assert_eq!(state.thinking.entries[0].text, "old reasoning");
 
         state.reduce(Action::Event(DomainEvent::NewThreadFailed(
             "server rejected it".to_owned(),
@@ -1323,12 +1577,15 @@ mod tests {
         assert!(matches!(&state.thread, ThreadState::Ready { id } if id == "thr-active"));
         assert_eq!(state.preferences.thread_id.as_deref(), Some("thr-active"));
         assert_eq!(state.transcript.len(), 1);
+        assert_eq!(state.thinking.entries[0].text, "old reasoning");
 
         let effects = state.reduce(Action::Event(DomainEvent::NewThreadSucceeded {
             id: "thr-new".to_owned(),
         }));
         assert!(matches!(&state.thread, ThreadState::Ready { id } if id == "thr-new"));
         assert!(state.transcript.is_empty());
+        assert!(state.thinking.entries.is_empty());
+        assert!(state.thinking.visible);
         assert!(matches!(state.turn, TurnState::Idle));
         assert_eq!(state.preferences.thread_id.as_deref(), Some("thr-new"));
         assert!(matches!(effects.as_slice(), [Effect::Persist(_)]));
@@ -1337,6 +1594,7 @@ mod tests {
     #[test]
     fn picker_navigation_and_failed_switch_preserve_the_active_thread() {
         let mut state = thread_ready_state();
+        seed_thinking(&mut state, "active thread reasoning");
         assert_eq!(
             state.reduce(Action::Intent(Intent::Resume)),
             vec![Effect::ListThreads]
@@ -1361,6 +1619,7 @@ mod tests {
         }));
         assert_eq!(state.preferences.thread_id.as_deref(), Some("thr-active"));
         assert_eq!(state.transcript[0].text, "old conversation");
+        assert_eq!(state.thinking.entries[0].text, "active thread reasoning");
         assert!(matches!(
             state.thread_picker.as_ref().map(|picker| &picker.phase),
             Some(ThreadPickerPhase::Ready)
@@ -1384,8 +1643,32 @@ mod tests {
         }));
         assert_eq!(state.preferences.thread_id.as_deref(), Some("thr-old"));
         assert_eq!(state.transcript, history);
+        assert!(state.thinking.entries.is_empty());
+        assert!(state.thinking.visible);
         assert!(state.thread_picker.is_none());
         assert!(matches!(effects.as_slice(), [Effect::Persist(_)]));
+    }
+
+    #[test]
+    fn automatic_resume_preserves_thinking_on_failure_and_clears_it_on_success() {
+        let mut state = thread_ready_state();
+        seed_thinking(&mut state, "current thread reasoning");
+
+        state.reduce(Action::Event(DomainEvent::ResumeStarted {
+            id: "thr-old".to_owned(),
+        }));
+        state.reduce(Action::Event(DomainEvent::ResumeFailed {
+            id: "thr-old".to_owned(),
+            message: "temporary failure".to_owned(),
+        }));
+        assert_eq!(state.thinking.entries[0].text, "current thread reasoning");
+
+        state.reduce(Action::Event(DomainEvent::ResumeSucceeded {
+            id: "thr-old".to_owned(),
+            history: Vec::new(),
+        }));
+        assert!(state.thinking.entries.is_empty());
+        assert!(state.thinking.visible);
     }
 
     #[test]
@@ -1638,6 +1921,148 @@ mod tests {
             text: "beta".to_owned(),
         }));
         assert!(matches!(state.turn, TurnState::Failed { .. }));
+    }
+
+    #[test]
+    fn thinking_toggle_stream_scope_and_completion_are_deterministic() {
+        let mut state = AppState {
+            turn: TurnState::Streaming {
+                thread_id: "thr".to_owned(),
+                turn_id: "turn".to_owned(),
+            },
+            ..AppState::default()
+        };
+        assert!(!state.thinking.visible);
+        assert!(state
+            .reduce(Action::Intent(Intent::ToggleThinking))
+            .is_empty());
+        assert!(state.thinking.visible);
+
+        state.reduce(Action::Event(DomainEvent::ThinkingDelta {
+            thread_id: "stale".to_owned(),
+            turn_id: "turn".to_owned(),
+            item_id: "why".to_owned(),
+            kind: ThinkingKind::Summary,
+            index: 0,
+            delta: "ignore".to_owned(),
+        }));
+        state.reduce(Action::Event(DomainEvent::ThinkingDelta {
+            thread_id: "thr".to_owned(),
+            turn_id: "old-turn".to_owned(),
+            item_id: "why".to_owned(),
+            kind: ThinkingKind::Summary,
+            index: 0,
+            delta: "ignore".to_owned(),
+        }));
+        state.reduce(Action::Event(DomainEvent::ThinkingDelta {
+            thread_id: "thr".to_owned(),
+            turn_id: "turn".to_owned(),
+            item_id: "why".to_owned(),
+            kind: ThinkingKind::Summary,
+            index: -1,
+            delta: "ignore".to_owned(),
+        }));
+        state.reduce(Action::Event(DomainEvent::ThinkingSummaryPartAdded {
+            thread_id: "thr".to_owned(),
+            turn_id: "turn".to_owned(),
+            item_id: "why".to_owned(),
+            summary_index: 0,
+        }));
+        state.reduce(Action::Event(DomainEvent::ThinkingDelta {
+            thread_id: "thr".to_owned(),
+            turn_id: "turn".to_owned(),
+            item_id: "why".to_owned(),
+            kind: ThinkingKind::Summary,
+            index: 0,
+            delta: "check\u{1b}[31m\ting".to_owned(),
+        }));
+        state.reduce(Action::Event(DomainEvent::ThinkingDelta {
+            thread_id: "thr".to_owned(),
+            turn_id: "turn".to_owned(),
+            item_id: "why".to_owned(),
+            kind: ThinkingKind::EmittedText,
+            index: 0,
+            delta: "detail".to_owned(),
+        }));
+        assert_eq!(state.thinking.entries.len(), 2);
+        assert_eq!(state.thinking.entries[0].text, "check[31m    ing");
+        assert!(!state.thinking.entries[0].text.contains('\u{1b}'));
+
+        state.reduce(Action::Event(DomainEvent::ThinkingCompleted {
+            thread_id: "thr".to_owned(),
+            turn_id: "turn".to_owned(),
+            item_id: "why".to_owned(),
+            summary: vec!["checking facts".to_owned()],
+            content: vec!["detail complete".to_owned()],
+        }));
+        assert_eq!(state.thinking.entries[0].text, "checking facts");
+        assert_eq!(state.thinking.entries[1].text, "detail complete");
+        assert!(state.thinking.entries.iter().all(|entry| entry.completed));
+
+        state.reduce(Action::Event(DomainEvent::TurnFinished {
+            thread_id: "thr".to_owned(),
+            turn_id: "turn".to_owned(),
+            outcome: TurnOutcome::Completed,
+        }));
+        state.reduce(Action::Event(DomainEvent::ThinkingDelta {
+            thread_id: "thr".to_owned(),
+            turn_id: "turn".to_owned(),
+            item_id: "why".to_owned(),
+            kind: ThinkingKind::Summary,
+            index: 0,
+            delta: " stale suffix".to_owned(),
+        }));
+        assert_eq!(state.thinking.entries[0].text, "checking facts");
+        state.reduce(Action::Intent(Intent::ToggleThinking));
+        assert!(!state.thinking.visible);
+    }
+
+    #[test]
+    fn thinking_retention_is_bounded_and_new_turn_clears_only_content() {
+        let mut state = AppState {
+            connection: ConnectionState::Ready { generation: 1 },
+            auth: AuthState::SignedIn { scope: None },
+            thread: ThreadState::Ready {
+                id: "thr".to_owned(),
+            },
+            turn: TurnState::Streaming {
+                thread_id: "thr".to_owned(),
+                turn_id: "turn".to_owned(),
+            },
+            models: vec![model("m", true, &["high"], "high")],
+            selected_model: Some("m".to_owned()),
+            selected_reasoning: Some("high".to_owned()),
+            ..AppState::default()
+        };
+        state.thinking.visible = true;
+        let oversized = format!(
+            "discard\u{0007}{}tail",
+            "界".repeat(MAX_THINKING_CHARS + 20)
+        );
+        state.reduce(Action::Event(DomainEvent::ThinkingDelta {
+            thread_id: "thr".to_owned(),
+            turn_id: "turn".to_owned(),
+            item_id: "why".to_owned(),
+            kind: ThinkingKind::Summary,
+            index: 0,
+            delta: oversized,
+        }));
+        let retained = &state.thinking.entries[0].text;
+        assert_eq!(retained.chars().count(), MAX_THINKING_CHARS);
+        assert!(retained.ends_with("tail"));
+        assert!(!retained.contains('\u{0007}'));
+
+        state.turn = TurnState::Completed {
+            turn_id: "turn".to_owned(),
+        };
+        assert_eq!(
+            state.reduce(Action::Intent(Intent::SendMessage("next".to_owned()))),
+            vec![Effect::SendMessage {
+                text: "next".to_owned()
+            }]
+        );
+        assert!(state.thinking.entries.is_empty());
+        assert!(state.thinking.visible);
     }
 
     #[test]

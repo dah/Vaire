@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agentharness::app::{
-    AuthState, ConnectionState, Intent, ThreadState, TranscriptRole, TurnState,
+    AuthState, ConnectionState, Intent, ThinkingKind, ThreadState, TranscriptRole, TurnState,
 };
 use agentharness::backend::BackendCoordinator;
 use agentharness::codex::safety::{ConversationSafetyPolicy, IsolationPaths};
@@ -127,9 +127,18 @@ printf '%s\n' '{{"id":4,"result":{{"data":[{{"id":"m1","displayName":"duplicate"
 IFS= read -r thread_start
 printf '%s\n' '{{"id":5,"result":{{"thread":{{"id":"thr-new","turns":[]}}}}}}'
 IFS= read -r turn_start
+case "$turn_start" in
+  *'"summary":"auto"'*) ;;
+  *) exit 89 ;;
+esac
 printf '%s\n' '{{"id":6,"result":{{"turn":{{"id":"turn-new","items":[],"status":"inProgress"}}}}}}'
 printf '%s\n' '{{"method":"future/notification","params":{{"ignored":true}}}}'
 printf '%s\n' '{{"method":"item/agentMessage/delta","params":{{"threadId":"stale","turnId":"turn-new","itemId":"item-a","delta":"wrong"}}}}'
+printf '%s\n' '{{"method":"item/reasoning/summaryTextDelta","params":{{"threadId":"stale","turnId":"turn-new","itemId":"why","summaryIndex":0,"delta":"wrong"}}}}'
+printf '%s\n' '{{"method":"item/reasoning/summaryPartAdded","params":{{"threadId":"thr-new","turnId":"turn-new","itemId":"why","summaryIndex":0}}}}'
+printf '%s\n' '{{"method":"item/reasoning/summaryTextDelta","params":{{"threadId":"thr-new","turnId":"turn-new","itemId":"why","summaryIndex":0,"delta":"checking"}}}}'
+printf '%s\n' '{{"method":"item/reasoning/textDelta","params":{{"threadId":"thr-new","turnId":"turn-new","itemId":"why","contentIndex":0,"delta":"emitted"}}}}'
+printf '%s\n' '{{"method":"item/completed","params":{{"threadId":"thr-new","turnId":"turn-new","completedAtMs":1,"item":{{"id":"why","type":"reasoning","summary":["checking facts"],"content":["emitted detail"]}}}}}}'
 printf '%s\n' '{{"method":"item/agentMessage/delta","params":{{"threadId":"thr-new","turnId":"turn-new","itemId":"item-a","delta":"hé"}}}}'
 printf '%s\n' '{{"method":"item/completed","params":{{"threadId":"thr-new","turnId":"turn-new","completedAtMs":1,"item":{{"id":"item-a","type":"agentMessage","text":"héllo"}}}}}}'
 printf '%s\n' '{{"method":"turn/completed","params":{{"threadId":"thr-new","turn":{{"id":"turn-new","items":[],"status":"completed"}}}}}}'
@@ -150,7 +159,7 @@ IFS= read -r hold
         .handle_intent(Intent::SendMessage("hello".to_owned()))
         .await
         .unwrap();
-    for _ in 0..5 {
+    for _ in 0..10 {
         assert!(backend.pump_event().await.unwrap());
     }
     assert!(matches!(backend.state().thread, ThreadState::Ready { ref id } if id == "thr-new"));
@@ -162,6 +171,17 @@ IFS= read -r hold
         .find(|entry| entry.role == TranscriptRole::Assistant)
         .unwrap();
     assert_eq!(assistant.text, "héllo");
+    assert_eq!(backend.state().thinking.entries.len(), 2);
+    assert_eq!(
+        backend.state().thinking.entries[0].kind,
+        ThinkingKind::Summary
+    );
+    assert_eq!(backend.state().thinking.entries[0].text, "checking facts");
+    assert_eq!(
+        backend.state().thinking.entries[1].kind,
+        ThinkingKind::EmittedText
+    );
+    assert_eq!(backend.state().thinking.entries[1].text, "emitted detail");
     assert_eq!(saved.value().thread_id.as_deref(), Some("thr-new"));
     backend.shutdown().await.unwrap();
 }

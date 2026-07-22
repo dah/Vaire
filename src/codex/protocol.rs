@@ -237,6 +237,20 @@ impl UserInput {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ThreadItemContent {
+    UserInput(UserInput),
+    Text(String),
+    Other(Value),
+}
+
+impl From<UserInput> for ThreadItemContent {
+    fn from(value: UserInput) -> Self {
+        Self::UserInput(value)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct ThreadItem {
     pub id: String,
@@ -245,7 +259,9 @@ pub struct ThreadItem {
     #[serde(default)]
     pub text: Option<String>,
     #[serde(default)]
-    pub content: Vec<UserInput>,
+    pub content: Vec<ThreadItemContent>,
+    #[serde(default)]
+    pub summary: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -347,9 +363,16 @@ pub struct TurnStartParams {
     pub input: Vec<UserInput>,
     pub model: String,
     pub effort: String,
+    pub summary: ReasoningSummary,
     pub approval_policy: String,
     pub cwd: PathBuf,
     pub sandbox_policy: Value,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReasoningSummary {
+    Auto,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -370,6 +393,35 @@ pub struct AgentMessageDeltaNotification {
     pub thread_id: String,
     pub turn_id: String,
     pub item_id: String,
+    pub delta: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReasoningSummaryTextDeltaNotification {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
+    pub summary_index: i64,
+    pub delta: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReasoningSummaryPartAddedNotification {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
+    pub summary_index: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReasoningTextDeltaNotification {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
+    pub content_index: i64,
     pub delta: String,
 }
 
@@ -404,6 +456,9 @@ pub enum ProtocolEvent {
     ThreadStarted(ThreadSnapshot),
     TurnStarted(TurnNotification),
     AgentMessageDelta(AgentMessageDeltaNotification),
+    ReasoningSummaryTextDelta(ReasoningSummaryTextDeltaNotification),
+    ReasoningSummaryPartAdded(ReasoningSummaryPartAddedNotification),
+    ReasoningTextDelta(ReasoningTextDeltaNotification),
     ItemCompleted(ItemCompletedNotification),
     TurnCompleted(TurnNotification),
     Error(ErrorNotification),
@@ -427,6 +482,13 @@ pub fn parse_notification(method: &str, params: Value) -> Result<Option<Protocol
         }
         "turn/started" => ProtocolEvent::TurnStarted(decode(method, params)?),
         "item/agentMessage/delta" => ProtocolEvent::AgentMessageDelta(decode(method, params)?),
+        "item/reasoning/summaryTextDelta" => {
+            ProtocolEvent::ReasoningSummaryTextDelta(decode(method, params)?)
+        }
+        "item/reasoning/summaryPartAdded" => {
+            ProtocolEvent::ReasoningSummaryPartAdded(decode(method, params)?)
+        }
+        "item/reasoning/textDelta" => ProtocolEvent::ReasoningTextDelta(decode(method, params)?),
         "item/completed" => ProtocolEvent::ItemCompleted(decode(method, params)?),
         "turn/completed" => ProtocolEvent::TurnCompleted(decode(method, params)?),
         "error" => ProtocolEvent::Error(decode(method, params)?),
@@ -485,8 +547,8 @@ mod tests {
     use super::{
         classify_message, parse_notification, CancelLoginAccountParams, CancelLoginAccountResponse,
         CancelLoginAccountStatus, InboundMessage, InitializeParams, LoginAccountParams,
-        ProtocolEvent, RequestId, ThreadDeleteParams, ThreadDeleteResponse, ThreadListParams,
-        ThreadListResponse,
+        ProtocolEvent, ReasoningSummary, RequestId, ThreadDeleteParams, ThreadDeleteResponse,
+        ThreadItemContent, ThreadListParams, ThreadListResponse,
     };
 
     #[test]
@@ -597,5 +659,76 @@ mod tests {
             None
         );
         assert!(parse_notification("turn/completed", json!({"threadId":"thr"})).is_err());
+    }
+
+    #[test]
+    fn decodes_installed_reasoning_notifications_and_completed_snapshot() {
+        let summary = parse_notification(
+            "item/reasoning/summaryTextDelta",
+            json!({
+                "threadId":"thr", "turnId":"turn", "itemId":"why",
+                "summaryIndex":1, "delta":"checking"
+            }),
+        )
+        .unwrap();
+        assert!(matches!(
+            summary,
+            Some(ProtocolEvent::ReasoningSummaryTextDelta(delta))
+                if delta.summary_index == 1 && delta.delta == "checking"
+        ));
+
+        let part = parse_notification(
+            "item/reasoning/summaryPartAdded",
+            json!({
+                "threadId":"thr", "turnId":"turn", "itemId":"why", "summaryIndex":2
+            }),
+        )
+        .unwrap();
+        assert!(matches!(
+            part,
+            Some(ProtocolEvent::ReasoningSummaryPartAdded(part)) if part.summary_index == 2
+        ));
+
+        let text = parse_notification(
+            "item/reasoning/textDelta",
+            json!({
+                "threadId":"thr", "turnId":"turn", "itemId":"why",
+                "contentIndex":0, "delta":"emitted"
+            }),
+        )
+        .unwrap();
+        assert!(matches!(
+            text,
+            Some(ProtocolEvent::ReasoningTextDelta(delta))
+                if delta.content_index == 0 && delta.delta == "emitted"
+        ));
+
+        let completed = parse_notification(
+            "item/completed",
+            json!({
+                "threadId":"thr", "turnId":"turn", "completedAtMs":1,
+                "item": {
+                    "id":"why", "type":"reasoning",
+                    "summary":["checking facts"], "content":["emitted detail"]
+                }
+            }),
+        )
+        .unwrap();
+        assert!(matches!(
+            completed,
+            Some(ProtocolEvent::ItemCompleted(completed))
+                if completed.item.summary == ["checking facts"]
+                    && matches!(completed.item.content.as_slice(), [ThreadItemContent::Text(value)] if value == "emitted detail")
+        ));
+
+        assert!(parse_notification(
+            "item/reasoning/summaryTextDelta",
+            json!({"threadId":"thr", "turnId":"turn", "itemId":"why", "delta":"missing index"}),
+        )
+        .is_err());
+        assert_eq!(
+            serde_json::to_value(ReasoningSummary::Auto).unwrap(),
+            json!("auto")
+        );
     }
 }

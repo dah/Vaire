@@ -5,7 +5,8 @@ use std::collections::VecDeque;
 use thiserror::Error;
 
 use crate::app::{
-    Action, AppState, DomainEvent, Effect, Intent, ThreadDeletionFailure, ThreadState, TurnOutcome,
+    Action, AppState, DomainEvent, Effect, Intent, ThinkingKind, ThreadDeletionFailure,
+    ThreadState, TurnOutcome,
 };
 use crate::codex::protocol::CancelLoginAccountStatus;
 use crate::codex::protocol::{ProtocolEvent, TurnStatus};
@@ -556,6 +557,35 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                     delta: delta.delta,
                 }))
             }
+            ProtocolEvent::ReasoningSummaryTextDelta(delta) => {
+                self.state.reduce(Action::Event(DomainEvent::ThinkingDelta {
+                    thread_id: delta.thread_id,
+                    turn_id: delta.turn_id,
+                    item_id: delta.item_id,
+                    kind: ThinkingKind::Summary,
+                    index: delta.summary_index,
+                    delta: delta.delta,
+                }))
+            }
+            ProtocolEvent::ReasoningSummaryPartAdded(part) => {
+                self.state
+                    .reduce(Action::Event(DomainEvent::ThinkingSummaryPartAdded {
+                        thread_id: part.thread_id,
+                        turn_id: part.turn_id,
+                        item_id: part.item_id,
+                        summary_index: part.summary_index,
+                    }))
+            }
+            ProtocolEvent::ReasoningTextDelta(delta) => {
+                self.state.reduce(Action::Event(DomainEvent::ThinkingDelta {
+                    thread_id: delta.thread_id,
+                    turn_id: delta.turn_id,
+                    item_id: delta.item_id,
+                    kind: ThinkingKind::EmittedText,
+                    index: delta.content_index,
+                    delta: delta.delta,
+                }))
+            }
             ProtocolEvent::ItemCompleted(completed) => {
                 if completed.item.kind == "agentMessage" {
                     self.state
@@ -564,6 +594,24 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                             turn_id: completed.turn_id,
                             item_id: completed.item.id,
                             text: completed.item.text.unwrap_or_default(),
+                        }))
+                } else if completed.item.kind == "reasoning" {
+                    let content = completed
+                        .item
+                        .content
+                        .into_iter()
+                        .filter_map(|content| match content {
+                            crate::codex::protocol::ThreadItemContent::Text(text) => Some(text),
+                            _ => None,
+                        })
+                        .collect();
+                    self.state
+                        .reduce(Action::Event(DomainEvent::ThinkingCompleted {
+                            thread_id: completed.thread_id,
+                            turn_id: completed.turn_id,
+                            item_id: completed.item.id,
+                            summary: completed.item.summary,
+                            content,
                         }))
                 } else {
                     Vec::new()

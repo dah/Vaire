@@ -9,4 +9,5 @@ pub mod persistence;
 pub mod platform;
 pub mod runtime;
 pub mod terminal;
+pub mod text;
 pub mod tui;
