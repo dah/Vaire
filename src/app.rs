@@ -1103,10 +1103,16 @@ impl AppState {
             DomainEvent::SafetyViolation(method) => {
                 self.connection =
                     ConnectionState::Failed("runtime request boundary was triggered".to_owned());
-                self.turn = TurnState::Failed {
-                    turn_id: None,
-                    message: "unexpected server request was denied".to_owned(),
-                };
+                if self.turn.is_active() {
+                    let turn_id = match &self.turn {
+                        TurnState::Streaming { turn_id, .. } => Some(turn_id.clone()),
+                        _ => None,
+                    };
+                    self.turn = TurnState::Failed {
+                        turn_id,
+                        message: "unexpected server request was denied".to_owned(),
+                    };
+                }
                 self.notice = Some(format!("unexpected server request denied: {method}"));
             }
         }
@@ -1534,6 +1540,41 @@ mod tests {
             text: text.to_owned(),
             completed: true,
         });
+    }
+
+    fn deliver_stale_old_turn_events(state: &mut AppState) {
+        state.reduce(Action::Event(DomainEvent::ThinkingDelta {
+            thread_id: "thr-active".to_owned(),
+            turn_id: "turn-old".to_owned(),
+            item_id: "thinking-old".to_owned(),
+            kind: ThinkingKind::Summary,
+            index: 0,
+            delta: "stale delta".to_owned(),
+        }));
+        state.reduce(Action::Event(DomainEvent::ThinkingCompleted {
+            thread_id: "thr-active".to_owned(),
+            turn_id: "turn-old".to_owned(),
+            item_id: "thinking-old".to_owned(),
+            summary: vec!["stale final reasoning".to_owned()],
+            content: vec!["stale emitted detail".to_owned()],
+        }));
+        state.reduce(Action::Event(DomainEvent::AgentDelta {
+            thread_id: "thr-active".to_owned(),
+            turn_id: "turn-old".to_owned(),
+            item_id: "agent-old".to_owned(),
+            delta: "stale assistant text".to_owned(),
+        }));
+        state.reduce(Action::Event(DomainEvent::TurnFinished {
+            thread_id: "thr-active".to_owned(),
+            turn_id: "turn-old".to_owned(),
+            outcome: TurnOutcome::Failed("stale failure".to_owned()),
+        }));
+        state.reduce(Action::Event(DomainEvent::TokenUsageUpdated {
+            thread_id: "thr-active".to_owned(),
+            turn_id: "turn-old".to_owned(),
+            context_tokens: 99,
+            model_context_window: Some(100),
+        }));
     }
 
     fn thread_ready_state() -> AppState {
@@ -1983,6 +2024,129 @@ mod tests {
         assert!(matches!(state.turn, TurnState::Idle));
         assert_eq!(state.preferences.thread_id.as_deref(), Some("thr-new"));
         assert!(matches!(effects.as_slice(), [Effect::Persist(_)]));
+    }
+
+    #[test]
+    fn successful_new_thread_rejects_every_stale_old_turn_event() {
+        let mut state = thread_ready_state();
+        seed_thinking(&mut state, "old reasoning");
+        state.context_remaining_percent = Some(68);
+
+        state.reduce(Action::Event(DomainEvent::NewThreadSucceeded {
+            id: "thr-new".to_owned(),
+        }));
+        let replaced = state.clone();
+
+        deliver_stale_old_turn_events(&mut state);
+
+        assert_eq!(state, replaced);
+        assert!(matches!(&state.thread, ThreadState::Ready { id } if id == "thr-new"));
+        assert!(matches!(state.turn, TurnState::Idle));
+        assert!(state.transcript.is_empty());
+        assert!(state.thinking.entries.is_empty());
+        assert_eq!(state.context_remaining_percent, None);
+    }
+
+    #[test]
+    fn picker_ignores_mismatched_results_then_atomically_switches_threads() {
+        let mut state = thread_ready_state();
+        seed_thinking(&mut state, "active reasoning");
+        state.context_remaining_percent = Some(67);
+        state.reduce(Action::Intent(Intent::Resume));
+        state.reduce(Action::Event(DomainEvent::ThreadListLoaded(vec![
+            thread("thr-active", "Current", 30),
+            thread("thr-old", "Target", 20),
+            thread("thr-old-a", "Unrelated", 10),
+        ])));
+        state.reduce(Action::Intent(Intent::ThreadPickerMoveDown));
+        assert_eq!(
+            state.reduce(Action::Intent(Intent::ThreadPickerSelect)),
+            vec![Effect::SwitchThread {
+                id: "thr-old".to_owned()
+            }]
+        );
+        assert!(matches!(
+            state.thread_picker.as_ref().map(|picker| &picker.phase),
+            Some(ThreadPickerPhase::Resuming { id }) if id == "thr-old"
+        ));
+        let awaiting_b = state.clone();
+
+        assert!(state
+            .reduce(Action::Event(DomainEvent::ThreadSwitchSucceeded {
+                id: "thr-old-a".to_owned(),
+                history: vec![TranscriptEntry {
+                    role: TranscriptRole::Assistant,
+                    text: "wrong history".to_owned(),
+                    item_id: None,
+                    turn_id: None,
+                }],
+            }))
+            .is_empty());
+        assert_eq!(state, awaiting_b);
+
+        assert!(state
+            .reduce(Action::Event(DomainEvent::ThreadSwitchFailed {
+                id: "thr-old-a".to_owned(),
+                message: "wrong failure".to_owned(),
+            }))
+            .is_empty());
+        assert_eq!(state, awaiting_b);
+
+        let history = vec![TranscriptEntry {
+            role: TranscriptRole::Assistant,
+            text: "target history".to_owned(),
+            item_id: Some("agent-b".to_owned()),
+            turn_id: Some("turn-b".to_owned()),
+        }];
+        let effects = state.reduce(Action::Event(DomainEvent::ThreadSwitchSucceeded {
+            id: "thr-old".to_owned(),
+            history: history.clone(),
+        }));
+        assert!(matches!(effects.as_slice(), [Effect::Persist(_)]));
+        assert!(matches!(&state.thread, ThreadState::Ready { id } if id == "thr-old"));
+        assert_eq!(state.transcript, history);
+        assert!(state.thinking.entries.is_empty());
+        assert!(state.thinking.visible);
+        assert_eq!(state.context_remaining_percent, None);
+        assert!(state.thread_picker.is_none());
+    }
+
+    #[test]
+    fn successful_picker_switch_rejects_every_stale_old_turn_event() {
+        let mut state = thread_ready_state();
+        seed_thinking(&mut state, "active reasoning");
+        state.context_remaining_percent = Some(67);
+        state.thread_picker = Some(ThreadPickerState {
+            phase: ThreadPickerPhase::Resuming {
+                id: "thr-b".to_owned(),
+            },
+            threads: vec![
+                thread("thr-active", "Current", 30),
+                thread("thr-b", "Target", 20),
+            ],
+            selected: 1,
+            confirmation: None,
+            message: None,
+        });
+        state.reduce(Action::Event(DomainEvent::ThreadSwitchSucceeded {
+            id: "thr-b".to_owned(),
+            history: vec![TranscriptEntry {
+                role: TranscriptRole::Assistant,
+                text: "target history".to_owned(),
+                item_id: Some("agent-b".to_owned()),
+                turn_id: Some("turn-b".to_owned()),
+            }],
+        }));
+        let replaced = state.clone();
+
+        deliver_stale_old_turn_events(&mut state);
+
+        assert_eq!(state, replaced);
+        assert!(matches!(&state.thread, ThreadState::Ready { id } if id == "thr-b"));
+        assert!(matches!(state.turn, TurnState::Idle));
+        assert_eq!(state.transcript[0].text, "target history");
+        assert!(state.thinking.entries.is_empty());
+        assert_eq!(state.context_remaining_percent, None);
     }
 
     #[test]

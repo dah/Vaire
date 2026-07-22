@@ -414,19 +414,21 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
 
     async fn delete_threads(&mut self, ids: Vec<String>) -> Vec<Effect> {
         let requested = ids.len();
-        let active_id = self.state.preferences.thread_id.clone().or_else(|| {
-            if let ThreadState::Ready { id } = &self.state.thread {
-                Some(id.clone())
-            } else {
-                None
+        let mut protected_ids = Vec::new();
+        if let Some(id) = self.state.preferences.thread_id.clone() {
+            protected_ids.push(id);
+        }
+        if let ThreadState::Ready { id } = &self.state.thread {
+            if !protected_ids.contains(id) {
+                protected_ids.push(id.clone());
             }
-        });
+        }
         let mut deleted = Vec::new();
         let mut failures = Vec::new();
         let mut fatal_message = None;
         let mut pending = ids.into_iter();
         while let Some(id) = pending.next() {
-            if active_id.as_deref() == Some(id.as_str()) {
+            if protected_ids.contains(&id) {
                 failures.push(ThreadDeletionFailure {
                     id,
                     message: "active saved thread is protected".to_owned(),
