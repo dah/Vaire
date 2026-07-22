@@ -42,6 +42,7 @@ async fn event_loop(
     let mut states = runtime.subscribe();
     let mut state: AppState = states.borrow_and_update().clone();
     let mut ui = UiState::default();
+    ui.sync_activity_animation(&state);
     let mut redraw = true;
     let mut tick = time::interval(Duration::from_millis(33));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -52,6 +53,9 @@ async fn event_loop(
         }
         tokio::select! {
             _ = tick.tick() => {
+                if ui.advance_activity_animation(&state) {
+                    redraw = true;
+                }
                 for _ in 0..32 {
                     if !event::poll(Duration::ZERO)? {
                         break;
@@ -75,6 +79,7 @@ async fn event_loop(
                     ));
                 } else {
                     state = states.borrow_and_update().clone();
+                    ui.sync_activity_animation(&state);
                 }
                 redraw = true;
             }

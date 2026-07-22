@@ -17,6 +17,17 @@ const MIN_WIDTH: u16 = 36;
 const MIN_HEIGHT: u16 = 9;
 const MAX_COMPOSER_ROWS: usize = 5;
 const MAX_MESSAGE_ROWS: usize = 4;
+const ACTIVITY_TICKS_PER_FRAME: u8 = 4;
+const ACTIVITY_FRAMES: [&str; 10] = [
+    "~    ", "~~   ", "~~~  ", " ~~~ ", "  ~~~", "   ~~", "    ~", "   ~~", "  ~~~", " ~~~ ",
+];
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ActivityAnimation {
+    active: bool,
+    frame_index: usize,
+    ticks_in_frame: u8,
+}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct UiState {
@@ -24,9 +35,63 @@ pub struct UiState {
     pub overlay: Option<String>,
     /// Number of wrapped transcript rows held above the automatic bottom position.
     pub scroll_from_bottom: usize,
+    activity: ActivityAnimation,
 }
 
 impl UiState {
+    /// Synchronizes ephemeral animation state after an application-state update.
+    ///
+    /// The return value tells an event loop whether the visible animation changed.
+    pub fn sync_activity_animation(&mut self, state: &AppState) -> bool {
+        let needed = state.is_waiting_for_assistant_text();
+        match (self.activity.active, needed) {
+            (false, true) => {
+                self.activity.active = true;
+                self.activity.frame_index = 0;
+                self.activity.ticks_in_frame = 0;
+                true
+            }
+            (true, false) => {
+                self.activity = ActivityAnimation::default();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Advances the animation from the event loop's existing 33 ms tick.
+    ///
+    /// It returns `true` only when a redraw is necessary: animation activation, a new frame, or
+    /// removal after the surrounding state stopped needing the indicator.
+    pub fn advance_activity_animation(&mut self, state: &AppState) -> bool {
+        if !state.is_waiting_for_assistant_text() {
+            return if self.activity.active {
+                self.activity = ActivityAnimation::default();
+                true
+            } else {
+                false
+            };
+        }
+        if !self.activity.active {
+            self.activity.active = true;
+            self.activity.frame_index = 0;
+            self.activity.ticks_in_frame = 0;
+            return true;
+        }
+
+        self.activity.ticks_in_frame = self.activity.ticks_in_frame.saturating_add(1);
+        if self.activity.ticks_in_frame < ACTIVITY_TICKS_PER_FRAME {
+            return false;
+        }
+        self.activity.ticks_in_frame = 0;
+        self.activity.frame_index = (self.activity.frame_index + 1) % ACTIVITY_FRAMES.len();
+        true
+    }
+
+    fn activity_frame(&self) -> &'static str {
+        ACTIVITY_FRAMES[self.activity.frame_index]
+    }
+
     pub fn handle_event(&mut self, event: Event) -> Option<Intent> {
         match event {
             Event::Key(key) => self.handle_key(key),
@@ -170,7 +235,16 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, ui: &UiState) {
         ),
         regions[0],
     );
-    render_transcript(frame, regions[1], state, ui.scroll_from_bottom);
+    let activity_frame = state
+        .is_waiting_for_assistant_text()
+        .then(|| ui.activity_frame());
+    render_transcript(
+        frame,
+        regions[1],
+        state,
+        ui.scroll_from_bottom,
+        activity_frame,
+    );
     render_composer(frame, regions[2], &composer_wrapped);
     render_message_or_help(
         frame,
@@ -326,9 +400,10 @@ fn render_transcript(
     area: Rect,
     state: &AppState,
     scroll_from_bottom: usize,
+    activity_frame: Option<&'static str>,
 ) {
     let mut lines = Vec::<Line<'static>>::new();
-    if state.transcript.is_empty() {
+    if state.transcript.is_empty() && activity_frame.is_none() {
         let prompt = match (&state.auth, &state.thread) {
             (AuthState::SignedOut, _) => {
                 "Signed out. Use /login to connect your ChatGPT subscription."
@@ -360,6 +435,19 @@ fn render_transcript(
             }
             lines.push(Line::from(""));
         }
+    }
+    if let Some(activity_frame) = activity_frame {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "Agent:",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(activity_frame, Style::default().fg(Color::Cyan)),
+        ]));
+        lines.push(Line::from(""));
     }
 
     let block = Block::default()
@@ -457,8 +545,11 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, value: &str) {
 mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{backend::Backend, backend::TestBackend, layout::Position, Terminal};
+    use unicode_width::UnicodeWidthStr;
 
-    use super::{render, sanitize_terminal_text, UiState};
+    use super::{
+        render, sanitize_terminal_text, UiState, ACTIVITY_FRAMES, ACTIVITY_TICKS_PER_FRAME,
+    };
     use crate::app::{
         Action, AppState, AuthState, ConnectionState, DomainEvent, ThreadState, TranscriptEntry,
         TranscriptRole, TurnState,
@@ -495,6 +586,18 @@ mod tests {
             selected_reasoning: Some("high".to_owned()),
             ..AppState::default()
         }
+    }
+
+    fn waiting() -> AppState {
+        let mut state = ready();
+        state.turn = TurnState::Starting;
+        state.transcript.push(TranscriptEntry {
+            role: TranscriptRole::User,
+            text: "hello".to_owned(),
+            item_id: None,
+            turn_id: None,
+        });
+        state
     }
 
     #[test]
@@ -564,6 +667,102 @@ mod tests {
         let failed = screen(&state, &UiState::default(), 100, 20);
         assert!(failed.contains("upgrade Codex"));
         assert!(failed.contains("failed"));
+    }
+
+    #[test]
+    fn activity_indicator_is_ephemeral_and_disappears_on_first_text() {
+        let mut state = waiting();
+        let original_transcript = state.transcript.clone();
+        let mut ui = UiState::default();
+        assert!(ui.sync_activity_animation(&state));
+
+        let initial = screen(&state, &ui, 70, 16);
+        assert!(initial.contains("Agent: ~"));
+        assert_eq!(state.transcript, original_transcript);
+
+        state.reduce(Action::Event(DomainEvent::TurnStarted {
+            thread_id: "thread".to_owned(),
+            turn_id: "turn".to_owned(),
+        }));
+        state.reduce(Action::Event(DomainEvent::AgentDelta {
+            thread_id: "thread".to_owned(),
+            turn_id: "turn".to_owned(),
+            item_id: "item".to_owned(),
+            delta: "first text".to_owned(),
+        }));
+        assert!(ui.sync_activity_animation(&state));
+
+        let with_text = screen(&state, &ui, 70, 16);
+        assert!(with_text.contains("first text"));
+        assert!(!with_text.contains('~'));
+        assert_eq!(state.transcript.len(), original_transcript.len() + 1);
+        assert_eq!(state.transcript.last().unwrap().text, "first text");
+    }
+
+    #[test]
+    fn activity_animation_has_fixed_width_frames_and_bounded_tick_cadence() {
+        for frame in ACTIVITY_FRAMES {
+            assert!(frame.is_ascii());
+            assert_eq!(UnicodeWidthStr::width(frame), 5);
+        }
+
+        let mut state = waiting();
+        let transcript = state.transcript.clone();
+        let mut ui = UiState::default();
+        assert!(ui.sync_activity_animation(&state));
+        assert_eq!(ui.activity_frame(), ACTIVITY_FRAMES[0]);
+
+        for _ in 1..ACTIVITY_TICKS_PER_FRAME {
+            assert!(!ui.advance_activity_animation(&state));
+            assert_eq!(ui.activity_frame(), ACTIVITY_FRAMES[0]);
+        }
+        assert!(ui.advance_activity_animation(&state));
+        assert_eq!(ui.activity_frame(), ACTIVITY_FRAMES[1]);
+        assert!(screen(&state, &ui, 70, 16).contains("Agent: ~~"));
+        assert_eq!(state.transcript, transcript);
+
+        state.turn = TurnState::Completed {
+            turn_id: "turn".to_owned(),
+        };
+        assert!(ui.sync_activity_animation(&state));
+        assert_eq!(ui.activity_frame(), ACTIVITY_FRAMES[0]);
+        assert!(!ui.advance_activity_animation(&state));
+        assert!(!ui.advance_activity_animation(&state));
+    }
+
+    #[test]
+    fn activity_frames_preserve_scrolled_history_and_fit_narrow_terminals() {
+        let mut state = waiting();
+        state.turn = TurnState::Streaming {
+            thread_id: "thread".to_owned(),
+            turn_id: "turn".to_owned(),
+        };
+        state.transcript = (0..24)
+            .map(|index| TranscriptEntry {
+                role: TranscriptRole::User,
+                text: format!("historical message {index}"),
+                item_id: None,
+                turn_id: None,
+            })
+            .collect();
+        let mut ui = UiState {
+            scroll_from_bottom: 5,
+            ..UiState::default()
+        };
+        ui.sync_activity_animation(&state);
+        let before = screen(&state, &ui, 50, 12);
+        for _ in 0..ACTIVITY_TICKS_PER_FRAME {
+            ui.advance_activity_animation(&state);
+        }
+        let after = screen(&state, &ui, 50, 12);
+        assert_eq!(before, after);
+        assert_eq!(ui.scroll_from_bottom, 5);
+
+        ui.scroll_from_bottom = 0;
+        let narrow = screen(&state, &ui, 36, 9);
+        assert!(narrow.contains("Agent:"));
+        assert!(narrow.contains('~'));
+        assert!(screen(&state, &ui, 35, 8).contains("Terminal too small"));
     }
 
     #[test]
