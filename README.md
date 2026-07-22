@@ -2,7 +2,7 @@
 
 AgentHarness is a small macOS-first terminal chat client for one Codex conversation. It uses the
 installed Codex app-server and the Codex-owned ChatGPT subscription login flow; it does not offer
-API-key login or tool/approval UI.
+API-key login or approval UI. Codex's built-in command-line and file tools are enabled.
 
 ## Run
 
@@ -13,12 +13,19 @@ Requirements:
 
     cargo run
 
+**Warning:** AgentHarness runs Codex tools with `danger-full-access` and no approval prompts. The
+agent can run local programs, access the network, and create, modify, or delete any file your user
+account can access. This is not a sandbox; use it only with prompts and content you trust.
+
 Set AGENTHARNESS_CODEX_BIN=/absolute/path/to/codex only when codex is not on PATH.
 On first launch, enter **/login** and complete the HTTPS browser sign-in. If the callback-based
 OpenAI page fails, run **/logout** to cancel the pending attempt and use **/login device**; the app
 opens the device verification page and displays the one-time code in the TUI. AgentHarness stores its
 non-secret preferences and dedicated Codex runtime under
 ~/Library/Application Support/AgentHarness/; Codex owns credentials in that dedicated home.
+Tool commands start in the dedicated `runtime/conversation` directory, and files created there are
+kept across launches. The app-server receives the launching environment's `PATH`, while Codex's
+default filtering of sensitive environment-variable names remains in effect.
 Preferences may include the normalized ChatGPT email used to prevent cross-account thread resume;
 the preferences file and its directory are owner-only.
 Sanitized diagnostics are written to the diagnostics subdirectory.

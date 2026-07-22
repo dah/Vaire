@@ -11,7 +11,7 @@ use super::protocol::{
     ThreadReadParams, ThreadResponse, ThreadResumeParams, ThreadSnapshot, ThreadStartParams,
     TurnInterruptParams, TurnStartParams, TurnStartResponse, UserInput,
 };
-use super::safety::{ConversationSafetyPolicy, IsolationPaths};
+use super::safety::{FullAccessPolicy, IsolationPaths};
 use super::transport::{AppServerTransport, TransportError};
 use crate::app::{ModelChoice, TranscriptEntry, TranscriptRole};
 use crate::persistence::AccountScope;
@@ -57,14 +57,14 @@ pub enum SessionError {
 pub struct SessionService {
     transport: AppServerTransport,
     paths: IsolationPaths,
-    policy: ConversationSafetyPolicy,
+    policy: FullAccessPolicy,
 }
 
 impl SessionService {
     pub fn new(
         transport: AppServerTransport,
         paths: IsolationPaths,
-        policy: ConversationSafetyPolicy,
+        policy: FullAccessPolicy,
     ) -> Self {
         Self {
             transport,
@@ -244,7 +244,7 @@ impl SessionService {
                         approval_policy: "never".to_owned(),
                         config: overrides["config"].clone(),
                         cwd: self.paths.conversation.clone(),
-                        sandbox: "read-only".to_owned(),
+                        sandbox: "danger-full-access".to_owned(),
                         model: model.to_owned(),
                     },
                 )
@@ -355,7 +355,7 @@ impl SessionService {
             approval_policy: "never".to_owned(),
             config: overrides["config"].clone(),
             cwd: self.paths.conversation.clone(),
-            sandbox: "read-only".to_owned(),
+            sandbox: "danger-full-access".to_owned(),
             model: model.to_owned(),
         }
     }

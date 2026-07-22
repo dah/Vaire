@@ -5,7 +5,7 @@ use agentharness::codex::protocol::{
     CancelLoginAccountParams, CancelLoginAccountResponse, CancelLoginAccountStatus,
     InitializeParams, LoginAccountParams, LoginAccountResponse,
 };
-use agentharness::codex::safety::{ConversationSafetyPolicy, IsolationPaths};
+use agentharness::codex::safety::{FullAccessPolicy, IsolationPaths};
 use agentharness::codex::transport::{AppServerTransport, ProcessSpec};
 use agentharness::platform::validate_login_url;
 use serde_json::json;
@@ -13,13 +13,13 @@ use tempfile::tempdir;
 
 #[tokio::test]
 #[ignore = "requires an installed Codex CLI; run explicitly during protocol upgrades"]
-async fn installed_cli_initializes_with_isolated_policy() {
+async fn installed_cli_initializes_with_full_access_policy() {
     let executable = std::env::var_os("AGENTHARNESS_CODEX_BIN")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("codex"));
     let temp = tempdir().unwrap();
     let paths = IsolationPaths::prepare(temp.path().join("runtime")).unwrap();
-    let policy = ConversationSafetyPolicy;
+    let policy = FullAccessPolicy;
     let spec = ProcessSpec::codex(executable, &paths, &policy);
     let mut transport = AppServerTransport::spawn(spec).await.unwrap();
 
@@ -45,8 +45,12 @@ async fn installed_cli_initializes_with_isolated_policy() {
         .await
         .unwrap();
     assert_eq!(config["config"]["approval_policy"], "never");
-    assert_eq!(config["config"]["sandbox_mode"], "read-only");
+    assert_eq!(config["config"]["sandbox_mode"], "danger-full-access");
     assert_eq!(config["config"]["web_search"], "disabled");
+    assert_eq!(
+        config["config"]["shell_environment_policy"]["inherit"],
+        "all"
+    );
 
     transport.shutdown().await.unwrap();
 }
@@ -59,7 +63,7 @@ async fn installed_cli_starts_and_cancels_device_login() {
         .unwrap_or_else(|| PathBuf::from("codex"));
     let temp = tempdir().unwrap();
     let paths = IsolationPaths::prepare(temp.path().join("runtime")).unwrap();
-    let policy = ConversationSafetyPolicy;
+    let policy = FullAccessPolicy;
     let spec = ProcessSpec::codex(executable, &paths, &policy);
     let mut transport = AppServerTransport::spawn(spec).await.unwrap();
 

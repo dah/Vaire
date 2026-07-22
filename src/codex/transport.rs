@@ -18,7 +18,7 @@ use tokio::time::{self, Instant};
 use tokio_util::codec::{FramedRead, LinesCodec};
 
 use super::protocol::{classify_message, InboundEvent, InboundMessage, RequestId, RpcErrorObject};
-use super::safety::{denial_response, ConversationSafetyPolicy, IsolationPaths};
+use super::safety::{denial_response, FullAccessPolicy, IsolationPaths};
 use crate::diagnostics::{
     redact_remote_message, DiagnosticEvent, DiagnosticSink, NoopDiagnosticSink,
 };
@@ -77,19 +77,23 @@ impl ProcessSpec {
     pub fn codex(
         executable: impl Into<PathBuf>,
         paths: &IsolationPaths,
-        policy: &ConversationSafetyPolicy,
+        policy: &FullAccessPolicy,
     ) -> Self {
+        let mut env = vec![
+            (
+                OsString::from("CODEX_HOME"),
+                paths.codex_home.as_os_str().to_owned(),
+            ),
+            (OsString::from("NO_COLOR"), OsString::from("1")),
+        ];
+        if let Some(path) = std::env::var_os("PATH") {
+            env.push((OsString::from("PATH"), path));
+        }
         Self {
             executable: executable.into(),
             args: policy.app_server_args(),
             cwd: paths.conversation.clone(),
-            env: vec![
-                (
-                    OsString::from("CODEX_HOME"),
-                    paths.codex_home.as_os_str().to_owned(),
-                ),
-                (OsString::from("NO_COLOR"), OsString::from("1")),
-            ],
+            env,
         }
     }
 }

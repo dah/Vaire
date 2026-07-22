@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 
 use super::protocol::RequestId;
 
-pub const POLICY_ID: &str = "conversation-safety/codex-0.144.6-v1";
+pub const POLICY_ID: &str = "full-access-tools/codex-0.144.6-v1";
 
 pub const KNOWN_SERVER_REQUEST_METHODS: [&str; 10] = [
     "item/commandExecution/requestApproval",
@@ -23,7 +23,7 @@ pub const KNOWN_SERVER_REQUEST_METHODS: [&str; 10] = [
     "execCommandApproval",
 ];
 
-const DISABLED_FEATURES: [&str; 22] = [
+const DISABLED_OPTIONAL_FEATURES: [&str; 19] = [
     "apps",
     "auth_elicitation",
     "browser_use",
@@ -40,24 +40,22 @@ const DISABLED_FEATURES: [&str; 22] = [
     "plugin_sharing",
     "plugins",
     "remote_plugin",
-    "shell_snapshot",
-    "shell_tool",
     "skill_mcp_dependency_install",
     "tool_call_mcp_elicitation",
-    "unified_exec",
     "workspace_dependencies",
 ];
 
-const CONFIG_OVERRIDES: [&str; 9] = [
+const ENABLED_COMMAND_FEATURES: [&str; 3] = ["shell_snapshot", "shell_tool", "unified_exec"];
+
+const CONFIG_OVERRIDES: [&str; 8] = [
     "approval_policy=\"never\"",
-    "sandbox_mode=\"read-only\"",
+    "sandbox_mode=\"danger-full-access\"",
     "web_search=\"disabled\"",
     "mcp_servers={}",
     "apps._default.enabled=false",
     "history.persistence=\"none\"",
     "forced_login_method=\"chatgpt\"",
-    "allow_login_shell=false",
-    "shell_environment_policy.inherit=\"none\"",
+    "shell_environment_policy.inherit=\"all\"",
 ];
 
 #[derive(Clone, Debug)]
@@ -68,7 +66,10 @@ pub struct IsolationPaths {
 }
 
 impl IsolationPaths {
-    /// Creates owner-only runtime directories and requires a fresh, empty conversation cwd.
+    /// Creates owner-only runtime directories while preserving the conversation workspace.
+    ///
+    /// Built-in tools run from this dedicated non-project directory. Files created there are
+    /// intentionally retained so they remain available after AgentHarness restarts.
     pub fn prepare(root: impl AsRef<Path>) -> io::Result<Self> {
         let root = root.as_ref().to_path_buf();
         let codex_home = root.join("codex-home");
@@ -77,13 +78,6 @@ impl IsolationPaths {
         create_owner_only(&root)?;
         create_owner_only(&codex_home)?;
         create_owner_only(&conversation)?;
-
-        if fs::read_dir(&conversation)?.next().transpose()?.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "conversation directory must be empty",
-            ));
-        }
 
         Ok(Self {
             root,
@@ -99,9 +93,9 @@ fn create_owner_only(path: &Path) -> io::Result<()> {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct ConversationSafetyPolicy;
+pub struct FullAccessPolicy;
 
-impl ConversationSafetyPolicy {
+impl FullAccessPolicy {
     /// Direct argv for codex app-server; no shell interpolation is required.
     pub fn app_server_args(&self) -> Vec<OsString> {
         let mut args = vec![
@@ -110,8 +104,12 @@ impl ConversationSafetyPolicy {
             OsString::from("--strict-config"),
         ];
 
-        for feature in DISABLED_FEATURES {
+        for feature in DISABLED_OPTIONAL_FEATURES {
             args.push(OsString::from("--disable"));
+            args.push(OsString::from(feature));
+        }
+        for feature in ENABLED_COMMAND_FEATURES {
+            args.push(OsString::from("--enable"));
             args.push(OsString::from(feature));
         }
         for config in CONFIG_OVERRIDES {
@@ -122,25 +120,29 @@ impl ConversationSafetyPolicy {
     }
 
     pub fn thread_start_overrides(&self, cwd: &Path) -> Value {
-        let feature_values = DISABLED_FEATURES
+        let mut feature_values = DISABLED_OPTIONAL_FEATURES
             .into_iter()
             .map(|feature| (feature.to_owned(), Value::Bool(false)))
             .collect::<serde_json::Map<_, _>>();
+        feature_values.extend(
+            ENABLED_COMMAND_FEATURES
+                .into_iter()
+                .map(|feature| (feature.to_owned(), Value::Bool(true))),
+        );
 
         json!({
             "approvalPolicy": "never",
             "cwd": cwd,
-            "sandbox": "read-only",
+            "sandbox": "danger-full-access",
             "config": {
                 "approval_policy": "never",
-                "sandbox_mode": "read-only",
+                "sandbox_mode": "danger-full-access",
                 "web_search": "disabled",
                 "mcp_servers": {},
                 "apps": {"_default": {"enabled": false}},
                 "features": feature_values,
                 "history": {"persistence": "none"},
-                "allow_login_shell": false,
-                "shell_environment_policy": {"inherit": "none"}
+                "shell_environment_policy": {"inherit": "all"}
             }
         })
     }
@@ -150,8 +152,7 @@ impl ConversationSafetyPolicy {
             "approvalPolicy": "never",
             "cwd": cwd,
             "sandboxPolicy": {
-                "type": "readOnly",
-                "networkAccess": false
+                "type": "dangerFullAccess"
             }
         })
     }
@@ -173,7 +174,7 @@ pub fn denial_response(id: &RequestId, method: &str) -> Value {
             "id": id,
             "error": {
                 "code": -32080,
-                "message": "AgentHarness conversation policy denied the server request"
+                "message": "AgentHarness runtime policy denied the server request"
             }
         }),
         _ => json!({
@@ -195,15 +196,14 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{
-        denial_response, ConversationSafetyPolicy, IsolationPaths, KNOWN_SERVER_REQUEST_METHODS,
-    };
+    use super::{denial_response, FullAccessPolicy, IsolationPaths, KNOWN_SERVER_REQUEST_METHODS};
     use crate::codex::protocol::RequestId;
 
     #[test]
-    fn prepares_owner_only_empty_isolation() {
+    fn prepares_owner_only_persistent_isolation() {
         let temp = tempdir().unwrap();
-        let paths = IsolationPaths::prepare(temp.path().join("runtime")).unwrap();
+        let root = temp.path().join("runtime");
+        let paths = IsolationPaths::prepare(&root).unwrap();
         assert_eq!(
             std::fs::metadata(paths.codex_home)
                 .unwrap()
@@ -212,39 +212,73 @@ mod tests {
                 & 0o777,
             0o700
         );
-        assert!(std::fs::read_dir(paths.conversation)
+        assert!(std::fs::read_dir(&paths.conversation)
             .unwrap()
             .next()
             .is_none());
+
+        let artifact = paths.conversation.join("created-by-agent.txt");
+        std::fs::write(&artifact, "keep me").unwrap();
+        let relaunched = IsolationPaths::prepare(&root).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(relaunched.conversation.join("created-by-agent.txt")).unwrap(),
+            "keep me"
+        );
     }
 
     #[test]
-    fn supplies_defense_in_depth_at_thread_and_turn_boundaries() {
-        let policy = ConversationSafetyPolicy;
+    fn supplies_full_access_tools_at_thread_and_turn_boundaries() {
+        let policy = FullAccessPolicy;
         let cwd = Path::new("/private/tmp/agentharness-conversation");
         let thread = policy.thread_start_overrides(cwd);
         let turn = policy.turn_start_overrides(cwd);
 
         assert_eq!(thread["approvalPolicy"], "never");
-        assert_eq!(thread["sandbox"], "read-only");
-        assert_eq!(thread["config"]["features"]["shell_tool"], false);
+        assert_eq!(thread["sandbox"], "danger-full-access");
+        assert_eq!(thread["config"]["sandbox_mode"], "danger-full-access");
+        assert_eq!(thread["config"]["features"]["shell_snapshot"], true);
+        assert_eq!(thread["config"]["features"]["shell_tool"], true);
+        assert_eq!(thread["config"]["features"]["unified_exec"], true);
+        assert_eq!(thread["config"]["features"]["multi_agent"], false);
         assert_eq!(thread["config"]["web_search"], "disabled");
-        assert_eq!(turn["approvalPolicy"], "never");
         assert_eq!(
-            turn["sandboxPolicy"],
-            json!({"type": "readOnly", "networkAccess": false})
+            thread["config"]["shell_environment_policy"]["inherit"],
+            "all"
         );
+        assert!(thread["config"].get("allow_login_shell").is_none());
+        assert_eq!(turn["approvalPolicy"], "never");
+        assert_eq!(turn["sandboxPolicy"], json!({"type": "dangerFullAccess"}));
     }
 
     #[test]
-    fn direct_args_use_strict_config_and_disable_known_tool_features() {
-        let args = ConversationSafetyPolicy.app_server_args();
+    fn direct_args_enable_command_tools_and_full_access_without_approvals() {
+        let args = FullAccessPolicy.app_server_args();
         assert!(args.iter().any(|arg| arg == OsStr::new("--strict-config")));
-        assert!(args.iter().any(|arg| arg == OsStr::new("shell_tool")));
-        assert!(args.iter().any(|arg| arg == OsStr::new("multi_agent")));
+        for feature in ["shell_snapshot", "shell_tool", "unified_exec"] {
+            assert!(args
+                .windows(2)
+                .any(|pair| pair[0] == OsStr::new("--enable") && pair[1] == OsStr::new(feature)));
+            assert!(!args
+                .windows(2)
+                .any(|pair| pair[0] == OsStr::new("--disable") && pair[1] == OsStr::new(feature)));
+        }
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == OsStr::new("--disable")
+                    && pair[1] == OsStr::new("multi_agent"))
+        );
         assert!(args
             .iter()
             .any(|arg| arg == OsStr::new("approval_policy=\"never\"")));
+        assert!(args
+            .iter()
+            .any(|arg| arg == OsStr::new("sandbox_mode=\"danger-full-access\"")));
+        assert!(args
+            .iter()
+            .any(|arg| arg == OsStr::new("shell_environment_policy.inherit=\"all\"")));
+        assert!(!args
+            .iter()
+            .any(|arg| arg == OsStr::new("allow_login_shell=false")));
     }
 
     #[test]

@@ -106,7 +106,7 @@ async fn captured_response(method: &str) -> Value {
 }
 
 #[tokio::test]
-async fn denies_every_generated_server_request_without_approval() {
+async fn full_access_still_denies_every_unimplemented_server_request() {
     for method in KNOWN_SERVER_REQUEST_METHODS {
         let response = captured_response(method).await;
         assert_eq!(response["id"], "server-1");

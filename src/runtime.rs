@@ -13,7 +13,7 @@ use tokio::time;
 
 use crate::app::{Action, AppState, AuthState, ConnectionState, Intent};
 use crate::backend::BackendCoordinator;
-use crate::codex::safety::{ConversationSafetyPolicy, IsolationPaths};
+use crate::codex::safety::{FullAccessPolicy, IsolationPaths};
 use crate::codex::session::SessionService;
 use crate::codex::transport::{AppServerTransport, ProcessSpec};
 use crate::diagnostics::{DiagnosticSink, FileDiagnosticSink};
@@ -267,11 +267,11 @@ async fn build_backend(
         Arc::new(FileDiagnosticSink::create(&diagnostics_path).map_err(RuntimeError::Paths)?);
     let executable = resolve_codex(config.codex_override.as_deref())?;
     verify_codex_version(&executable, &isolation.codex_home).await?;
-    let spec = ProcessSpec::codex(executable, &isolation, &ConversationSafetyPolicy);
+    let spec = ProcessSpec::codex(executable, &isolation, &FullAccessPolicy);
     let transport = AppServerTransport::spawn_with_diagnostics(spec, diagnostics)
         .await
         .map_err(|error| RuntimeError::AppServer(error.to_string()))?;
-    let session = SessionService::new(transport, isolation, ConversationSafetyPolicy);
+    let session = SessionService::new(transport, isolation, FullAccessPolicy);
     Ok(BackendCoordinator::new(
         session,
         FilePreferences::new(config.paths.preferences_file),

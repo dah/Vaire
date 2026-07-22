@@ -8,7 +8,7 @@ use agentharness::app::{
     AuthState, ConnectionState, Intent, ThreadState, TranscriptRole, TurnState,
 };
 use agentharness::backend::BackendCoordinator;
-use agentharness::codex::safety::{ConversationSafetyPolicy, IsolationPaths};
+use agentharness::codex::safety::{FullAccessPolicy, IsolationPaths};
 use agentharness::codex::session::SessionService;
 use agentharness::codex::transport::{AppServerTransport, ProcessSpec, RequestTimeouts};
 use agentharness::persistence::{
@@ -35,7 +35,7 @@ async fn session(root: &Path, body: &str) -> SessionService {
     })
     .await
     .unwrap();
-    SessionService::new(transport, paths, ConversationSafetyPolicy)
+    SessionService::new(transport, paths, FullAccessPolicy)
 }
 
 #[derive(Clone)]
@@ -650,7 +650,7 @@ IFS= read -r hold
     .await
     .unwrap();
     let pid = transport.child_pid();
-    let session = SessionService::new(transport, paths, ConversationSafetyPolicy);
+    let session = SessionService::new(transport, paths, FullAccessPolicy);
     let mut backend =
         BackendCoordinator::new(session, FailingPreferences, RecordingBrowser::default());
     backend.startup().await.unwrap();
@@ -697,7 +697,7 @@ sleep 1
         thread: Duration::from_millis(20),
         ..RequestTimeouts::default()
     });
-    let session = SessionService::new(transport, paths, ConversationSafetyPolicy);
+    let session = SessionService::new(transport, paths, FullAccessPolicy);
     let mut backend = BackendCoordinator::new(
         session,
         MemoryPreferences::new(PreferencesV1::default()),
