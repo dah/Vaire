@@ -166,7 +166,7 @@ pub enum DomainEvent {
     TokenUsageUpdated {
         thread_id: String,
         turn_id: String,
-        total_tokens: i64,
+        context_tokens: i64,
         model_context_window: Option<i64>,
     },
     TurnOperationFailed(String),
@@ -520,12 +520,12 @@ impl AppState {
             DomainEvent::TokenUsageUpdated {
                 thread_id,
                 turn_id,
-                total_tokens,
+                context_tokens,
                 model_context_window,
             } => {
                 if self.matches_relevant_turn(&thread_id, &turn_id) {
                     self.context_remaining_percent =
-                        remaining_context_percent(total_tokens, model_context_window);
+                        remaining_context_percent(context_tokens, model_context_window);
                 }
             }
             DomainEvent::TurnOperationFailed(message) => {
@@ -713,15 +713,17 @@ impl AppState {
 /// Returns the remaining model-context percentage rounded to the nearest whole
 /// percent, with exact half-percent values rounded up.
 ///
-/// Token use is clamped to the context-window size before subtraction. `u128`
+/// `context_tokens` is the current occupancy reported by
+/// `tokenUsage.last.totalTokens`, not the cumulative `tokenUsage.total` value.
+/// Occupancy is clamped to the context-window size before subtraction. `u128`
 /// intermediates keep the multiplication and rounding addition safe for every
 /// signed 64-bit value allowed by the installed app-server schema.
 pub fn remaining_context_percent(
-    total_tokens: i64,
+    context_tokens: i64,
     model_context_window: Option<i64>,
 ) -> Option<u8> {
     let context_window = u128::try_from(model_context_window?).ok()?;
-    let consumed = u128::try_from(total_tokens).ok()?;
+    let consumed = u128::try_from(context_tokens).ok()?;
     if context_window == 0 {
         return None;
     }
@@ -785,7 +787,7 @@ mod tests {
             state.reduce(Action::Event(DomainEvent::TokenUsageUpdated {
                 thread_id: thread_id.to_owned(),
                 turn_id: turn_id.to_owned(),
-                total_tokens: 90,
+                context_tokens: 90,
                 model_context_window: Some(100),
             }));
         }
@@ -794,7 +796,7 @@ mod tests {
         state.reduce(Action::Event(DomainEvent::TokenUsageUpdated {
             thread_id: "thr".to_owned(),
             turn_id: "turn-1".to_owned(),
-            total_tokens: 25,
+            context_tokens: 25,
             model_context_window: Some(100),
         }));
         assert_eq!(state.context_remaining_percent, Some(75));
@@ -808,7 +810,7 @@ mod tests {
         state.reduce(Action::Event(DomainEvent::TokenUsageUpdated {
             thread_id: "thr".to_owned(),
             turn_id: "turn-1".to_owned(),
-            total_tokens: 26,
+            context_tokens: 26,
             model_context_window: Some(100),
         }));
         assert_eq!(state.context_remaining_percent, Some(74));
@@ -817,7 +819,7 @@ mod tests {
         state.reduce(Action::Event(DomainEvent::TokenUsageUpdated {
             thread_id: "thr".to_owned(),
             turn_id: "turn-1".to_owned(),
-            total_tokens: 99,
+            context_tokens: 99,
             model_context_window: Some(100),
         }));
         assert_eq!(state.context_remaining_percent, Some(74));
@@ -828,14 +830,14 @@ mod tests {
         state.reduce(Action::Event(DomainEvent::TokenUsageUpdated {
             thread_id: "thr".to_owned(),
             turn_id: "turn-1".to_owned(),
-            total_tokens: 99,
+            context_tokens: 99,
             model_context_window: Some(100),
         }));
         assert_eq!(state.context_remaining_percent, Some(74));
         state.reduce(Action::Event(DomainEvent::TokenUsageUpdated {
             thread_id: "thr".to_owned(),
             turn_id: "turn-2".to_owned(),
-            total_tokens: 30,
+            context_tokens: 30,
             model_context_window: Some(100),
         }));
         assert_eq!(state.context_remaining_percent, Some(70));
@@ -845,14 +847,14 @@ mod tests {
     fn unusable_relevant_usage_becomes_unknown() {
         let mut state = active_context_state();
         state.context_remaining_percent = Some(80);
-        for (total_tokens, model_context_window) in
+        for (context_tokens, model_context_window) in
             [(10, None), (10, Some(0)), (10, Some(-1)), (-1, Some(100))]
         {
             state.context_remaining_percent = Some(80);
             state.reduce(Action::Event(DomainEvent::TokenUsageUpdated {
                 thread_id: "thr".to_owned(),
                 turn_id: "turn-1".to_owned(),
-                total_tokens,
+                context_tokens,
                 model_context_window,
             }));
             assert_eq!(state.context_remaining_percent, None);
