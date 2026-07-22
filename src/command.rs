@@ -1,7 +1,7 @@
 use crate::app::Intent;
 
 pub const HELP_TEXT: &str = "\
-Commands:\n  /login                 Sign in with ChatGPT in your browser\n  /login device          Use device-code sign-in if browser callback login fails\n  /login browser         Explicitly use browser callback sign-in\n  /logout                Sign out, or cancel a pending sign-in\n  /model [id]            List or select an available model\n  /reasoning [value]     List or select a reasoning level\n  /resume                Retry the saved working thread\n  /help                  Show this help\n  /quit                  Exit AgentHarness\nKeys: Enter sends, Alt-Enter inserts a newline, Escape interrupts or closes help, PageUp/PageDown scroll, Ctrl-C quits.";
+Commands:\n  /login                 Sign in with ChatGPT in your browser\n  /login device          Use device-code sign-in if browser callback login fails\n  /login browser         Explicitly use browser callback sign-in\n  /logout                Sign out, or cancel a pending sign-in\n  /model [id]            List or select an available model\n  /reasoning [value]     List or select a reasoning level\n  /thinking              Toggle the emitted-thinking panel\n  /resume                Retry the saved working thread\n  /help                  Show this help\n  /quit                  Exit AgentHarness\nKeys: Enter sends, Alt-Enter inserts a newline, Escape interrupts or closes help, PageUp/PageDown scroll, Ctrl-C quits.";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ParseError {
@@ -63,6 +63,7 @@ pub fn parse(input: &str) -> Result<Intent, ParseError> {
         "/reasoning" => Ok(argument.map_or(Intent::ShowReasoning, |value| {
             Intent::SelectReasoning(value.to_owned())
         })),
+        "/thinking" => no_argument(Intent::ToggleThinking),
         "/resume" => no_argument(Intent::Resume),
         "/help" => no_argument(Intent::Help),
         "/quit" => no_argument(Intent::Quit),
@@ -91,6 +92,7 @@ mod tests {
             Ok(Intent::SelectReasoning("high".to_owned()))
         );
         assert_eq!(parse("/resume"), Ok(Intent::Resume));
+        assert_eq!(parse("/thinking"), Ok(Intent::ToggleThinking));
         assert_eq!(parse("/login"), Ok(Intent::Login));
         assert_eq!(parse("/login browser"), Ok(Intent::Login));
         assert_eq!(parse("/login device"), Ok(Intent::LoginDevice));
@@ -107,11 +109,16 @@ mod tests {
             Err(ParseError::UnexpectedArgument("/login".to_owned()))
         );
         assert_eq!(
+            parse("/thinking hidden"),
+            Err(ParseError::UnexpectedArgument("/thinking".to_owned()))
+        );
+        assert_eq!(
             parse("/login api-key").unwrap_err().to_string(),
             "use /login, /login browser, or /login device"
         );
         assert!(HELP_TEXT.contains("/login device"));
         assert!(HELP_TEXT.contains("/quit"));
+        assert!(HELP_TEXT.contains("/thinking"));
         assert!(HELP_TEXT.contains("Escape interrupts"));
     }
 }

@@ -25,8 +25,10 @@ Sanitized diagnostics are written to the diagnostics subdirectory.
 
 ## Commands and keys
 
-- **/login**, **/login device**, **/logout**, **/resume**, **/help**, **/quit**
+- **/login**, **/login device**, **/logout**, **/resume**, **/thinking**, **/help**, **/quit**
 - **/model [id]** and **/reasoning [value]** use choices reported by app-server
+- **/thinking** toggles a right-side panel containing only reasoning summaries or thinking text
+  explicitly emitted by Codex app-server. It does not expose or infer hidden chain-of-thought.
 - **Enter** sends; **Alt-Enter** inserts a newline
 - **PageUp/PageDown**, arrow keys, **Home**, and **End** scroll the transcript
 - **Escape** closes local help/errors, or interrupts an active turn
