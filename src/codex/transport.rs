@@ -36,6 +36,21 @@ const UNRENDERED_TOOL_PROGRESS_NOTIFICATIONS: [&str; 7] = [
     "item/fileChange/outputDelta",
     "item/fileChange/patchUpdated",
 ];
+// Item lifecycle snapshots for these installed-schema variants are likewise not
+// rendered. Drop only known tool variants: agent and reasoning completions carry
+// user-visible state and must continue through the bounded queue.
+const UNRENDERED_TOOL_ITEM_TYPES: [&str; 10] = [
+    "commandExecution",
+    "fileChange",
+    "mcpToolCall",
+    "dynamicToolCall",
+    "collabAgentToolCall",
+    "subAgentActivity",
+    "webSearch",
+    "imageView",
+    "sleep",
+    "imageGeneration",
+];
 const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -565,7 +580,7 @@ async fn run_connection(runtime: ConnectionRuntime) {
                                 let _ = request.reply.send(result);
                             }
                             Ok(InboundMessage::Notification { method, params }) => {
-                                if is_unrendered_tool_progress(&method) {
+                                if is_unrendered_tool_notification(&method, &params) {
                                     continue 'connection;
                                 }
                                 if unusable_reason.is_none() && !send_event(
@@ -662,8 +677,20 @@ async fn run_connection(runtime: ConnectionRuntime) {
     }
 }
 
-fn is_unrendered_tool_progress(method: &str) -> bool {
-    UNRENDERED_TOOL_PROGRESS_NOTIFICATIONS.contains(&method)
+fn is_unrendered_tool_notification(method: &str, params: &Value) -> bool {
+    if UNRENDERED_TOOL_PROGRESS_NOTIFICATIONS.contains(&method) {
+        return true;
+    }
+    if !matches!(method, "item/started" | "item/completed") {
+        return false;
+    }
+
+    params
+        .get("item")
+        .and_then(Value::as_object)
+        .and_then(|item| item.get("type").or_else(|| item.get("kind")))
+        .and_then(Value::as_str)
+        .is_some_and(|kind| UNRENDERED_TOOL_ITEM_TYPES.contains(&kind))
 }
 
 fn remote_error(error: RpcErrorObject) -> TransportError {
