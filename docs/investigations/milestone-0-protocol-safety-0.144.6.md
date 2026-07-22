@@ -2,6 +2,14 @@
 
 Date: 2026-07-21
 
+> **Historical evidence — superseded runtime policy.** This document records the original MVP
+> policy exactly as it was tested on the date above. It is not the current AgentHarness runtime
+> policy. The completed interactive-runtime milestone replaced the read-only/no-tool-network
+> settings with `danger-full-access`, `approval_policy="never"`, and inherited tool-shell
+> environment access. See `AGENTS.md` and
+> `docs/plans/agentharness-interactive-runtime-2026-07-22.md` for the current regression contract
+> and its security boundary.
+
 ## Scope decision
 
 Milestone 0 now establishes a conversation-focused safety foundation. It does **not**

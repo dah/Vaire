@@ -10,6 +10,29 @@ use agentharness::codex::transport::{AppServerTransport, ProcessSpec};
 use serde_json::Value;
 use tempfile::tempdir;
 
+struct ScopedEnv {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl ScopedEnv {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for ScopedEnv {
+    fn drop(&mut self) {
+        if let Some(previous) = &self.previous {
+            std::env::set_var(self.key, previous);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
+}
+
 fn script(root: &Path, name: &str, body: &str) -> PathBuf {
     let path = root.join(name);
     fs::write(&path, format!("#!/bin/sh\nset -eu\n{body}\n")).unwrap();
@@ -29,6 +52,10 @@ async fn wait_for(path: &Path) {
 
 #[tokio::test]
 async fn codex_process_receives_path_and_dedicated_runtime_directories() {
+    const INHERITED_KEY: &str = "AGENTHARNESS_ENV_INHERIT_TEST";
+    const SCRUBBED_KEY: &str = "CODEX_AGENTHARNESS_ENV_SCRUB_TEST";
+    let inherited = ScopedEnv::set(INHERITED_KEY, "ambient-value");
+    let scrubbed = ScopedEnv::set(SCRUBBED_KEY, "must-not-reach-child");
     let temp = tempdir().unwrap();
     let captures = temp.path().join("captures");
     fs::create_dir(&captures).unwrap();
@@ -39,6 +66,8 @@ async fn codex_process_receives_path_and_dedicated_runtime_directories() {
 printf '%s' "$PATH" > "$CAPTURE_DIR/path"
 printf '%s' "$CODEX_HOME" > "$CAPTURE_DIR/codex-home"
 printf '%s' "$PWD" > "$CAPTURE_DIR/cwd"
+printf '%s' "$AGENTHARNESS_ENV_INHERIT_TEST" > "$CAPTURE_DIR/inherited"
+printf '%s' "${CODEX_AGENTHARNESS_ENV_SCRUB_TEST-unset}" > "$CAPTURE_DIR/scrubbed"
 IFS= read -r hold || true
 "#,
     );
@@ -50,6 +79,8 @@ IFS= read -r hold || true
     ));
 
     let mut transport = AppServerTransport::spawn(spec).await.unwrap();
+    drop(inherited);
+    drop(scrubbed);
     wait_for(&captures.join("cwd")).await;
 
     assert_eq!(
@@ -65,6 +96,14 @@ IFS= read -r hold || true
         fs::canonicalize(&paths.conversation)
             .unwrap()
             .to_string_lossy()
+    );
+    assert_eq!(
+        fs::read_to_string(captures.join("inherited")).unwrap(),
+        "ambient-value"
+    );
+    assert_eq!(
+        fs::read_to_string(captures.join("scrubbed")).unwrap(),
+        "unset"
     );
 
     transport.shutdown().await.unwrap();
