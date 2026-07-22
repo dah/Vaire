@@ -2,7 +2,7 @@
 
 ## Status
 
-Approved for implementation. This is the first post-MVP milestone and supersedes the completed MVP plan only as the active roadmap; the MVP plan remains historical evidence.
+Complete as of 2026-07-22. This is a historical implementation record alongside the completed MVP plan, not the live roadmap.
 
 ## Goal
 
@@ -22,12 +22,16 @@ Evolve the working single-thread chat client into a more capable interactive Cod
 
 - The installed Codex CLI schema remains authoritative. Regenerate it in a temporary directory before implementing thread listing/deletion, reasoning events, tool policy, account identity, or token usage.
 - Keep one long-lived app-server connection and exactly one active thread in application state.
-- Full tool access is an intentional product-policy change. Keep the dedicated AgentHarness Codex home and dedicated working directory, but do not claim the filesystem or command environment is sandboxed from the user’s machine.
+- Full tool access is an intentional product-policy change. The implemented boundaries are `danger-full-access`, `approval_policy="never"`, and `shell_environment_policy.inherit="all"`; command/file operations execute without an approval prompt.
+- The app-server inherits the launch environment after inherited `CODEX_*` variables are removed and the dedicated `CODEX_HOME` is supplied. Codex's default variable-name filtering for `KEY`, `SECRET`, and `TOKEN` is incomplete: values such as `DATABASE_URL` and `SSH_AUTH_SOCK`, macOS Keychain, credential/config files, and authenticated CLIs may remain available to full-access commands.
+- The persistent conversation directory is only a starting cwd, and the dedicated Codex home is organizational isolation only. Commands can leave the cwd, access other same-user paths and the network, and potentially reach Codex-owned authentication state.
 - Do not render hidden chain-of-thought. “Thinking” means only summaries or text explicitly surfaced by app-server.
 - Thread deletion is destructive. Require an in-TUI confirmation, identify the exact scope, and preserve the active saved ID unless its deletion was explicitly confirmed as part of a visible replacement flow.
 - Continue sanitizing rendered text and diagnostics. Do not log prompts, replies, raw reasoning content, command output, or account secrets.
 
 ## Acceptance tests
+
+The following coverage was implemented and is maintained in the offline default suite:
 
 - Slash parsing and reducer tests for `/new`, the `/resume` picker, selection, cancellation, deletion confirmation, delete failure, clear-all behavior, and saved-ID preservation.
 - Fake app-server integration tests for paginated thread listing, resume selection, new-thread creation, single deletion, clear-all sequencing, malformed responses, and partial deletion failure.
@@ -37,8 +41,19 @@ Evolve the working single-thread chat client into a more capable interactive Cod
 - Deterministic animation tests proving the squiggle appears before assistant text, advances frames, and disappears on first text or terminal events.
 - Token-usage parsing and reducer tests for normal, missing, zero, stale-thread, over-limit, and model-change cases; rendering tests for the top-right percentage and unknown state.
 - Cross-feature Ratatui `TestBackend` tests at narrow and normal terminal widths, with and without the Thinking panel.
-- All default tests remain offline. The normal format, Clippy, and test checks must pass after every merge and for the final integrated branch.
+- All default tests remain offline. Format, strict Clippy, the full test suite, and the explicit installed-CLI initialization smoke were run on the final integrated branch.
 
-## Integration order
+## Integration record
 
-Develop each numbered capability in its own worktree. Merge thread management, thinking panel, tool enablement, account identity, thinking animation, and context percentage one by one. Resolve reducer, protocol, and TUI conflicts centrally, then run the full suite and an installed-CLI initialization smoke test.
+Thread management, the Thinking panel, tool enablement, account identity, thinking animation, and the context percentage were developed in six dedicated worktrees. They were merged one by one in that order. Reducer, protocol, TUI, and test conflicts were resolved centrally, followed by cross-feature state and transport regressions.
+
+## Final validation
+
+The required offline checks and explicit installed-CLI initialization smoke are the release gate:
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets
+cargo test --test installed_cli_smoke installed_cli_initializes_with_full_access_policy -- --ignored --nocapture
+```

@@ -48,7 +48,7 @@ pub enum RuntimeError {
     VersionCheck(String),
     #[error("Codex CLI {0} is unsupported; upgrade to codex-cli {TESTED_CODEX_VERSION} or newer")]
     UnsupportedVersion(String),
-    #[error("could not start the isolated Codex app-server: {0}")]
+    #[error("could not start the dedicated Codex app-server: {0}")]
     AppServer(String),
 }
 
