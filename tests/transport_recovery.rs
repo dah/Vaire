@@ -219,3 +219,75 @@ sleep 1
     );
     transport.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn unrendered_tool_progress_flood_is_dropped_before_the_event_queue() {
+    let temp = tempdir().unwrap();
+    let executable = script(
+        temp.path(),
+        &format!(
+            r#"
+for method in \
+  command/exec/outputDelta \
+  process/outputDelta \
+  turn/diff/updated \
+  item/commandExecution/outputDelta \
+  item/commandExecution/terminalInteraction \
+  item/fileChange/outputDelta \
+  item/fileChange/patchUpdated
+do
+  i=0
+  while [ "$i" -lt {} ]; do
+    printf '{{"method":"%s","params":{{"payload":"x"}}}}\n' "$method"
+    i=$((i + 1))
+  done
+done
+printf '%s\n' '{{"method":"item/agentMessage/delta","params":{{"threadId":"thr-tools","turnId":"turn-tools","itemId":"item-agent","delta":"done"}}}}'
+printf '%s\n' '{{"method":"item/reasoning/summaryTextDelta","params":{{"threadId":"thr-tools","turnId":"turn-tools","itemId":"item-reasoning","summaryIndex":0,"delta":"summary"}}}}'
+printf '%s\n' '{{"method":"thread/tokenUsage/updated","params":{{"threadId":"thr-tools","turnId":"turn-tools","tokenUsage":{{"last":{{"cachedInputTokens":0,"inputTokens":1,"outputTokens":1,"reasoningOutputTokens":0,"totalTokens":2}},"total":{{"cachedInputTokens":0,"inputTokens":1,"outputTokens":1,"reasoningOutputTokens":0,"totalTokens":2}},"modelContextWindow":100}}}}}}'
+printf '%s\n' '{{"method":"turn/completed","params":{{"threadId":"thr-tools","turn":{{"id":"turn-tools","items":[],"status":"completed"}}}}}}'
+printf '%s\n' '{{"method":"error","params":{{"threadId":"other-thread","turnId":"other-turn","willRetry":false,"error":{{"message":"unrelated","additionalDetails":null}}}}}}'
+IFS= read -r request
+printf '%s\n' '{{"id":1,"result":{{"ok":true}}}}'
+IFS= read -r hold
+"#,
+            EVENT_QUEUE_CAPACITY + 32
+        ),
+    );
+    let diagnostics = MemoryDiagnosticSink::default();
+    let mut transport = AppServerTransport::spawn_with_diagnostics(
+        spec(temp.path(), executable),
+        Arc::new(diagnostics.clone()),
+    )
+    .await
+    .unwrap();
+
+    for expected in [
+        "item/agentMessage/delta",
+        "item/reasoning/summaryTextDelta",
+        "thread/tokenUsage/updated",
+        "turn/completed",
+        "error",
+    ] {
+        let event = tokio::time::timeout(Duration::from_secs(2), transport.next_event())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            event.event,
+            InboundEvent::Notification { ref method, .. } if method == expected
+        ));
+    }
+
+    let response = transport
+        .request("ping", json!({}), Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(response["ok"], true);
+    assert!(!diagnostics
+        .events()
+        .iter()
+        .any(|event| event.category == "event_backlog"));
+
+    transport.shutdown().await.unwrap();
+}

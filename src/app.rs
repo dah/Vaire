@@ -1003,9 +1003,8 @@ impl AppState {
                 self.notice = Some(message);
             }
             DomainEvent::SafetyViolation(method) => {
-                self.connection = ConnectionState::Failed(
-                    "conversation safety boundary was triggered".to_owned(),
-                );
+                self.connection =
+                    ConnectionState::Failed("runtime request boundary was triggered".to_owned());
                 self.turn = TurnState::Failed {
                     turn_id: None,
                     message: "unexpected server request was denied".to_owned(),

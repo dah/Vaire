@@ -7,7 +7,7 @@ use agentharness::app::{
     Intent, ThreadDeleteConfirmation, ThreadPickerPhase, ThreadState, TranscriptRole,
 };
 use agentharness::backend::BackendCoordinator;
-use agentharness::codex::safety::{ConversationSafetyPolicy, IsolationPaths};
+use agentharness::codex::safety::{FullAccessPolicy, IsolationPaths};
 use agentharness::codex::session::SessionService;
 use agentharness::codex::transport::{AppServerTransport, ProcessSpec};
 use agentharness::persistence::{
@@ -38,7 +38,7 @@ async fn session(root: &Path, body: &str) -> SessionService {
     })
     .await
     .unwrap();
-    SessionService::new(transport, paths, ConversationSafetyPolicy)
+    SessionService::new(transport, paths, FullAccessPolicy)
 }
 
 #[derive(Clone)]
