@@ -704,8 +704,41 @@ mod tests {
             AccountScope::from_chatgpt_email("user@example.com"),
         )));
 
-        assert!(matches!(state.auth, AuthState::SignedIn { .. }));
+        assert_eq!(
+            state.auth,
+            AuthState::SignedIn {
+                scope: AccountScope::from_chatgpt_email("user@example.com"),
+            }
+        );
         assert_eq!(state.notice.as_deref(), Some("Signed in to ChatGPT"));
+    }
+
+    #[test]
+    fn account_switch_and_logout_replace_and_remove_the_runtime_identity() {
+        let mut state = AppState::default();
+
+        state.reduce(Action::Event(DomainEvent::AccountLoaded(
+            AccountScope::from_chatgpt_email("first@example.com"),
+        )));
+        assert_eq!(
+            state.auth,
+            AuthState::SignedIn {
+                scope: AccountScope::from_chatgpt_email("first@example.com"),
+            }
+        );
+
+        state.reduce(Action::Event(DomainEvent::AccountLoaded(
+            AccountScope::from_chatgpt_email("second@example.com"),
+        )));
+        assert_eq!(
+            state.auth,
+            AuthState::SignedIn {
+                scope: AccountScope::from_chatgpt_email("second@example.com"),
+            }
+        );
+
+        state.reduce(Action::Event(DomainEvent::LoggedOut));
+        assert_eq!(state.auth, AuthState::SignedOut);
     }
 
     #[test]
