@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{AppState, AuthState, ConnectionState, Intent, ThreadState, TranscriptRole, TurnState},
@@ -161,15 +161,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, ui: &UiState) {
         ])
         .split(area);
 
-    frame.render_widget(
-        Paragraph::new(status_text(state)).style(
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        regions[0],
-    );
+    render_header(frame, regions[0], state);
     render_transcript(frame, regions[1], state, ui.scroll_from_bottom);
     render_composer(frame, regions[2], &composer_wrapped);
     render_message_or_help(
@@ -319,6 +311,66 @@ fn status_text(state: &AppState) -> String {
         ""
     };
     format!(" {connection} • {auth} • {thread} • {model}/{reasoning} • {turn}{shutdown}")
+}
+
+fn render_header(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    frame.render_widget(
+        Paragraph::new(header_text(state, area.width)).style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        area,
+    );
+}
+
+fn header_text(state: &AppState, width: u16) -> String {
+    let width = usize::from(width);
+    if width == 0 {
+        return String::new();
+    }
+    let context = state.context_remaining_percent.map_or_else(
+        || "Context --".to_owned(),
+        |percent| format!("Context {percent}%"),
+    );
+    let context_width = UnicodeWidthStr::width(context.as_str());
+    if context_width >= width {
+        return truncate_with_ellipsis(&context, width);
+    }
+
+    let left_capacity = width.saturating_sub(context_width + 1);
+    let left = truncate_with_ellipsis(&status_text(state), left_capacity);
+    let padding = width
+        .saturating_sub(UnicodeWidthStr::width(left.as_str()))
+        .saturating_sub(context_width);
+    format!("{left}{}{context}", " ".repeat(padding))
+}
+
+fn truncate_with_ellipsis(value: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(value) <= width {
+        return value.to_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    if width == 1 {
+        return "…".to_owned();
+    }
+
+    let content_width = width - 1;
+    let mut result = String::new();
+    let mut used = 0_usize;
+    for character in value.chars() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if used.saturating_add(character_width) > content_width {
+            break;
+        }
+        result.push(character);
+        used = used.saturating_add(character_width);
+    }
+    result.push('…');
+    result
 }
 
 fn render_transcript(
@@ -564,6 +616,29 @@ mod tests {
         let failed = screen(&state, &UiState::default(), 100, 20);
         assert!(failed.contains("upgrade Codex"));
         assert!(failed.contains("failed"));
+    }
+
+    #[test]
+    fn header_right_aligns_known_and_unknown_context_without_overlap() {
+        let mut state = ready();
+        let unknown = screen(&state, &UiState::default(), 100, 20);
+        let unknown_header = unknown.lines().next().unwrap();
+        assert!(unknown_header.contains("connected"));
+        assert!(unknown_header.ends_with("Context --"));
+
+        state.context_remaining_percent = Some(73);
+        let known = screen(&state, &UiState::default(), 100, 20);
+        let known_header = known.lines().next().unwrap();
+        assert!(known_header.contains("model-a/high"));
+        assert!(known_header.ends_with("Context 73%"));
+
+        state.context_remaining_percent = Some(100);
+        let narrow = screen(&state, &UiState::default(), 36, 12);
+        let narrow_header = narrow.lines().next().unwrap();
+        assert!(narrow_header.contains("connected"));
+        assert!(narrow_header.contains('…'));
+        assert!(narrow_header.ends_with("Context 100%"));
+        assert_eq!(narrow_header.matches("Context").count(), 1);
     }
 
     #[test]

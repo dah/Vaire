@@ -163,6 +163,12 @@ pub enum DomainEvent {
         turn_id: String,
         outcome: TurnOutcome,
     },
+    TokenUsageUpdated {
+        thread_id: String,
+        turn_id: String,
+        total_tokens: i64,
+        model_context_window: Option<i64>,
+    },
     TurnOperationFailed(String),
     ProcessExited(String),
     SafetyViolation(String),
@@ -183,6 +189,7 @@ pub struct AppState {
     pub models: Vec<ModelChoice>,
     pub selected_model: Option<String>,
     pub selected_reasoning: Option<String>,
+    pub context_remaining_percent: Option<u8>,
     pub transcript: Vec<TranscriptEntry>,
     pub preferences: PreferencesV1,
     pub notice: Option<String>,
@@ -199,6 +206,7 @@ impl Default for AppState {
             models: Vec::new(),
             selected_model: None,
             selected_reasoning: None,
+            context_remaining_percent: None,
             transcript: Vec::new(),
             preferences: PreferencesV1::default(),
             notice: None,
@@ -253,6 +261,7 @@ impl AppState {
                     self.notice = Some(format!("unknown model {id}; use /model"));
                     return Vec::new();
                 };
+                let model_changed = self.selected_model.as_deref() != Some(model.id.as_str());
                 let old_reasoning = self.selected_reasoning.clone();
                 self.selected_model = Some(model.id.clone());
                 self.selected_reasoning = old_reasoning
@@ -262,6 +271,9 @@ impl AppState {
                 if old_reasoning.is_some() && old_reasoning != self.selected_reasoning {
                     self.notice =
                         Some("reasoning was reset to the selected model's default".to_owned());
+                }
+                if model_changed {
+                    self.reset_context_window();
                 }
                 self.sync_selection_preferences();
                 return vec![Effect::Persist(self.preferences.clone())];
@@ -302,6 +314,7 @@ impl AppState {
                     AuthState::SignedIn {
                         scope: Some(current_scope),
                     } if self.preferences.account_scope.as_ref() == Some(current_scope) => {
+                        self.reset_context_window();
                         self.thread = ThreadState::Resuming { id: id.clone() };
                         return vec![Effect::ResumeThread { id }];
                     }
@@ -349,8 +362,12 @@ impl AppState {
                 self.selected_model = preferences.model_id.clone();
                 self.selected_reasoning = preferences.reasoning_effort.clone();
                 self.preferences = preferences;
+                self.reset_context_window();
             }
-            DomainEvent::Connecting => self.connection = ConnectionState::Connecting,
+            DomainEvent::Connecting => {
+                self.connection = ConnectionState::Connecting;
+                self.reset_context_window();
+            }
             DomainEvent::Connected { generation } => {
                 self.connection = ConnectionState::Ready { generation }
             }
@@ -365,6 +382,13 @@ impl AppState {
             }
             DomainEvent::AccountLoaded(scope) => {
                 let completed_login = matches!(self.auth, AuthState::SigningIn { .. });
+                let account_changed = !matches!(
+                    &self.auth,
+                    AuthState::SignedIn { scope: current } if current == &scope
+                );
+                if account_changed {
+                    self.reset_context_window();
+                }
                 self.auth = AuthState::SignedIn {
                     scope: scope.clone(),
                 };
@@ -373,6 +397,7 @@ impl AppState {
                 }
                 if let Some(id) = self.preferences.thread_id.clone() {
                     if scope.is_some() && scope == self.preferences.account_scope {
+                        self.reset_context_window();
                         self.thread = ThreadState::Resuming { id: id.clone() };
                         return vec![Effect::ResumeThread { id }];
                     }
@@ -381,29 +406,43 @@ impl AppState {
                         Some("saved thread belongs to a different or unscoped account".to_owned());
                 }
             }
-            DomainEvent::UnsupportedAccount(message) => self.auth = AuthState::Unsupported(message),
+            DomainEvent::UnsupportedAccount(message) => {
+                self.auth = AuthState::Unsupported(message);
+                self.reset_context_window();
+            }
             DomainEvent::LoginStarted { login_id } => self.auth = AuthState::SigningIn { login_id },
             DomainEvent::LoginFailed(message) => {
                 self.auth = AuthState::SignedOut;
                 self.notice = Some(message);
+                self.reset_context_window();
             }
             DomainEvent::LoggedOut => {
                 self.auth = AuthState::SignedOut;
                 self.thread = ThreadState::None;
                 self.turn = TurnState::Idle;
+                self.reset_context_window();
             }
             DomainEvent::CatalogLoaded(models) => {
+                let previous_model = self.selected_model.clone();
                 self.models = models;
                 self.validate_selection();
+                if previous_model != self.selected_model {
+                    self.reset_context_window();
+                }
             }
-            DomainEvent::ResumeStarted { id } => self.thread = ThreadState::Resuming { id },
+            DomainEvent::ResumeStarted { id } => {
+                self.thread = ThreadState::Resuming { id };
+                self.reset_context_window();
+            }
             DomainEvent::ResumeSucceeded { id, history } => {
+                self.reset_context_window();
                 self.thread = ThreadState::Ready { id: id.clone() };
                 self.transcript = history;
                 self.preferences.thread_id = Some(id);
                 return vec![Effect::Persist(self.preferences.clone())];
             }
             DomainEvent::ResumeFailed { id, message } => {
+                self.reset_context_window();
                 self.thread = ThreadState::ResumeFailed {
                     id,
                     message: message.clone(),
@@ -411,6 +450,7 @@ impl AppState {
                 self.notice = Some(message);
             }
             DomainEvent::ThreadStarted { id } => {
+                self.reset_context_window();
                 self.thread = ThreadState::Ready { id: id.clone() };
                 self.preferences.thread_id = Some(id);
                 if let AuthState::SignedIn { scope } = &self.auth {
@@ -475,6 +515,17 @@ impl AppState {
                             message,
                         },
                     };
+                }
+            }
+            DomainEvent::TokenUsageUpdated {
+                thread_id,
+                turn_id,
+                total_tokens,
+                model_context_window,
+            } => {
+                if self.matches_relevant_turn(&thread_id, &turn_id) {
+                    self.context_remaining_percent =
+                        remaining_context_percent(total_tokens, model_context_window);
                 }
             }
             DomainEvent::TurnOperationFailed(message) => {
@@ -589,6 +640,34 @@ impl AppState {
         matches!(&self.turn, TurnState::Streaming { thread_id: expected_thread, turn_id: expected_turn } if expected_thread == thread_id && expected_turn == turn_id)
     }
 
+    fn matches_relevant_turn(&self, thread_id: &str, turn_id: &str) -> bool {
+        let thread_matches = matches!(&self.thread, ThreadState::Ready { id } if id == thread_id);
+        thread_matches
+            && match &self.turn {
+                TurnState::Streaming {
+                    thread_id: active_thread,
+                    turn_id: active_turn,
+                } => active_thread == thread_id && active_turn == turn_id,
+                TurnState::Completed {
+                    turn_id: active_turn,
+                }
+                | TurnState::Interrupted {
+                    turn_id: active_turn,
+                } => active_turn == turn_id,
+                TurnState::Failed {
+                    turn_id: Some(active_turn),
+                    ..
+                } => active_turn == turn_id,
+                TurnState::Idle | TurnState::Starting | TurnState::Failed { turn_id: None, .. } => {
+                    false
+                }
+            }
+    }
+
+    fn reset_context_window(&mut self) {
+        self.context_remaining_percent = None;
+    }
+
     fn append_delta(&mut self, turn_id: &str, item_id: &str, delta: &str) {
         if let Some(entry) = self.transcript.iter_mut().find(|entry| {
             entry.item_id.as_deref() == Some(item_id) && entry.turn_id.as_deref() == Some(turn_id)
@@ -631,6 +710,26 @@ impl AppState {
     }
 }
 
+/// Returns the remaining model-context percentage rounded to the nearest whole
+/// percent, with exact half-percent values rounded up.
+///
+/// Token use is clamped to the context-window size before subtraction. `u128`
+/// intermediates keep the multiplication and rounding addition safe for every
+/// signed 64-bit value allowed by the installed app-server schema.
+pub fn remaining_context_percent(
+    total_tokens: i64,
+    model_context_window: Option<i64>,
+) -> Option<u8> {
+    let context_window = u128::try_from(model_context_window?).ok()?;
+    let consumed = u128::try_from(total_tokens).ok()?;
+    if context_window == 0 {
+        return None;
+    }
+    let remaining = context_window.saturating_sub(consumed.min(context_window));
+    let rounded = (remaining * 100 + context_window / 2) / context_window;
+    u8::try_from(rounded).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -643,6 +742,167 @@ mod tests {
             default_reasoning_effort: default_effort.to_owned(),
             supported_reasoning_efforts: efforts.iter().map(|value| (*value).to_owned()).collect(),
         }
+    }
+
+    fn active_context_state() -> AppState {
+        AppState {
+            auth: AuthState::SignedIn {
+                scope: AccountScope::from_chatgpt_email("user@example.com"),
+            },
+            thread: ThreadState::Ready {
+                id: "thr".to_owned(),
+            },
+            turn: TurnState::Streaming {
+                thread_id: "thr".to_owned(),
+                turn_id: "turn-1".to_owned(),
+            },
+            ..AppState::default()
+        }
+    }
+
+    #[test]
+    fn remaining_context_arithmetic_is_honest_clamped_and_overflow_safe() {
+        assert_eq!(remaining_context_percent(25, Some(100)), Some(75));
+        assert_eq!(remaining_context_percent(1, Some(200)), Some(100));
+        assert_eq!(remaining_context_percent(199, Some(200)), Some(1));
+        assert_eq!(remaining_context_percent(100, Some(100)), Some(0));
+        assert_eq!(remaining_context_percent(150, Some(100)), Some(0));
+        assert_eq!(remaining_context_percent(0, Some(i64::MAX)), Some(100));
+        assert_eq!(
+            remaining_context_percent(i64::MAX - 1, Some(i64::MAX)),
+            Some(0)
+        );
+        assert_eq!(remaining_context_percent(1, None), None);
+        assert_eq!(remaining_context_percent(1, Some(0)), None);
+        assert_eq!(remaining_context_percent(1, Some(-1)), None);
+        assert_eq!(remaining_context_percent(-1, Some(100)), None);
+    }
+
+    #[test]
+    fn token_usage_is_scoped_and_completed_values_survive_until_a_newer_update() {
+        let mut state = active_context_state();
+        for (thread_id, turn_id) in [("stale", "turn-1"), ("thr", "stale-turn")] {
+            state.reduce(Action::Event(DomainEvent::TokenUsageUpdated {
+                thread_id: thread_id.to_owned(),
+                turn_id: turn_id.to_owned(),
+                total_tokens: 90,
+                model_context_window: Some(100),
+            }));
+        }
+        assert_eq!(state.context_remaining_percent, None);
+
+        state.reduce(Action::Event(DomainEvent::TokenUsageUpdated {
+            thread_id: "thr".to_owned(),
+            turn_id: "turn-1".to_owned(),
+            total_tokens: 25,
+            model_context_window: Some(100),
+        }));
+        assert_eq!(state.context_remaining_percent, Some(75));
+
+        state.reduce(Action::Event(DomainEvent::TurnFinished {
+            thread_id: "thr".to_owned(),
+            turn_id: "turn-1".to_owned(),
+            outcome: TurnOutcome::Completed,
+        }));
+        assert_eq!(state.context_remaining_percent, Some(75));
+        state.reduce(Action::Event(DomainEvent::TokenUsageUpdated {
+            thread_id: "thr".to_owned(),
+            turn_id: "turn-1".to_owned(),
+            total_tokens: 26,
+            model_context_window: Some(100),
+        }));
+        assert_eq!(state.context_remaining_percent, Some(74));
+
+        state.turn = TurnState::Starting;
+        state.reduce(Action::Event(DomainEvent::TokenUsageUpdated {
+            thread_id: "thr".to_owned(),
+            turn_id: "turn-1".to_owned(),
+            total_tokens: 99,
+            model_context_window: Some(100),
+        }));
+        assert_eq!(state.context_remaining_percent, Some(74));
+        state.reduce(Action::Event(DomainEvent::TurnStarted {
+            thread_id: "thr".to_owned(),
+            turn_id: "turn-2".to_owned(),
+        }));
+        state.reduce(Action::Event(DomainEvent::TokenUsageUpdated {
+            thread_id: "thr".to_owned(),
+            turn_id: "turn-1".to_owned(),
+            total_tokens: 99,
+            model_context_window: Some(100),
+        }));
+        assert_eq!(state.context_remaining_percent, Some(74));
+        state.reduce(Action::Event(DomainEvent::TokenUsageUpdated {
+            thread_id: "thr".to_owned(),
+            turn_id: "turn-2".to_owned(),
+            total_tokens: 30,
+            model_context_window: Some(100),
+        }));
+        assert_eq!(state.context_remaining_percent, Some(70));
+    }
+
+    #[test]
+    fn unusable_relevant_usage_becomes_unknown() {
+        let mut state = active_context_state();
+        state.context_remaining_percent = Some(80);
+        for (total_tokens, model_context_window) in
+            [(10, None), (10, Some(0)), (10, Some(-1)), (-1, Some(100))]
+        {
+            state.context_remaining_percent = Some(80);
+            state.reduce(Action::Event(DomainEvent::TokenUsageUpdated {
+                thread_id: "thr".to_owned(),
+                turn_id: "turn-1".to_owned(),
+                total_tokens,
+                model_context_window,
+            }));
+            assert_eq!(state.context_remaining_percent, None);
+        }
+    }
+
+    #[test]
+    fn context_resets_on_model_thread_and_account_transitions() {
+        let scope = AccountScope::from_chatgpt_email("user@example.com");
+        let mut state = active_context_state();
+        state.models = vec![
+            model("m1", true, &["high"], "high"),
+            model("m2", false, &["high"], "high"),
+        ];
+        state.selected_model = Some("m1".to_owned());
+        state.selected_reasoning = Some("high".to_owned());
+
+        state.context_remaining_percent = Some(70);
+        state.reduce(Action::Intent(Intent::SelectModel("m1".to_owned())));
+        assert_eq!(state.context_remaining_percent, Some(70));
+        state.reduce(Action::Intent(Intent::SelectModel("m2".to_owned())));
+        assert_eq!(state.context_remaining_percent, None);
+
+        state.context_remaining_percent = Some(69);
+        state.reduce(Action::Event(DomainEvent::ResumeStarted {
+            id: "thr-other".to_owned(),
+        }));
+        assert_eq!(state.context_remaining_percent, None);
+
+        state.context_remaining_percent = Some(68);
+        state.reduce(Action::Event(DomainEvent::ThreadStarted {
+            id: "thr-new".to_owned(),
+        }));
+        assert_eq!(state.context_remaining_percent, None);
+
+        state.auth = AuthState::SignedIn {
+            scope: scope.clone(),
+        };
+        state.preferences.thread_id = None;
+        state.context_remaining_percent = Some(67);
+        state.reduce(Action::Event(DomainEvent::AccountLoaded(scope)));
+        assert_eq!(state.context_remaining_percent, Some(67));
+        state.reduce(Action::Event(DomainEvent::AccountLoaded(
+            AccountScope::from_chatgpt_email("other@example.com"),
+        )));
+        assert_eq!(state.context_remaining_percent, None);
+
+        state.context_remaining_percent = Some(66);
+        state.reduce(Action::Event(DomainEvent::LoggedOut));
+        assert_eq!(state.context_remaining_percent, None);
     }
 
     #[test]
