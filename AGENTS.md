@@ -46,6 +46,19 @@ These are durable constraints unless the project owner explicitly changes them:
 
 The completed MVP plan under `docs/plans/` is a historical implementation record, not the live roadmap. Establish and document the next milestone before widening product scope.
 
+## Active milestone: richer interactive runtime
+
+The project owner has explicitly approved the post-MVP milestone documented in `docs/plans/agentharness-interactive-runtime-2026-07-22.md`. This milestone intentionally expands the shipped baseline in these areas:
+
+- create a new thread with `/new`, choose among saved Codex threads through `/resume`, and delete one or all old threads with confirmation while retaining exactly one active thread;
+- toggle a right-side panel that displays only reasoning summaries or other thinking text actually emitted by app-server, never inferred or hidden chain-of-thought;
+- enable Codex command-line and file tools with full local access, without adding an approval UI;
+- show the authenticated account identity in the header;
+- show an animated pre-response thinking indicator that disappears on the first assistant-text delta; and
+- show the remaining context-window percentage in the top-right header when app-server supplies enough token-usage data.
+
+Implement each capability as a tested vertical slice and preserve all unrelated shipped behavior. Update the shipped baseline, current UX, safety boundary, README, and this active-milestone section when the integrated milestone is complete.
+
 ## Current user experience
 
 The application opens directly into the chat TUI. On startup it must continue to:
