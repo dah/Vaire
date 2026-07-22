@@ -637,6 +637,15 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                     outcome,
                 }))
             }
+            ProtocolEvent::ThreadTokenUsageUpdated(updated) => {
+                self.state
+                    .reduce(Action::Event(DomainEvent::TokenUsageUpdated {
+                        thread_id: updated.thread_id,
+                        turn_id: updated.turn_id,
+                        context_tokens: updated.token_usage.last.total_tokens,
+                        model_context_window: updated.token_usage.model_context_window,
+                    }))
+            }
             ProtocolEvent::Error(error) => {
                 if error.will_retry {
                     Vec::new()

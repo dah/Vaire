@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{
@@ -261,15 +261,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, ui: &UiState) {
         ])
         .split(area);
 
-    frame.render_widget(
-        Paragraph::new(status_text(state, regions[0].width)).style(
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        regions[0],
-    );
+    render_header(frame, regions[0], state);
     let activity_frame = state
         .is_waiting_for_assistant_text()
         .then(|| ui.activity_frame());
@@ -394,17 +386,46 @@ fn message_text(state: &AppState) -> Option<MessageText> {
     })
 }
 
-fn status_text(state: &AppState, width: u16) -> String {
+fn render_header(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    frame.render_widget(
+        Paragraph::new(header_text(state, area.width)).style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        area,
+    );
+}
+
+fn header_text(state: &AppState, width: u16) -> String {
+    let width = usize::from(width);
+    if width == 0 {
+        return String::new();
+    }
+    let context = state.context_remaining_percent.map_or_else(
+        || "Context --".to_owned(),
+        |percent| format!("Context {percent}%"),
+    );
+    let context_width = UnicodeWidthStr::width(context.as_str());
+    if context_width >= width {
+        return truncate_for_display(&context, width);
+    }
+
+    let left_capacity = width.saturating_sub(context_width + 1);
+    let left = truncate_for_display(&status_text(state), left_capacity);
+    let padding = width
+        .saturating_sub(UnicodeWidthStr::width(left.as_str()))
+        .saturating_sub(context_width);
+    format!("{left}{}{context}", " ".repeat(padding))
+}
+
+fn status_text(state: &AppState) -> String {
     let connection = match &state.connection {
         ConnectionState::Disconnected => "offline".to_owned(),
         ConnectionState::Connecting => "connecting".to_owned(),
         ConnectionState::Ready { .. } => "connected".to_owned(),
-        ConnectionState::Failed(message) => {
-            format!(
-                "error: {}",
-                sanitize_terminal_text(message).replace('\n', " ")
-            )
-        }
+        ConnectionState::Failed(message) => format!("error: {message}"),
     };
     let auth = match &state.auth {
         AuthState::Unknown => "auth?".to_owned(),
@@ -412,11 +433,9 @@ fn status_text(state: &AppState, width: u16) -> String {
         AuthState::SigningIn { .. } => "signing in".to_owned(),
         AuthState::SignedIn {
             scope: Some(crate::persistence::AccountScope::ChatgptEmail(email)),
-        } => sanitize_header_text(email),
+        } => email.clone(),
         AuthState::SignedIn { scope: None } => "account?".to_owned(),
-        AuthState::Unsupported(message) => {
-            format!("unsupported: {}", sanitize_header_text(message))
-        }
+        AuthState::Unsupported(message) => format!("unsupported: {message}"),
     };
     let thread = match &state.thread {
         ThreadState::None => "no thread".to_owned(),
@@ -435,36 +454,28 @@ fn status_text(state: &AppState, width: u16) -> String {
     };
     let model = state
         .selected_model
-        .as_deref()
-        .map(sanitize_terminal_text)
+        .clone()
         .unwrap_or_else(|| "model?".to_owned());
     let reasoning = state
         .selected_reasoning
-        .as_deref()
-        .map(sanitize_terminal_text)
+        .clone()
         .unwrap_or_else(|| "reasoning?".to_owned());
     let shutdown = if state.shutting_down {
         " • shutting down"
     } else {
         ""
     };
-    truncate_for_display(
-        &format!(" {connection} • {auth} • {thread} • {model}/{reasoning} • {turn}{shutdown}"),
-        width,
-    )
+    sanitize_header_text(&format!(
+        " {connection} • {auth} • {thread} • {model}/{reasoning} • {turn}{shutdown}"
+    ))
 }
 
 fn sanitize_header_text(value: &str) -> String {
     sanitize_terminal_text(value).replace('\n', " ")
 }
 
-fn truncate_for_display(value: &str, width: u16) -> String {
-    let width = usize::from(width);
-    let display_width = value
-        .chars()
-        .map(|character| UnicodeWidthChar::width(character).unwrap_or(0))
-        .sum::<usize>();
-    if display_width <= width {
+fn truncate_for_display(value: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(value) <= width {
         return value.to_owned();
     }
     if width == 0 {
@@ -856,7 +867,8 @@ mod tests {
     use unicode_width::UnicodeWidthStr;
 
     use super::{
-        render, sanitize_terminal_text, UiState, ACTIVITY_FRAMES, ACTIVITY_TICKS_PER_FRAME,
+        header_text, render, sanitize_terminal_text, UiState, ACTIVITY_FRAMES,
+        ACTIVITY_TICKS_PER_FRAME,
     };
     use crate::app::{
         Action, AppState, AuthState, ConnectionState, DomainEvent, Intent, ThinkingEntry,
@@ -1015,10 +1027,43 @@ mod tests {
             scope: Some(AccountScope::ChatgptEmail(long_email.clone())),
         };
         let narrow = header(&state, 36);
-        assert_eq!(narrow.chars().count(), 36);
-        assert!(narrow.ends_with('…'));
+        assert_eq!(UnicodeWidthStr::width(narrow.as_str()), 36);
+        assert!(narrow.contains('…'));
+        assert!(narrow.ends_with("Context --"));
         assert!(!narrow.contains(&long_email));
         assert!(!narrow.contains("Terminal too small"));
+    }
+
+    #[test]
+    fn header_right_aligns_context_and_sanitizes_every_dynamic_field() {
+        let mut state = ready();
+        assert!(header(&state, 100).ends_with("Context --"));
+
+        state.context_remaining_percent = Some(73);
+        state.connection = ConnectionState::Failed("e\u{1b}[2J\n界".to_owned());
+        state.auth = AuthState::SignedIn {
+            scope: Some(AccountScope::ChatgptEmail("u界\n@x".to_owned())),
+        };
+        state.selected_model = Some("m界\nnext".to_owned());
+        state.selected_reasoning = Some("r界\nmax".to_owned());
+
+        let wide = header_text(&state, 100);
+        assert_eq!(UnicodeWidthStr::width(wide.as_str()), 100);
+        assert!(wide.ends_with("Context 73%"));
+        assert!(wide.contains("error: e[2J 界"));
+        assert!(wide.contains("u界 @x"));
+        assert!(wide.contains("m界 next/r界 max"));
+        assert!(!wide.contains('\n'));
+        assert!(!wide.contains('\u{1b}'));
+
+        let narrow = header_text(&state, 36);
+        assert_eq!(UnicodeWidthStr::width(narrow.as_str()), 36);
+        assert!(narrow.contains('…'));
+        assert!(narrow.ends_with("Context 73%"));
+        assert!(!narrow.contains('\n'));
+
+        let rendered = header(&state, 100);
+        assert!(rendered.ends_with("Context 73%"));
     }
 
     #[test]
@@ -1152,6 +1197,7 @@ mod tests {
     fn activity_indicator_stays_in_conversation_when_thinking_panel_is_open() {
         let mut state = waiting();
         state.thinking.visible = true;
+        state.context_remaining_percent = Some(73);
         let mut ui = UiState::default();
         assert!(ui.sync_activity_animation(&state));
 
@@ -1166,17 +1212,20 @@ mod tests {
         );
         assert!(normal.contains("Thinking"));
         assert!(normal.contains("Awaiting emitted reasoning"));
+        assert!(header(&state, 100).ends_with("Context 73%"));
 
         let narrow = screen(&state, &ui, 36, 12);
         assert!(narrow.contains("Conversation"));
         assert!(narrow.contains("Agent:"));
         assert!(narrow.contains('~'));
         assert!(narrow.contains("Thinking"));
+        assert!(header(&state, 36).ends_with("Context 73%"));
     }
 
     #[test]
     fn thread_picker_keeps_modal_keys_while_activity_animation_ticks() {
         let mut state = waiting();
+        state.context_remaining_percent = Some(100);
         state.thread_picker = Some(ThreadPickerState {
             phase: ThreadPickerPhase::Ready,
             threads: vec![ThreadChoice {
@@ -1207,7 +1256,9 @@ mod tests {
             Some(Intent::ThreadPickerMoveDown)
         );
         assert_eq!(ui.composer, "untouched draft");
-        assert!(screen(&state, &ui, 50, 14).contains("Saved threads"));
+        let rendered = screen(&state, &ui, 50, 14);
+        assert!(rendered.contains("Saved threads"));
+        assert!(header(&state, 50).ends_with("Context 100%"));
     }
 
     #[test]
@@ -1289,8 +1340,10 @@ mod tests {
     #[test]
     fn thinking_panel_renders_closed_open_narrow_streaming_and_error_states() {
         let mut state = ready();
+        state.context_remaining_percent = Some(73);
         let closed = screen(&state, &UiState::default(), 100, 20);
         assert!(!closed.contains("Only text emitted by Codex"));
+        assert!(header(&state, 100).ends_with("Context 73%"));
 
         state.thinking.visible = true;
         state.turn = TurnState::Streaming {
@@ -1313,6 +1366,7 @@ mod tests {
         assert!(normal.contains("Only text emitted by Codex"));
         assert!(normal.contains("Summary:"));
         assert!(normal.contains("Checking facts safely"));
+        assert!(header(&state, 100).ends_with("Context 73%"));
 
         let narrow = screen(&state, &UiState::default(), 52, 16);
         assert!(narrow.contains("Conversation"));
@@ -1324,6 +1378,7 @@ mod tests {
         assert!(minimum_width.contains("Conversation"));
         assert!(minimum_width.contains("Thinking"));
         assert!(minimum_width.contains("Message"));
+        assert!(header(&state, 36).ends_with("Context 73%"));
 
         state.turn = TurnState::Failed {
             turn_id: Some("turn".to_owned()),

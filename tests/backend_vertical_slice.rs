@@ -753,3 +753,48 @@ sleep 1
     );
     backend.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn context_meter_uses_last_usage_not_cumulative_total_and_survives_completion() {
+    let temp = tempdir().unwrap();
+    let body = format!(
+        r#"
+IFS= read -r initialize
+printf '%s\n' '{INITIALIZED}'
+IFS= read -r initialized
+IFS= read -r account
+printf '%s\n' '{{"id":2,"result":{{"account":{{"type":"chatgpt","email":"user@example.com"}},"requiresOpenaiAuth":true}}}}'
+IFS= read -r models
+printf '%s\n' '{MODEL_PAGE}'
+IFS= read -r thread_start
+printf '%s\n' '{{"id":4,"result":{{"thread":{{"id":"thr-context","turns":[]}}}}}}'
+IFS= read -r turn_start
+printf '%s\n' '{{"id":5,"result":{{"turn":{{"id":"turn-context","items":[],"status":"inProgress"}}}}}}'
+printf '%s\n' '{{"method":"thread/tokenUsage/updated","params":{{"threadId":"thr-context","turnId":"turn-context","tokenUsage":{{"last":{{"cachedInputTokens":0,"inputTokens":20,"outputTokens":0,"reasoningOutputTokens":0,"totalTokens":20}},"total":{{"cachedInputTokens":0,"inputTokens":20,"outputTokens":0,"reasoningOutputTokens":0,"totalTokens":20}},"modelContextWindow":100}}}}}}'
+printf '%s\n' '{{"method":"thread/tokenUsage/updated","params":{{"threadId":"thr-context","turnId":"turn-context","tokenUsage":{{"last":{{"cachedInputTokens":0,"inputTokens":5,"outputTokens":0,"reasoningOutputTokens":0,"totalTokens":5}},"total":{{"cachedInputTokens":0,"inputTokens":250,"outputTokens":0,"reasoningOutputTokens":0,"totalTokens":250}},"modelContextWindow":100}}}}}}'
+printf '%s\n' '{{"method":"turn/completed","params":{{"threadId":"thr-context","turn":{{"id":"turn-context","items":[],"status":"completed"}}}}}}'
+IFS= read -r hold
+"#
+    );
+    let mut backend = BackendCoordinator::new(
+        session(temp.path(), &body).await,
+        MemoryPreferences::new(PreferencesV1::default()),
+        RecordingBrowser::default(),
+    );
+    backend.startup().await.unwrap();
+    backend
+        .handle_intent(Intent::SendMessage("measure context".to_owned()))
+        .await
+        .unwrap();
+    assert_eq!(backend.state().context_remaining_percent, None);
+
+    assert!(backend.pump_event().await.unwrap());
+    assert_eq!(backend.state().context_remaining_percent, Some(80));
+    assert!(backend.pump_event().await.unwrap());
+    assert_eq!(backend.state().context_remaining_percent, Some(95));
+    assert!(backend.pump_event().await.unwrap());
+    assert!(matches!(backend.state().turn, TurnState::Completed { .. }));
+    assert_eq!(backend.state().context_remaining_percent, Some(95));
+
+    backend.shutdown().await.unwrap();
+}

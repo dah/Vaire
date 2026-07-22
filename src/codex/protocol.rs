@@ -449,6 +449,36 @@ pub struct ErrorNotification {
     pub will_retry: bool,
 }
 
+/// The required token total from one app-server usage breakdown.
+///
+/// The installed schema contains additional breakdown fields. AgentHarness only
+/// needs each breakdown's required `totalTokens` value and deliberately ignores
+/// the other counters at the protocol boundary.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenUsageBreakdown {
+    pub total_tokens: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadTokenUsage {
+    /// Current context occupancy used for the remaining-context meter.
+    pub last: TokenUsageBreakdown,
+    /// Cumulative usage retained for schema validation, not context occupancy.
+    pub total: TokenUsageBreakdown,
+    #[serde(default)]
+    pub model_context_window: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadTokenUsageUpdatedNotification {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub token_usage: ThreadTokenUsage,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProtocolEvent {
     AccountLoginCompleted(AccountLoginCompletedNotification),
@@ -461,6 +491,7 @@ pub enum ProtocolEvent {
     ReasoningTextDelta(ReasoningTextDeltaNotification),
     ItemCompleted(ItemCompletedNotification),
     TurnCompleted(TurnNotification),
+    ThreadTokenUsageUpdated(ThreadTokenUsageUpdatedNotification),
     Error(ErrorNotification),
 }
 
@@ -491,6 +522,9 @@ pub fn parse_notification(method: &str, params: Value) -> Result<Option<Protocol
         "item/reasoning/textDelta" => ProtocolEvent::ReasoningTextDelta(decode(method, params)?),
         "item/completed" => ProtocolEvent::ItemCompleted(decode(method, params)?),
         "turn/completed" => ProtocolEvent::TurnCompleted(decode(method, params)?),
+        "thread/tokenUsage/updated" => {
+            ProtocolEvent::ThreadTokenUsageUpdated(decode(method, params)?)
+        }
         "error" => ProtocolEvent::Error(decode(method, params)?),
         _ => return Ok(None),
     };
@@ -730,5 +764,98 @@ mod tests {
             serde_json::to_value(ReasoningSummary::Auto).unwrap(),
             json!("auto")
         );
+    }
+
+    #[test]
+    fn decodes_token_usage_from_the_installed_schema() {
+        let event = parse_notification(
+            "thread/tokenUsage/updated",
+            json!({
+                "threadId": "thr",
+                "turnId": "turn",
+                "tokenUsage": {
+                    "last": {
+                        "cachedInputTokens": 0,
+                        "inputTokens": 10,
+                        "outputTokens": 5,
+                        "reasoningOutputTokens": 2,
+                        "totalTokens": 17
+                    },
+                    "total": {
+                        "cachedInputTokens": 0,
+                        "inputTokens": 30,
+                        "outputTokens": 10,
+                        "reasoningOutputTokens": 5,
+                        "totalTokens": 45
+                    },
+                    "modelContextWindow": 100
+                }
+            }),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            event,
+            Some(ProtocolEvent::ThreadTokenUsageUpdated(usage))
+                if usage.thread_id == "thr"
+                    && usage.turn_id == "turn"
+                    && usage.token_usage.last.total_tokens == 17
+                    && usage.token_usage.total.total_tokens == 45
+                    && usage.token_usage.model_context_window == Some(100)
+        ));
+
+        let null_window = parse_notification(
+            "thread/tokenUsage/updated",
+            json!({
+                "threadId": "thr",
+                "turnId": "turn",
+                "tokenUsage": {
+                    "last": { "totalTokens": 5 },
+                    "total": { "totalTokens": 45 },
+                    "modelContextWindow": null
+                }
+            }),
+        )
+        .unwrap();
+        assert!(matches!(
+            null_window,
+            Some(ProtocolEvent::ThreadTokenUsageUpdated(usage))
+                if usage.token_usage.model_context_window.is_none()
+        ));
+    }
+
+    #[test]
+    fn rejects_malformed_and_out_of_range_token_usage() {
+        for malformed in [
+            json!({"threadId":"thr","turnId":"turn"}),
+            json!({"threadId":"thr","turnId":"turn","tokenUsage":{}}),
+            json!({
+                "threadId":"thr","turnId":"turn",
+                "tokenUsage":{"last":{"totalTokens":5}}
+            }),
+            json!({
+                "threadId":"thr","turnId":"turn",
+                "tokenUsage":{"total":{"totalTokens":45}}
+            }),
+            json!({
+                "threadId":"thr","turnId":"turn",
+                "tokenUsage":{"last":{},"total":{"totalTokens":45}}
+            }),
+            json!({
+                "threadId":"thr","turnId":"turn",
+                "tokenUsage":{
+                    "last":{"totalTokens":"5"},
+                    "total":{"totalTokens":45}
+                }
+            }),
+        ] {
+            assert!(parse_notification("thread/tokenUsage/updated", malformed).is_err());
+        }
+
+        let too_large = serde_json::from_str(
+            r#"{"threadId":"thr","turnId":"turn","tokenUsage":{"last":{"totalTokens":9223372036854775808},"total":{"totalTokens":45},"modelContextWindow":100}}"#,
+        )
+        .unwrap();
+        assert!(parse_notification("thread/tokenUsage/updated", too_large).is_err());
     }
 }
