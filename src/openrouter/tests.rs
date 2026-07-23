@@ -183,12 +183,23 @@ async fn key_and_catalog_use_exact_authenticated_paths_and_load_per_operation() 
     let catalog_request = request_text(&requests[1]);
     assert!(key.starts_with("GET /api/v1/key HTTP/1.1\r\n"));
     assert!(catalog_request.starts_with("GET /api/v1/models/user HTTP/1.1\r\n"));
-    for request in [&key, &catalog_request] {
-        assert!(request
+    assert_eq!("Vairë".as_bytes(), &[0x56, 0x61, 0x69, 0x72, 0xC3, 0xAB]);
+    let title_header = [
+        b"x-title: ".as_slice(),
+        &[0x56, 0x61, 0x69, 0x72, 0xC3, 0xAB],
+        b"\r\n".as_slice(),
+    ]
+    .concat();
+    for request in [&requests[0], &requests[1]] {
+        assert!(request_text(request)
             .to_ascii_lowercase()
             .contains(&format!("authorization: bearer {}", TEST_KEY).to_ascii_lowercase()));
-        assert!(request.contains("x-title: AgentHarness"));
-        assert!(request.contains("user-agent: AgentHarness/"));
+        assert!(request
+            .windows(title_header.len())
+            .any(|window| window == title_header));
+        assert!(request
+            .windows(b"user-agent: vaire/".len())
+            .any(|window| window == b"user-agent: vaire/"));
     }
     assert_eq!(
         store.operations(),

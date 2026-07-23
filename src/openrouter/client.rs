@@ -392,9 +392,13 @@ fn headers(secret: &SecretValue, accept: &'static str) -> Result<HeaderMap, Open
     );
     headers.insert(
         USER_AGENT,
-        HeaderValue::from_static(concat!("AgentHarness/", env!("CARGO_PKG_VERSION"))),
+        HeaderValue::from_static(concat!("vaire/", env!("CARGO_PKG_VERSION"))),
     );
-    headers.insert("x-title", HeaderValue::from_static("AgentHarness"));
+    headers.insert(
+        "x-title",
+        HeaderValue::from_bytes("Vairë".as_bytes())
+            .map_err(|_| OpenRouterFailure::new(OpenRouterFailureCategory::InvalidRequest))?,
+    );
     headers.insert(ACCEPT, HeaderValue::from_static(accept));
     Ok(headers)
 }

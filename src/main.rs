@@ -1,19 +1,19 @@
 use std::io::{self, stdout, Stdout};
 use std::time::Duration;
 
-use agentharness::app::{AppState, Intent};
-use agentharness::runtime::{RuntimeConfig, RuntimeHandle};
-use agentharness::terminal::{SystemTerminalOps, TerminalGuard};
-use agentharness::tui::{render, UiState};
 use crossterm::event;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::time::{self, MissedTickBehavior};
+use vaire::app::{AppState, Intent};
+use vaire::runtime::{RuntimeConfig, RuntimeHandle};
+use vaire::terminal::{SystemTerminalOps, TerminalGuard};
+use vaire::tui::{render, UiState};
 
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
-        eprintln!("AgentHarness could not run: {error}");
+        eprintln!("Vairë could not run: {error}");
         std::process::exit(1);
     }
 }

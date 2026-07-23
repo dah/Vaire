@@ -113,7 +113,7 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                             });
                         }
                         fatal_message = Some(
-                            "app-server connection became unusable during thread deletion; restart AgentHarness"
+                            "app-server connection became unusable during thread deletion; restart Vairë"
                                 .to_owned(),
                         );
                         break;

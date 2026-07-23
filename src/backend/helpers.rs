@@ -42,7 +42,7 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
         ) {
             self.state
                 .reduce(Action::Event(DomainEvent::ConnectionFailed(
-                    "app-server timed out during a thread or turn change; restart AgentHarness before retrying"
+                    "app-server timed out during a thread or turn change; restart Vairë before retrying"
                         .to_owned(),
                 )))
         } else if let BackendError::Session(SessionError::Transport(

@@ -4,15 +4,15 @@ pub(super) use std::path::{Path, PathBuf};
 pub(super) use std::sync::Arc;
 pub(super) use std::time::Duration;
 
-pub(super) use agentharness::codex::protocol::InboundEvent;
-pub(super) use agentharness::codex::transport::{
-    AppServerTransport, ProcessSpec, RequestTimeouts, TransportError, EVENT_QUEUE_CAPACITY,
-    MAX_FRAME_BYTES, MAX_PENDING_REQUESTS,
-};
-pub(super) use agentharness::diagnostics::MemoryDiagnosticSink;
 pub(super) use futures_util::{stream::FuturesUnordered, StreamExt};
 pub(super) use serde_json::json;
 pub(super) use tempfile::tempdir;
+pub(super) use vaire::codex::protocol::InboundEvent;
+pub(super) use vaire::codex::transport::{
+    AppServerTransport, ProcessSpec, RequestTimeouts, TransportError, EVENT_QUEUE_CAPACITY,
+    MAX_FRAME_BYTES, MAX_PENDING_REQUESTS,
+};
+pub(super) use vaire::diagnostics::MemoryDiagnosticSink;
 
 pub(super) use crate::shared_support::script;
 

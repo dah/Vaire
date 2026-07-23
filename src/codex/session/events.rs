@@ -4,7 +4,7 @@ impl SessionService {
     pub async fn initialize(&self) -> Result<InitializeResponse, SessionError> {
         let response = self
             .transport
-            .request_default("initialize", InitializeParams::agentharness())
+            .request_default("initialize", InitializeParams::vaire())
             .await?;
         let response = decode("initialize", response)?;
         self.transport.notify("initialized", json!({})).await?;

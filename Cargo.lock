@@ -3,29 +3,6 @@
 version = 4
 
 [[package]]
-name = "agentharness"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "crossterm",
- "futures-util",
- "libc",
- "ratatui",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-util",
- "unicode-segmentation",
- "unicode-width 0.2.0",
- "url",
- "uuid",
- "zeroize",
-]
-
-[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1471,6 +1448,29 @@ dependencies = [
  "js-sys",
  "serde_core",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "vaire"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "crossterm",
+ "futures-util",
+ "libc",
+ "ratatui",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "unicode-segmentation",
+ "unicode-width 0.2.0",
+ "url",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]

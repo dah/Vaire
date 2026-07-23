@@ -11,8 +11,14 @@ use super::{
 };
 
 #[test]
-fn initializes_without_experimental_capabilities() {
-    let params = serde_json::to_value(InitializeParams::agentharness()).unwrap();
+fn initializes_with_exact_vaire_identity_and_without_experimental_capabilities() {
+    let params = serde_json::to_value(InitializeParams::vaire()).unwrap();
+    assert_eq!(params["clientInfo"]["name"], "vaire");
+    assert_eq!(params["clientInfo"]["title"], "Vairë");
+    assert_eq!(
+        params["clientInfo"]["title"].as_str().unwrap().as_bytes(),
+        &[0x56, 0x61, 0x69, 0x72, 0xC3, 0xAB]
+    );
     assert_eq!(params["capabilities"]["experimentalApi"], false);
     assert_eq!(
         params["capabilities"]["mcpServerOpenaiFormElicitation"],

@@ -67,7 +67,7 @@ IFS= read -r hold
             .await,
         Err(TransportError::Protocol(message)) if message.contains("timeout range")
     ));
-    let oversized = "x".repeat(agentharness::codex::transport::MAX_FRAME_BYTES);
+    let oversized = "x".repeat(vaire::codex::transport::MAX_FRAME_BYTES);
     assert!(matches!(
         transport
             .notify("oversized-notify", json!({"value": oversized.clone()}))

@@ -5,6 +5,10 @@ use std::process::{Command, Stdio};
 use thiserror::Error;
 use url::Url;
 
+mod migration;
+
+pub(crate) use migration::{legacy_support_dir, migrate_support_root};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppPaths {
     pub support_dir: PathBuf,
@@ -14,6 +18,7 @@ pub struct AppPaths {
     pub openrouter_home_dir: PathBuf,
     pub openrouter_credential_file: PathBuf,
     pub diagnostics_dir: PathBuf,
+    pub(crate) historical_conversation_dir: Option<PathBuf>,
 }
 
 impl AppPaths {
@@ -22,13 +27,23 @@ impl AppPaths {
         let support_dir = home
             .join("Library")
             .join("Application Support")
-            .join("AgentHarness");
+            .join("vaire");
+
+        #[cfg(target_os = "macos")]
+        let historical_conversation_dir = Some(
+            legacy_support_dir(home)
+                .join("runtime")
+                .join("conversation"),
+        );
 
         #[cfg(all(unix, not(target_os = "macos")))]
         let support_dir = std::env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".local").join("share"))
-            .join("AgentHarness");
+            .join("vaire");
+
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let historical_conversation_dir = None;
 
         let runtime_dir = support_dir.join("runtime");
         let openrouter_home_dir = runtime_dir.join("openrouter-home");
@@ -39,6 +54,7 @@ impl AppPaths {
             openrouter_credential_file: openrouter_home_dir.join("api-key"),
             openrouter_home_dir,
             diagnostics_dir: support_dir.join("diagnostics"),
+            historical_conversation_dir,
             support_dir,
         }
     }
@@ -106,7 +122,10 @@ mod tests {
     #[test]
     fn application_data_never_uses_the_launch_directory() {
         let paths = AppPaths::from_home(Path::new("/Users/example"));
-        assert!(paths.support_dir.ends_with("AgentHarness"));
+        assert_eq!(
+            paths.support_dir,
+            Path::new("/Users/example/Library/Application Support/vaire")
+        );
         assert!(paths.preferences_file.starts_with(&paths.support_dir));
         assert_eq!(paths.openrouter_dir, paths.support_dir.join("openrouter"));
         assert_eq!(
@@ -116,6 +135,14 @@ mod tests {
         assert_eq!(
             paths.openrouter_credential_file,
             paths.openrouter_home_dir.join("api-key")
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            paths.historical_conversation_dir,
+            Some(
+                Path::new("/Users/example")
+                    .join("Library/Application Support/AgentHarness/runtime/conversation")
+            )
         );
     }
 

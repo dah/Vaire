@@ -37,6 +37,22 @@ impl PaginationBudget {
         }
         Ok(())
     }
+
+    pub(in crate::codex::session) fn retain_additional_bytes(
+        &mut self,
+        method: &'static str,
+        bytes: usize,
+    ) -> Result<(), SessionError> {
+        self.retained_bytes = self.retained_bytes.checked_add(bytes).ok_or_else(|| {
+            SessionError::Protocol(format!("{method} exceeded the retained byte limit"))
+        })?;
+        if self.retained_bytes > MAX_PAGINATION_RETAINED_BYTES {
+            return Err(SessionError::Protocol(format!(
+                "{method} exceeded the retained byte limit"
+            )));
+        }
+        Ok(())
+    }
 }
 
 pub(in crate::codex::session) fn decode<T: DeserializeOwned>(
@@ -111,11 +127,24 @@ pub(in crate::codex::session) fn model_retained_bytes(model: &ModelInfo) -> usiz
         .saturating_add(option_bytes)
 }
 
+#[cfg(test)]
 pub(in crate::codex::session) fn thread_retained_bytes(thread: &ThreadListEntry) -> usize {
+    thread_origin_retained_bytes(thread).saturating_add(thread_additional_retained_bytes(thread))
+}
+
+pub(in crate::codex::session) fn thread_origin_retained_bytes(thread: &ThreadListEntry) -> usize {
     thread
         .id
         .len()
-        .saturating_mul(2)
+        .saturating_add(thread.cwd.to_string_lossy().len())
+}
+
+pub(in crate::codex::session) fn thread_additional_retained_bytes(
+    thread: &ThreadListEntry,
+) -> usize {
+    thread
+        .id
+        .len()
         .saturating_add(thread.name.as_deref().map_or(0, str::len))
         .saturating_add(thread.preview.len())
         .saturating_add(thread.cwd.to_string_lossy().len())

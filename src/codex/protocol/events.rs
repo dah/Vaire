@@ -64,7 +64,7 @@ pub struct ErrorNotification {
 
 /// The required token total from one app-server usage breakdown.
 ///
-/// The installed schema contains additional breakdown fields. AgentHarness only
+/// The installed schema contains additional breakdown fields. Vairë only
 /// needs each breakdown's required `totalTokens` value and deliberately ignores
 /// the other counters at the protocol boundary.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]

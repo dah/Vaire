@@ -64,13 +64,14 @@ pub struct IsolationPaths {
     pub root: PathBuf,
     pub codex_home: PathBuf,
     pub conversation: PathBuf,
+    pub historical_conversation: Option<PathBuf>,
 }
 
 impl IsolationPaths {
     /// Creates owner-only runtime directories while preserving the conversation workspace.
     ///
     /// Built-in tools run from this dedicated non-project directory. Files created there are
-    /// intentionally retained so they remain available after AgentHarness restarts.
+    /// intentionally retained so they remain available after Vairë restarts.
     pub fn prepare(root: impl AsRef<Path>) -> io::Result<Self> {
         let root = root.as_ref().to_path_buf();
         let codex_home = root.join("codex-home");
@@ -84,7 +85,13 @@ impl IsolationPaths {
             root,
             codex_home,
             conversation,
+            historical_conversation: None,
         })
+    }
+
+    pub(crate) fn with_historical_conversation(mut self, path: Option<PathBuf>) -> Self {
+        self.historical_conversation = path;
+        self
     }
 }
 
@@ -176,14 +183,14 @@ pub fn denial_response(id: &RequestId, method: &str) -> Value {
             "id": id,
             "error": {
                 "code": -32080,
-                "message": "AgentHarness runtime policy denied the server request"
+                "message": "Vairë runtime policy denied the server request"
             }
         }),
         _ => json!({
             "id": id,
             "error": {
                 "code": -32601,
-                "message": "AgentHarness does not support server-initiated requests"
+                "message": "Vairë does not support server-initiated requests"
             }
         }),
     }
@@ -229,9 +236,27 @@ mod tests {
     }
 
     #[test]
+    fn historical_conversation_is_discovery_only_metadata() {
+        let temp = tempdir().unwrap();
+        let historical = temp.path().join("legacy/runtime/conversation");
+        let paths = IsolationPaths::prepare(temp.path().join("runtime"))
+            .unwrap()
+            .with_historical_conversation(Some(historical.clone()));
+
+        assert_eq!(
+            paths.historical_conversation.as_deref(),
+            Some(historical.as_path())
+        );
+        assert!(
+            !historical.exists(),
+            "attaching historical discovery metadata must not create the legacy cwd"
+        );
+    }
+
+    #[test]
     fn supplies_full_access_tools_at_thread_and_turn_boundaries() {
         let policy = FullAccessPolicy;
-        let cwd = Path::new("/private/tmp/agentharness-conversation");
+        let cwd = Path::new("/private/tmp/vaire-conversation");
         let thread = policy.thread_start_overrides(cwd);
         let turn = policy.turn_start_overrides(cwd);
 

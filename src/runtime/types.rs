@@ -14,18 +14,36 @@ pub struct RuntimeConfig {
 
 impl RuntimeConfig {
     pub fn discover() -> Result<Self, RuntimeError> {
+        let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+            RuntimeError::Paths(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "HOME is not set",
+            ))
+        })?;
+        Self::discover_with_home(&home, || std::env::var_os("VAIRE_CODEX_BIN"))
+    }
+
+    fn discover_with_home(
+        home: &Path,
+        codex_lookup: impl FnOnce() -> Option<OsString>,
+    ) -> Result<Self, RuntimeError> {
+        #[cfg(target_os = "macos")]
+        crate::platform::migrate_support_root(home)
+            .map_err(|error| RuntimeError::SupportRootMigration(error.to_string()))?;
         Ok(Self {
-            paths: AppPaths::discover().map_err(RuntimeError::Paths)?,
-            codex_override: std::env::var_os("AGENTHARNESS_CODEX_BIN"),
+            paths: AppPaths::from_home(home),
+            codex_override: codex_lookup(),
         })
     }
 }
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
-    #[error("could not prepare AgentHarness application data: {0}")]
+    #[error("could not migrate Vairë application data: {0}")]
+    SupportRootMigration(String),
+    #[error("could not prepare Vairë application data: {0}")]
     Paths(std::io::Error),
-    #[error("Codex CLI was not found; install codex-cli {TESTED_CODEX_VERSION} or newer, or set AGENTHARNESS_CODEX_BIN")]
+    #[error("Codex CLI was not found; install codex-cli {TESTED_CODEX_VERSION} or newer, or set VAIRE_CODEX_BIN")]
     CodexNotFound,
     #[error("Codex CLI version could not be checked: {0}")]
     VersionCheck(String),
@@ -35,6 +53,35 @@ pub enum RuntimeError {
     AppServer(String),
     #[error("could not prepare OpenRouter support: {0}")]
     OpenRouter(String),
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod discovery_tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    #[test]
+    fn migration_failure_precedes_codex_override_lookup() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_home(home.path());
+        let parent = paths.support_dir.parent().unwrap();
+        fs::create_dir_all(parent).unwrap();
+        for name in ["AgentHarness", "vaire"] {
+            let root = parent.join(name);
+            fs::create_dir(&root).unwrap();
+            fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let looked_up = AtomicBool::new(false);
+        let result = RuntimeConfig::discover_with_home(home.path(), || {
+            looked_up.store(true, Ordering::SeqCst);
+            None
+        });
+        assert!(matches!(result, Err(RuntimeError::SupportRootMigration(_))));
+        assert!(!looked_up.load(Ordering::SeqCst));
+    }
 }
 
 pub struct RuntimeHandle {

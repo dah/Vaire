@@ -99,7 +99,7 @@ impl AppState {
                             if found_local_threads {
                                 "No saved threads are registered to this ChatGPT account".to_owned()
                             } else {
-                                "No saved AgentHarness threads were found".to_owned()
+                                "No saved Vairë threads were found".to_owned()
                             }
                         });
                     }

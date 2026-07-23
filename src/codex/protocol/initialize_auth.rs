@@ -24,11 +24,11 @@ pub struct InitializeParams {
 }
 
 impl InitializeParams {
-    pub fn agentharness() -> Self {
+    pub fn vaire() -> Self {
         Self {
             client_info: ClientInfo {
-                name: "agentharness".to_owned(),
-                title: "AgentHarness".to_owned(),
+                name: "vaire".to_owned(),
+                title: "Vairë".to_owned(),
                 version: env!("CARGO_PKG_VERSION").to_owned(),
             },
             capabilities: InitializeCapabilities::default(),

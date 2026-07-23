@@ -1,20 +1,20 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use agentharness::codex::protocol::{
+use serde_json::json;
+use tempfile::tempdir;
+use vaire::codex::protocol::{
     CancelLoginAccountParams, CancelLoginAccountResponse, CancelLoginAccountStatus,
     InitializeParams, LoginAccountParams, LoginAccountResponse,
 };
-use agentharness::codex::safety::{FullAccessPolicy, IsolationPaths};
-use agentharness::codex::transport::{AppServerTransport, ProcessSpec};
-use agentharness::platform::validate_login_url;
-use serde_json::json;
-use tempfile::tempdir;
+use vaire::codex::safety::{FullAccessPolicy, IsolationPaths};
+use vaire::codex::transport::{AppServerTransport, ProcessSpec};
+use vaire::platform::validate_login_url;
 
 #[tokio::test]
 #[ignore = "requires an installed Codex CLI; run explicitly during protocol upgrades"]
 async fn installed_cli_initializes_with_full_access_policy() {
-    let executable = std::env::var_os("AGENTHARNESS_CODEX_BIN")
+    let executable = std::env::var_os("VAIRE_CODEX_BIN")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("codex"));
     let temp = tempdir().unwrap();
@@ -26,7 +26,7 @@ async fn installed_cli_initializes_with_full_access_policy() {
     transport
         .request(
             "initialize",
-            InitializeParams::agentharness(),
+            InitializeParams::vaire(),
             Duration::from_secs(10),
         )
         .await
@@ -59,7 +59,7 @@ async fn installed_cli_initializes_with_full_access_policy() {
 #[tokio::test]
 #[ignore = "requires an installed Codex CLI and network access; starts and immediately cancels a device login"]
 async fn installed_cli_starts_and_cancels_device_login() {
-    let executable = std::env::var_os("AGENTHARNESS_CODEX_BIN")
+    let executable = std::env::var_os("VAIRE_CODEX_BIN")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("codex"));
     let temp = tempdir().unwrap();
@@ -71,7 +71,7 @@ async fn installed_cli_starts_and_cancels_device_login() {
     transport
         .request(
             "initialize",
-            InitializeParams::agentharness(),
+            InitializeParams::vaire(),
             Duration::from_secs(10),
         )
         .await

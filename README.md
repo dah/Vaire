@@ -1,6 +1,6 @@
-# AgentHarness
+# Vairë
 
-AgentHarness is a small macOS-first terminal chat client with one active conversation across two
+Vairë is a small macOS-first terminal chat client with one active conversation across two
 providers: Codex through the installed app-server and OpenRouter text chat. Codex uses its owned
 ChatGPT subscription login flow; OpenRouter uses a user-supplied API key. There is no approval UI,
 and Codex's built-in command-line and file tools are enabled.
@@ -16,28 +16,44 @@ Requirements:
 - macOS and stable Rust
 - codex-cli 0.144.6 or newer available as codex on PATH
 
-    cargo run
+    cargo run --bin vaire
 
-**Warning:** AgentHarness runs Codex with `danger-full-access` and `approval_policy="never"`.
+**Warning:** Vairë runs Codex with `danger-full-access` and `approval_policy="never"`.
 Commands execute without confirmation and can run local programs, use the network, invoke already
 authenticated tools, and read, create, modify, or delete anything your macOS account can access.
 This is not a sandbox; use it only with prompts and content you trust.
 
-Set AGENTHARNESS_CODEX_BIN=/absolute/path/to/codex only when codex is not on PATH.
-On first launch, enter **/login** to choose Codex or OpenRouter. For Codex, complete the HTTPS browser sign-in. If the callback-based
-OpenAI page fails, run **/logout** to cancel the pending attempt and use **/login device**; the app
-opens the device verification page and displays the one-time code in the TUI. For OpenRouter, enter
-an API key in the masked editor, validate it, then use **c** in the login popup to choose the enabled
-model subset. AgentHarness stores its
-non-secret preferences and dedicated Codex runtime under
-~/Library/Application Support/AgentHarness/; Codex owns credentials in that dedicated home.
+Set `VAIRE_CODEX_BIN=/absolute/path/to/codex` only when `codex` is not on `PATH`.
+On first launch, enter **/login** to choose Codex or OpenRouter. For Codex, complete the HTTPS
+browser sign-in. If the callback-based OpenAI page fails, run **/logout** to cancel the pending
+attempt and use **/login device**; the app opens the device verification page and displays the
+one-time code in the TUI. For OpenRouter, enter an API key in the masked editor, validate it, then
+use **c** in the login popup to choose the enabled model subset. Vairë stores its non-secret
+preferences and dedicated Codex runtime under
+`~/Library/Application Support/vaire/`; Codex owns credentials in that dedicated home.
 Preferences may include the normalized ChatGPT email and a non-secret thread-to-account registry
 used to prevent cross-account thread listing or resume; the preferences file and its directory are
 owner-only. New non-ephemeral threads are explicitly created with `threadSource: "appServer"`.
-For compatibility with existing AgentHarness threads created before that source was explicit,
+
+On the first launch after upgrading from the legacy product name, Vairë migrates the complete
+`~/Library/Application Support/AgentHarness` root to
+`~/Library/Application Support/vaire` before opening state, diagnostics, credentials, or provider
+processes. It performs one exclusive same-parent rename only when the legacy entry is a real,
+current-user-owned `0700` directory and the new entry is absent. It does not follow root symlinks
+or inspect, copy, deserialize, log, or rewrite descendants. A symlink, file, wrong owner, unsafe
+mode, or any state in which both roots exist fails closed without choosing, deleting, or merging
+data. Stop all Vairë versions and move one complete root aside for inspection before retrying; do
+not merge or overwrite the roots. A failure to sync the parent after the verified rename means the
+move is committed but its crash durability is unverified, so Vairë reports the failure and never
+attempts to reverse it automatically.
+
+For compatibility with existing Vairë threads created before that source was explicit,
 `/resume` discovers both `appServer` and legacy `vscode` sources, but exposes only thread IDs
 already registered to the signed-in account whose cwd exactly matches the dedicated conversation
-directory.
+directory. It permanently searches both the current cwd and the historical pre-rename cwd so
+registered conversations remain visible after the product rename; those two searches share the
+same resource ceilings and never auto-register a discovered thread.
+
 Tool commands start in the dedicated `runtime/conversation` directory, and files created there are
 kept across launches. That directory and the dedicated Codex home are organizational boundaries,
 not security boundaries: commands can leave the starting directory and can reach other same-user
@@ -62,13 +78,14 @@ consistency without being compared to the requested alias. Parser failures add a
 stream stage to the visible turn-failure message without persisting response payload or stage data.
 
 The app-server inherits the launching environment except that inherited `CODEX_*` values are
-removed and AgentHarness supplies its dedicated `CODEX_HOME`; tool shells request environment
+removed and Vairë supplies its dedicated `CODEX_HOME`; tool shells request environment
 inheritance. Codex's default name-based filtering of variables containing `KEY`, `SECRET`, or
 `TOKEN` is incomplete. Ambient authority such as `DATABASE_URL`, `SSH_AUTH_SOCK`, macOS Keychain,
 credential/config files, and authenticated CLIs may remain available to model-run commands.
-Sanitized diagnostics are written to the diagnostics subdirectory.
+Sanitized diagnostics are written to `diagnostics/vaire.log`. A migrated legacy diagnostics file,
+if present, remains untouched.
 
-To stay responsive when app-server or local state is unexpectedly large, AgentHarness enforces
+To stay responsive when app-server or local state is unexpectedly large, Vairë enforces
 explicit resource ceilings. Drafts are limited to 128 KiB; the UI retains only a recent bounded
 transcript slice (at most 1 MiB and 2,048 entries), while Codex remains the source of truth for
 complete thread history. Protocol frames, saved preferences, and each rotating diagnostics file
@@ -83,22 +100,24 @@ silently replacing the active thread.
   a blank conversation; **/resume** is the only operation that restores cross-provider history.
 - **/reasoning [value]** uses Codex choices; OpenRouter reasoning effort is unsupported.
 - **/new** eagerly creates a fresh conversation for the active provider without deleting history
-- **/resume** opens the provider-labelled conversation picker; arrows or **j/k** navigate and **Enter** resumes
+- **/resume** opens the provider-labelled conversation picker; arrows or **j/k** navigate and
+  **Enter** resumes
 - In the conversation picker, **d** requests deletion of the selected inactive history and **D** requests
   deletion of all inactive histories. Both actions show their exact scope and require a second
   **Enter** confirmation; **Escape** cancels. The active saved thread is always protected.
-- **/thinking** toggles the right-side Reasoning panel. AgentHarness requests detailed reasoning
+- **/thinking** toggles the right-side Reasoning panel. Vairë requests detailed reasoning
   summaries for each turn and configures its dedicated runtime with
   `show_raw_agent_reasoning=true` at process and thread start/resume boundaries. This is
   best-effort configuration: for Codex the panel shows reasoning text only when the selected model
   explicitly emits it, with summaries as the fallback. OpenRouter reasoning fields are not collected.
   Hidden/private
-  chain-of-thought is unavailable; AgentHarness neither exposes nor infers it. `/thinking`
+  chain-of-thought is unavailable; Vairë neither exposes nor infers it. `/thinking`
   controls panel visibility; `/reasoning [value]` separately selects the reasoning effort level.
 - The header uses the authenticated account identity instead of a generic signed-in label and shows
   right-aligned **Context N%** when usable usage data is available, or **Context --** when it is not.
-- A small animated squiggle appears while the active provider is working before the first assistant text. It is
-  display-only and disappears on the first nonempty text or any terminal turn state.
+- A small animated squiggle appears while the active provider is working before the first
+  assistant text. It is display-only and disappears on the first nonempty text or any terminal
+  turn state.
 - **Enter** sends; **Alt-Enter** inserts a newline
 - **PageUp/PageDown**, arrow keys, **Home**, and **End** scroll the transcript
 - **Escape** closes local help/errors, or interrupts an active turn

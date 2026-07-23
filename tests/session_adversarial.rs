@@ -2,11 +2,11 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use agentharness::codex::safety::{FullAccessPolicy, IsolationPaths};
-use agentharness::codex::session::{SessionError, SessionService};
-use agentharness::codex::transport::{AppServerTransport, ProcessSpec};
 use serde_json::json;
 use tempfile::tempdir;
+use vaire::codex::safety::{FullAccessPolicy, IsolationPaths};
+use vaire::codex::session::{SessionError, SessionService};
+use vaire::codex::transport::{AppServerTransport, ProcessSpec};
 
 fn script(root: &Path, body: &str) -> PathBuf {
     let path = root.join("fake-app-server");

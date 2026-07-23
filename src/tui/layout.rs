@@ -4,7 +4,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, ui: &UiState) {
     let area = frame.area();
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         let message = format!(
-            "AgentHarness\nTerminal too small ({}x{}). Resize to at least {MIN_WIDTH}x{MIN_HEIGHT}.\nCtrl-C quits.",
+            "Vairë\nTerminal too small ({}x{}). Resize to at least {MIN_WIDTH}x{MIN_HEIGHT}.\nCtrl-C quits.",
             area.width, area.height
         );
         frame.render_widget(

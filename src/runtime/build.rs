@@ -6,7 +6,7 @@ pub(in crate::runtime) async fn build_backend(
     fs::create_dir_all(&config.paths.support_dir).map_err(RuntimeError::Paths)?;
     fs::set_permissions(&config.paths.support_dir, fs::Permissions::from_mode(0o700))
         .map_err(RuntimeError::Paths)?;
-    let diagnostics_path = config.paths.diagnostics_dir.join("agentharness.log");
+    let diagnostics_path = config.paths.diagnostics_dir.join("vaire.log");
     let diagnostics: Arc<dyn DiagnosticSink> =
         Arc::new(FileDiagnosticSink::create(&diagnostics_path).map_err(RuntimeError::Paths)?);
     let openrouter = (|| -> Result<OpenRouterService, RuntimeError> {
@@ -31,8 +31,9 @@ pub(in crate::runtime) async fn build_backend(
     })();
 
     let codex = async {
-        let isolation =
-            IsolationPaths::prepare(&config.paths.runtime_dir).map_err(RuntimeError::Paths)?;
+        let isolation = IsolationPaths::prepare(&config.paths.runtime_dir)
+            .map_err(RuntimeError::Paths)?
+            .with_historical_conversation(config.paths.historical_conversation_dir.clone());
         let executable = resolve_codex(config.codex_override.as_deref())?;
         verify_codex_version(&executable, &isolation.codex_home).await?;
         let spec = ProcessSpec::codex(executable, &isolation, &FullAccessPolicy);

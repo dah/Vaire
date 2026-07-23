@@ -2,18 +2,18 @@ pub(super) use std::path::Path;
 pub(super) use std::sync::{Arc, Mutex};
 pub(super) use std::time::Duration;
 
-pub(super) use agentharness::app::{
+pub(super) use tempfile::tempdir;
+pub(super) use vaire::app::{
     AuthState, ConnectionState, Intent, ThinkingKind, ThreadState, TranscriptRole, TurnState,
 };
-pub(super) use agentharness::backend::BackendCoordinator;
-pub(super) use agentharness::codex::safety::{FullAccessPolicy, IsolationPaths};
-pub(super) use agentharness::codex::session::SessionService;
-pub(super) use agentharness::codex::transport::{AppServerTransport, ProcessSpec, RequestTimeouts};
-pub(super) use agentharness::persistence::{
+pub(super) use vaire::backend::BackendCoordinator;
+pub(super) use vaire::codex::safety::{FullAccessPolicy, IsolationPaths};
+pub(super) use vaire::codex::session::SessionService;
+pub(super) use vaire::codex::transport::{AppServerTransport, ProcessSpec, RequestTimeouts};
+pub(super) use vaire::persistence::{
     AccountScope, CodexPreferencesV2, LoadOutcome, PersistenceError, PreferencesPort, PreferencesV2,
 };
-pub(super) use agentharness::platform::{validate_login_url, BrowserError, BrowserOpener};
-pub(super) use tempfile::tempdir;
+pub(super) use vaire::platform::{validate_login_url, BrowserError, BrowserOpener};
 
 pub(super) use crate::shared_support::script;
 

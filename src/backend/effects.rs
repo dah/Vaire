@@ -83,7 +83,7 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                             if fatal {
                                 effects.extend(self.state.reduce(Action::Event(
                                     DomainEvent::ConnectionFailed(
-                                        "app-server connection became unusable while starting a new thread; restart AgentHarness"
+                                        "app-server connection became unusable while starting a new thread; restart Vairë"
                                             .to_owned(),
                                     ),
                                 )));
@@ -188,7 +188,7 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                                 if fatal {
                                     effects.extend(self.state.reduce(Action::Event(
                                     DomainEvent::ConnectionFailed(
-                                        "app-server connection became unusable while resuming a thread; restart AgentHarness"
+                                        "app-server connection became unusable while resuming a thread; restart Vairë"
                                             .to_owned(),
                                     ),
                                 )));

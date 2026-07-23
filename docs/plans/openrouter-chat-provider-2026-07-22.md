@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-22  
 **Status:** Completed and shipped  
-**Scope owner:** AgentHarness  
+**Scope owner:** Vairë
 **Implementation rule:** This document and the matching planned section in AGENTS.md approve the milestone. They do not change runtime behavior or mark the milestone complete.
 
 ## 1. Goal
@@ -31,7 +31,7 @@ Implementation must preserve:
 - the dedicated Codex home and full-access risk documentation; and
 - RepoPrompt CE as optional, strictly read-only development guidance with no runtime or build dependency.
 
-Codex app-server startup becomes provider-scoped rather than globally fatal so a configured OpenRouter session can remain usable. AgentHarness still attempts Codex resolution, version checking, spawn, and initialization on startup and keeps the long-lived process running and its events consumed while OpenRouter is active.
+Codex app-server startup becomes provider-scoped rather than globally fatal so a configured OpenRouter session can remain usable. Vairë still attempts Codex resolution, version checking, spawn, and initialization on startup and keeps the long-lived process running and its events consumed while OpenRouter is active.
 
 ## 3. Scope
 
@@ -156,7 +156,7 @@ The synchronous trait is called via spawn_blocking. Sanitized CredentialStoreErr
 ### Production layout
 
 ~~~text
-<Application Support>/AgentHarness/
+<Application Support>/vaire/
   runtime/
     openrouter-home/       mode 0700
       api-key              regular file, current user, exact mode 0600
@@ -176,7 +176,7 @@ A later explicitly approved milestone must migrate OpenRouter credentials to mac
 
 ### Requests
 
-Production headers are Authorization: Bearer <key>, User-Agent: AgentHarness/<version>, X-Title: AgentHarness, appropriate Accept, and Content-Type for POST. Headers and arbitrary remote bodies are never logged.
+Production headers are Authorization: Bearer <key>, User-Agent: vaire/<version>, X-Title: Vairë, appropriate Accept, and Content-Type for POST. Headers and arbitrary remote bodies are never logged.
 
 GET /api/v1/key requires 2xx plus bounded valid JSON with documented top-level data. Returned account/key/usage metadata does not enter AppState.
 
@@ -230,7 +230,7 @@ Use a bounded incremental decoder without automatic reconnect:
 Store non-secret OpenRouter data separately from runtime/openrouter-home:
 
 ~~~text
-<Application Support>/AgentHarness/openrouter/
+<Application Support>/vaire/openrouter/
   catalog.json
   conversations/
     index.json

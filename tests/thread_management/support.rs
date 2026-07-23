@@ -1,20 +1,20 @@
 pub(super) use std::path::Path;
 pub(super) use std::sync::{Arc, Mutex};
 
-pub(super) use agentharness::app::{
+pub(super) use serde_json::json;
+pub(super) use tempfile::tempdir;
+pub(super) use vaire::app::{
     ConnectionState, Effect, Intent, ThreadDeleteConfirmation, ThreadPickerPhase, ThreadState,
     TranscriptRole, TurnState,
 };
-pub(super) use agentharness::backend::BackendCoordinator;
-pub(super) use agentharness::codex::safety::{FullAccessPolicy, IsolationPaths};
-pub(super) use agentharness::codex::session::SessionService;
-pub(super) use agentharness::codex::transport::{AppServerTransport, ProcessSpec};
-pub(super) use agentharness::persistence::{
+pub(super) use vaire::backend::BackendCoordinator;
+pub(super) use vaire::codex::safety::{FullAccessPolicy, IsolationPaths};
+pub(super) use vaire::codex::session::{SessionError, SessionService};
+pub(super) use vaire::codex::transport::{AppServerTransport, ProcessSpec};
+pub(super) use vaire::persistence::{
     AccountScope, CodexPreferencesV2, LoadOutcome, PersistenceError, PreferencesPort, PreferencesV2,
 };
-pub(super) use agentharness::platform::{BrowserError, BrowserOpener};
-pub(super) use serde_json::json;
-pub(super) use tempfile::tempdir;
+pub(super) use vaire::platform::{BrowserError, BrowserOpener};
 
 pub(super) const INITIALIZED: &str = r#"{"id":1,"result":{"codexHome":"/private/tmp/codex","platformFamily":"unix","platformOs":"macos","userAgent":"fake/0.144.6"}}"#;
 pub(super) const ACCOUNT: &str = r#"{"id":2,"result":{"account":{"type":"chatgpt","email":"user@example.com","planType":"plus"},"requiresOpenaiAuth":true}}"#;
@@ -23,7 +23,16 @@ pub(super) const MODELS: &str = r#"{"id":3,"result":{"data":[{"id":"m1","display
 pub(super) use crate::shared_support::script;
 
 pub(super) async fn session(root: &Path, body: &str) -> SessionService {
-    let paths = IsolationPaths::prepare(root.join("runtime")).unwrap();
+    session_with_historical(root, None, body).await
+}
+
+pub(super) async fn session_with_historical(
+    root: &Path,
+    historical_conversation: Option<&Path>,
+    body: &str,
+) -> SessionService {
+    let mut paths = IsolationPaths::prepare(root.join("runtime")).unwrap();
+    paths.historical_conversation = historical_conversation.map(Path::to_path_buf);
     let transport = AppServerTransport::spawn(ProcessSpec {
         executable: script(root, body),
         args: Vec::new(),

@@ -1,14 +1,14 @@
-# AgentHarness project guide
+# Vairë project guide
 
 ## Scope of this guide
 
-This file governs contributors and coding agents developing AgentHarness. It is not an instruction source for the conversational agent that users chat with inside AgentHarness. Never copy, summarize, expose, or inject this file into Codex `baseInstructions`, `developerInstructions`, thread history, or user input. Changing this file alone must never change end-user agent behavior.
+This file governs contributors and coding agents developing Vairë. It is not an instruction source for the conversational agent that users chat with inside Vairë. Never copy, summarize, expose, or inject this file into Codex `baseInstructions`, `developerInstructions`, thread history, or user input. Changing this file alone must never change end-user agent behavior.
 
-AgentHarness currently sends no custom base or developer instructions to runtime threads. If product-specific runtime instructions are introduced, keep them in a separate, explicitly named source or configuration, supply them deliberately through fields supported by the installed app-server schema, apply them consistently on thread start and resume, and cover their precedence and lifecycle with tests. Do not use `AGENTS.md` as that source.
+Vairë currently sends no custom base or developer instructions to runtime threads. If product-specific runtime instructions are introduced, keep them in a separate, explicitly named source or configuration, supply them deliberately through fields supported by the installed app-server schema, apply them consistently on thread start and resume, and cover their precedence and lifecycle with tests. Do not use `AGENTS.md` as that source.
 
 ## Mission
 
-AgentHarness is a small, dependable local terminal client with one active conversation across Codex app-server and OpenRouter text chat. Users can authenticate independently, select a provider-labelled model, manage provider-owned saved histories, stream replies, run Codex command/file tools, and safely restore the selected provider's working conversation after restart.
+Vairë is a small, dependable local terminal client with one active conversation across Codex app-server and OpenRouter text chat. Users can authenticate independently, select a provider-labelled model, manage provider-owned saved histories, stream replies, run Codex command/file tools, and safely restore the selected provider's working conversation after restart.
 
 Preserve this working vertical slice while evolving the product deliberately. Prefer small end-to-end increments over abstractions for hypothetical features, and make every expansion beyond the shipped baseline an explicit milestone decision.
 
@@ -26,7 +26,7 @@ The following behavior is implemented and is a regression contract unless an exp
 - Keep exactly one active chat thread in the UI.
 - Persist the active Codex thread ID and automatically resume that same working thread on the next launch when authenticated account scope is available and matches.
 - Let the user eagerly create a thread with `/new`; use `/resume` for the account-scoped saved-thread picker and confirmed deletion of one or all inactive threads. Never delete the active thread through the picker.
-- Explicitly create every new non-ephemeral thread with `threadSource: "appServer"`. For compatibility, `/resume` discovers both `appServer` and legacy `vscode` sources, then retains only threads with the exact dedicated conversation cwd whose IDs are already registered to the authenticated account. Never auto-register discovery results.
+- Explicitly create every new non-ephemeral thread with `threadSource: "appServer"`. For compatibility, `/resume` discovers both `appServer` and legacy `vscode` sources across the exact current and historical pre-rename conversation cwd filters, then retains only IDs already registered to the authenticated account. Never auto-register discovery results.
 - Stream agent-message deltas into the transcript and show a clear terminal state when each turn completes or fails.
 - Request detailed reasoning summaries for every turn and show them with any reasoning text explicitly emitted by Codex in the optional Reasoning panel. Configure `show_raw_agent_reasoning=true` at dedicated app-server process and thread start/resume boundaries as best-effort provider/model-dependent behavior; summaries are the fallback. Hidden/private chain-of-thought is unavailable and must never be exposed or inferred.
 - Enable Codex command-line and file tools with unrestricted same-user access and no approval prompts. The TUI remains conversational and has no tool cards, approval controls, or rich command-progress workflow.
@@ -38,6 +38,7 @@ The following behavior is implemented and is a regression contract unless an exp
 - Store the OpenRouter API key through the injected credential-store port in owner-only plaintext `runtime/openrouter-home/api-key` (`0700` directory, exact `0600` regular file). This is organizational isolation, not encryption, secure storage, a sandbox, or protection from same-user/full-access processes.
 - Treat macOS Keychain migration as mandatory technical debt for a later approved milestone. Save and verify the Keychain item before deleting the plaintext file, and preserve the file on any failure.
 - Cross-provider `/model` selection is a hard blank-conversation boundary with no continuity or history transfer. `/resume` is the only operation that restores cross-provider history; same-provider model changes may retain the conversation.
+- Use `Vairë` (NFC, precomposed `ë`) for human branding and `vaire` for the Cargo package, crate, executable, protocol client name, Application Support child, and environment prefix. The active diagnostics file is `diagnostics/vaire.log`, and `VAIRE_CODEX_BIN` is the only Codex executable override.
 
 ## Current scope boundaries
 
@@ -80,7 +81,7 @@ Retain the plaintext-risk disclosure and Keychain-migration debt in future docum
 
 ## Completed milestone: richer interactive runtime
 
-The post-MVP milestone documented in `docs/plans/agentharness-interactive-runtime-2026-07-22.md` is complete. Its capabilities are part of the regression baseline:
+The richer interactive runtime milestone is complete. Its capabilities are part of the regression baseline:
 
 - create a new thread with `/new`, choose among saved Codex threads through `/resume`, and delete one or all old threads with confirmation while retaining exactly one active thread;
 - toggle a right-side Reasoning panel that displays only reasoning summaries or reasoning text actually emitted by app-server, never inferred or hidden chain-of-thought;
@@ -90,6 +91,20 @@ The post-MVP milestone documented in `docs/plans/agentharness-interactive-runtim
 - show the remaining context-window percentage in the top-right header when app-server supplies enough token-usage data.
 
 Treat further expansion beyond these capabilities as a new milestone decision with protocol, safety, UX, documentation, and test implications made explicit first.
+
+## Product-rename migration contract
+
+Before opening or creating state, diagnostics, credentials, or provider processes on macOS, Vairë classifies the same-parent legacy `~/Library/Application Support/AgentHarness` and current `~/Library/Application Support/vaire` entries without following symlinks. This is a whole-root, pre-start migration with these durable rules:
+
+- Neither entry means a clean first run; migration itself creates nothing.
+- A lone current root succeeds only when it is a real, effective-user-owned directory with exact mode `0700`.
+- A lone legacy root with those same properties is moved to `vaire` by an exclusive Darwin same-parent rename that cannot replace a destination. Verify that the destination is the same directory object, then synchronize the parent directory.
+- Both entries in any form, or a lone symlink, non-directory, wrong-owner, or non-`0700` entry, fail closed without selecting, deleting, merging, chmodding, or otherwise mutating either root.
+- Never enumerate, deserialize, copy, log, or inspect descendants during migration. Treat Codex-owned files, the plaintext OpenRouter key and histories, preferences, diagnostics, and persistent conversation contents as opaque.
+- A parent-directory synchronization failure after a verified rename is a committed but durability-unverified move. Report it and never attempt an automatic reverse rename. A later launch may validate the current root normally.
+- Leave a migrated legacy diagnostics file untouched; only new writes target `diagnostics/vaire.log`.
+
+The historical Codex conversation cwd is permanent discovery-only metadata. `/resume` queries the current cwd first and an optional distinct historical cwd second, with exact per-query cwd validation, per-query cursor-cycle detection, and shared page/item/text/cursor/result ceilings across the complete operation. Identical thread IDs are deduplicated; the same ID reported under conflicting cwd values is an error. Resource exhaustion fails the complete listing rather than returning partial history. New thread creation, thread resume, turn start, the app-server process, and tool execution use only the current `runtime/conversation` cwd.
 
 ## Current user experience
 
@@ -148,7 +163,7 @@ The installed CLI schema wins when documentation, memory, examples, or the optio
 - Treat process exit, malformed frames or required payloads, stale thread IDs, timeouts, and version skew as visible failures. Tolerate genuinely unknown notification methods where safe; if diagnosing them, record only sanitized method metadata. Preserve settled state where possible; when the app-server connection becomes unusable, tell the user to restart because the current product has no in-app reconnect.
 - Enforce the tested minimum Codex CLI version with an actionable upgrade message. Regenerate the installed schema and update protocol fixtures, safety policy, and compatibility notes whenever the tested baseline changes.
 - Derive models and reasoning choices from `model/list` or its current schema equivalent. Validate the reasoning choice when the model changes. If a saved choice is unavailable, use the server default and tell the user.
-- Development code must never intentionally read, copy, print, persist, or commit tokens from any Codex home, including AgentHarness's dedicated one. Let Codex own credential storage and refresh. Unrestricted model-run commands are not OS-isolated from same-user credential files; document that risk rather than claiming containment.
+- Development code must never intentionally read, copy, print, persist, or commit tokens from any Codex home, including Vairë's dedicated one. Let Codex own credential storage and refresh. Unrestricted model-run commands are not OS-isolated from same-user credential files; document that risk rather than claiming containment.
 - Never log authorization headers, access tokens, cookies, full auth payloads, prompts, or replies by default. Redact sensitive protocol fields from diagnostics.
 - Open login URLs without shell interpolation and accept only the expected safe URL schemes.
 - Scope saved thread state to the authenticated account when the protocol exposes an account identifier. Never resume a thread across an account switch.
@@ -159,10 +174,10 @@ The installed CLI schema wins when documentation, memory, examples, or the optio
 The current product intentionally enables Codex command-line and file tools without tool cards or an approval UI. This is an unrestricted same-user execution boundary, not a sandbox.
 
 - Apply `sandbox_mode="danger-full-access"` / `dangerFullAccess` and `approval_policy="never"` at process, thread start/resume, and turn boundaries. Supported command/file operations execute directly without confirmation.
-- The app-server inherits the launcher environment except inherited `CODEX_*` variables are removed and AgentHarness supplies its dedicated `CODEX_HOME`. Tool shells use `shell_environment_policy.inherit="all"`.
+- The app-server inherits the launcher environment except inherited `CODEX_*` variables are removed and Vairë supplies its dedicated `CODEX_HOME`. Tool shells use `shell_environment_policy.inherit="all"`.
 - Codex's default name-based filtering of variables containing `KEY`, `SECRET`, or `TOKEN` is incomplete and is not a security boundary. Values such as `DATABASE_URL` and `SSH_AUTH_SOCK` may remain available.
 - Full-access commands may use SSH agents, macOS Keychain, credential and configuration files, authenticated CLIs, and the network to act locally or remotely.
-- Use a dedicated AgentHarness Codex home and persistent non-project `runtime/conversation` starting directory to avoid automatic project inheritance. Commands can leave that directory or use absolute paths, its files survive restarts, and the dedicated Codex home—including Codex-owned authentication state—remains reachable to same-user full-access tools. These are organizational boundaries only.
+- Use a dedicated Vairë Codex home and persistent non-project `runtime/conversation` starting directory to avoid automatic project inheritance. Commands can leave that directory or use absolute paths, its files survive restarts, and the dedicated Codex home—including Codex-owned authentication state—remains reachable to same-user full-access tools. These are organizational boundaries only.
 - Keep optional apps, integrated web search, MCP, plugins, and multi-agent features disabled for this milestone. Command-line programs can still access the network.
 - Fail closed on every approval, permission, elicitation, attestation, or other server request that lacks an explicitly implemented and tested product workflow.
 - Keep exhaustive fake-server coverage proving that every unimplemented server request is denied and that tool-event volume cannot starve rendered conversation events or the fail-closed path. Add positive coverage for any request workflow that a future milestone explicitly supports.
@@ -233,19 +248,19 @@ Ratatui 0.29's `unstable-rendered-line-info` feature is intentionally enabled on
 
 ## RepoPrompt-assisted development
 
-RepoPrompt is both a development tool for AgentHarness and, separately, the home of the optional source reference below. Use it when available to keep discovery, context selection, planning, and review focused.
+RepoPrompt is both a development tool for Vairë and, separately, the home of the optional source reference below. Use it when available to keep discovery, context selection, planning, and review focused.
 
-- Prefer RepoPrompt MCP tools when they are available. When only the CLI is available, use `rpce-cli`; start with `rpce-cli -e 'windows'`, then target the window whose workspace contains AgentHarness.
+- Prefer RepoPrompt MCP tools when they are available. When only the CLI is available, use `rpce-cli`; start with `rpce-cli -e 'windows'`, then target the window whose workspace contains Vairë.
 - Window IDs are runtime state. Never hard-code one in scripts or durable instructions.
-- Prefer RepoPrompt `tree`, `search`, `read`, `structure`, `edit`, and read-only `git` operations for AgentHarness repository work when the relevant interface is available.
+- Prefer RepoPrompt `tree`, `search`, `read`, `structure`, `edit`, and read-only `git` operations for Vairë repository work when the relevant interface is available.
 - Use selection plus Context Builder or chat and oracle for architecture work that benefits from curated cross-file context. Use read-only explore agents for narrow side investigations.
 - Keep selections task-specific. Do not load the whole reference project when a transport file, protocol model, or focused test is enough.
-- When both roots are loaded, qualify every mutable AgentHarness path with `AgentHarness/`. Qualify reference reads with `repoprompt-ce/`.
-- RepoPrompt is a developer aid, not an application dependency. Building, testing, and running AgentHarness must not require RepoPrompt or `rpce-cli`.
+- When both roots are loaded, qualify every mutable Vairë path with `vaire/`. Qualify reference reads with `repoprompt-ce/`.
+- RepoPrompt is a developer aid, not an application dependency. Building, testing, and running Vairë must not require RepoPrompt or `rpce-cli`.
 
 ## Optional external reference: strictly read-only
 
-`/Users/danhancu/Developer/RepoPrompt/repoprompt-ce` is optional design guidance. It may be loaded as a second RepoPrompt workspace root, but it is outside the AgentHarness repository and is immutable during AgentHarness work.
+`/Users/danhancu/Developer/RepoPrompt/repoprompt-ce` is optional design guidance. It may be loaded as a second RepoPrompt workspace root, but it is outside the Vairë repository and is immutable during Vairë work.
 
 Useful read-only areas include:
 
@@ -256,7 +271,7 @@ Consult it for patterns such as transport and session separation, model discover
 
 ### Hard boundary
 
-Never modify any path under `/Users/danhancu/Developer/RepoPrompt/repoprompt-ce` while working on AgentHarness.
+Never modify any path under `/Users/danhancu/Developer/RepoPrompt/repoprompt-ce` while working on Vairë.
 
 This prohibition includes:
 
@@ -265,11 +280,11 @@ This prohibition includes:
 - Staging, committing, branching, rebasing, cleaning, or any other Git mutation.
 - Running commands in that repository that may write, format, build, test, generate, install, or clean.
 
-Only read-only operations are allowed there: tree, search, read, structure, and read-only Git inspection. Before every RepoPrompt edit or file operation, verify that the target is root-qualified under `AgentHarness/`. If the target is ambiguous or points at `repoprompt-ce/`, stop without writing.
+Only read-only operations are allowed there: tree, search, read, structure, and read-only Git inspection. Before every RepoPrompt edit or file operation, verify that the target is root-qualified under `vaire/`. If the target is ambiguous or points at `repoprompt-ce/`, stop without writing.
 
-Do not vendor, symlink, copy wholesale, add a path dependency to, or assume the reference exists in CI or on another developer machine. If a small licensed idea or excerpt is intentionally reused, verify and preserve all attribution and license obligations. Capture borrowed behavior in AgentHarness tests or documentation so contributors without the reference path are unaffected.
+Do not vendor, symlink, copy wholesale, add a path dependency to, or assume the reference exists in CI or on another developer machine. If a small licensed idea or excerpt is intentionally reused, verify and preserve all attribution and license obligations. Capture borrowed behavior in Vairë tests or documentation so contributors without the reference path are unaffected.
 
-AgentHarness requirements, official Codex documentation, and the installed Codex schema always take precedence over the reference implementation.
+Vairë requirements, official Codex documentation, and the installed Codex schema always take precedence over the reference implementation.
 
 ## Working rules
 

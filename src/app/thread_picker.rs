@@ -123,7 +123,7 @@ impl AppState {
         {
             if let Some(picker) = self.conversation_popup_mut() {
                 picker.message = Some(
-                    "OpenRouter runtime or credential storage is unavailable; restart AgentHarness after fixing the local storage path"
+                    "OpenRouter runtime or credential storage is unavailable; restart Vairë after fixing the local storage path"
                         .to_owned(),
                 );
             }

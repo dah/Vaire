@@ -4,11 +4,11 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use agentharness::codex::safety::{FullAccessPolicy, IsolationPaths};
-use agentharness::codex::session::SessionService;
-use agentharness::codex::transport::{AppServerTransport, ProcessSpec};
 use serde_json::Value;
 use tempfile::tempdir;
+use vaire::codex::safety::{FullAccessPolicy, IsolationPaths};
+use vaire::codex::session::SessionService;
+use vaire::codex::transport::{AppServerTransport, ProcessSpec};
 
 struct ScopedEnv {
     key: &'static str,
@@ -52,8 +52,8 @@ async fn wait_for(path: &Path) {
 
 #[tokio::test]
 async fn codex_process_receives_path_and_dedicated_runtime_directories() {
-    const INHERITED_KEY: &str = "AGENTHARNESS_ENV_INHERIT_TEST";
-    const SCRUBBED_KEY: &str = "CODEX_AGENTHARNESS_ENV_SCRUB_TEST";
+    const INHERITED_KEY: &str = "VAIRE_ENV_INHERIT_TEST";
+    const SCRUBBED_KEY: &str = "CODEX_VAIRE_ENV_SCRUB_TEST";
     let inherited = ScopedEnv::set(INHERITED_KEY, "ambient-value");
     let scrubbed = ScopedEnv::set(SCRUBBED_KEY, "must-not-reach-child");
     let temp = tempdir().unwrap();
@@ -66,8 +66,8 @@ async fn codex_process_receives_path_and_dedicated_runtime_directories() {
 printf '%s' "$PATH" > "$CAPTURE_DIR/path"
 printf '%s' "$CODEX_HOME" > "$CAPTURE_DIR/codex-home"
 printf '%s' "$PWD" > "$CAPTURE_DIR/cwd"
-printf '%s' "$AGENTHARNESS_ENV_INHERIT_TEST" > "$CAPTURE_DIR/inherited"
-printf '%s' "${CODEX_AGENTHARNESS_ENV_SCRUB_TEST-unset}" > "$CAPTURE_DIR/scrubbed"
+printf '%s' "$VAIRE_ENV_INHERIT_TEST" > "$CAPTURE_DIR/inherited"
+printf '%s' "${CODEX_VAIRE_ENV_SCRUB_TEST-unset}" > "$CAPTURE_DIR/scrubbed"
 IFS= read -r hold || true
 "#,
     );

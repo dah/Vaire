@@ -1,4 +1,4 @@
-//! Backend core for the conversation-focused Codex app-server harness.
+//! Backend core for Vairë, a conversation-focused Codex and OpenRouter terminal client.
 
 pub mod app;
 pub mod backend;

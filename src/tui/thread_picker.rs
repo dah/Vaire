@@ -67,7 +67,7 @@ pub(in crate::tui) fn render_thread_picker(
     match picker.phase {
         ThreadPickerPhase::Loading => {
             frame.render_widget(
-                Paragraph::new("Loading saved AgentHarness threads…")
+                Paragraph::new("Loading saved Vairë threads…")
                     .style(Style::default().fg(Color::DarkGray)),
                 regions[0],
             );

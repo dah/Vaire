@@ -4,11 +4,11 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-use agentharness::codex::protocol::{InboundEvent, InitializeParams};
-use agentharness::codex::safety::KNOWN_SERVER_REQUEST_METHODS;
-use agentharness::codex::transport::{AppServerTransport, ProcessSpec, TransportError};
 use serde_json::{json, Value};
 use tempfile::tempdir;
+use vaire::codex::protocol::{InboundEvent, InitializeParams};
+use vaire::codex::safety::KNOWN_SERVER_REQUEST_METHODS;
+use vaire::codex::transport::{AppServerTransport, ProcessSpec, TransportError};
 
 const FAKE_SERVER: &str = r#"#!/bin/sh
 IFS= read -r request
@@ -61,7 +61,7 @@ async fn captured_response(method: &str) -> Value {
     let initialized = transport
         .request(
             "initialize",
-            InitializeParams::agentharness(),
+            InitializeParams::vaire(),
             Duration::from_secs(1),
         )
         .await
@@ -153,7 +153,7 @@ async fn server_request_fails_in_flight_work_before_responding() {
     let error = transport
         .request(
             "initialize",
-            InitializeParams::agentharness(),
+            InitializeParams::vaire(),
             Duration::from_secs(1),
         )
         .await
@@ -162,7 +162,7 @@ async fn server_request_fails_in_flight_work_before_responding() {
 
     assert!(matches!(
         transport.next_event().await,
-        Some(agentharness::codex::transport::TransportEvent {
+        Some(vaire::codex::transport::TransportEvent {
             event: InboundEvent::SafetyViolation { method: actual_method, .. },
             ..
         }) if actual_method == method

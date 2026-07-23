@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn diagnostic_file_contains_only_allowlisted_metadata() {
         let temp = tempdir().unwrap();
-        let path = temp.path().join("diagnostics").join("agentharness.log");
+        let path = temp.path().join("diagnostics").join("vaire.log");
         let sink = FileDiagnosticSink::create(&path).unwrap();
         sink.record(DiagnosticEvent {
             category: "notice",
@@ -196,7 +196,7 @@ mod tests {
     #[test]
     fn diagnostic_file_stays_bounded_after_oversized_state_and_event_flood() {
         let temp = tempdir().unwrap();
-        let path = temp.path().join("diagnostics").join("agentharness.log");
+        let path = temp.path().join("diagnostics").join("vaire.log");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, vec![b'x'; MAX_DIAGNOSTIC_BYTES as usize + 1]).unwrap();
 
