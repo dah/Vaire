@@ -34,7 +34,10 @@ IFS= read -r hold
     backend.handle_intent(Intent::NewThread).await.unwrap();
     assert!(matches!(&backend.state().thread, ThreadState::Ready { id } if id == "thr-new"));
     assert!(backend.state().transcript.is_empty());
-    assert_eq!(saved.value().thread_id.as_deref(), Some("thr-new"));
+    assert_eq!(
+        saved.value().codex.auto_resume_thread_id.as_deref(),
+        Some("thr-new")
+    );
     backend.shutdown().await.unwrap();
 }
 
@@ -84,10 +87,18 @@ IFS= read -r hold
     ));
     assert!(matches!(&backend.state().thread, ThreadState::Ready { id } if id == "thr-active"));
     assert_eq!(
-        backend.state().preferences.thread_id.as_deref(),
+        backend
+            .state()
+            .preferences
+            .codex
+            .auto_resume_thread_id
+            .as_deref(),
         Some("thr-active")
     );
-    assert_eq!(saved.value().thread_id.as_deref(), Some("thr-active"));
+    assert_eq!(
+        saved.value().codex.auto_resume_thread_id.as_deref(),
+        Some("thr-active")
+    );
     backend.shutdown().await.unwrap();
 }
 

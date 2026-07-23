@@ -112,7 +112,10 @@ fn header_right_aligns_context_and_sanitizes_every_dynamic_field() {
     state.auth = AuthState::SignedIn {
         scope: Some(AccountScope::ChatgptEmail("u界\n@x".to_owned())),
     };
-    state.selected_model = Some("m界\nnext".to_owned());
+    state.selected_model = Some(crate::provider::ModelKey {
+        provider: crate::provider::ProviderId::Codex,
+        id: "m界\nnext".to_owned(),
+    });
     state.selected_reasoning = Some("r界\nmax".to_owned());
 
     let wide = header_text(&state, 100);
@@ -144,6 +147,7 @@ fn handles_small_terminals_and_malicious_control_text() {
     let mut state = ready();
     state.connection = ConnectionState::Failed("\u{1b}[2Jbad\u{009b}text".to_owned());
     state.transcript.push(TranscriptEntry {
+        provider: crate::provider::ProviderId::Codex,
         role: TranscriptRole::Assistant,
         text: "safe\u{1b}[31m\ttext\u{0007}".to_owned(),
         item_id: None,

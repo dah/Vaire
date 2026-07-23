@@ -1,10 +1,76 @@
 use super::*;
 
 impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
+    pub(in crate::backend) async fn delete_conversations(
+        &mut self,
+        codex_ids: Vec<String>,
+        openrouter_ids: Vec<crate::provider::OpenRouterConversationId>,
+    ) -> Vec<Effect> {
+        let requested = codex_ids.len().saturating_add(openrouter_ids.len());
+        let mut deleted = Vec::new();
+        let mut failures = Vec::new();
+        for id in codex_ids {
+            let protected = self.state.active_provider == ProviderId::Codex
+                && self.state.active_saved_thread_id() == Some(id.as_str());
+            if protected {
+                failures.push(ThreadDeletionFailure {
+                    id,
+                    message: "active saved conversation is protected".to_owned(),
+                });
+                continue;
+            }
+            let result = match &mut self.session {
+                Some(session) => session.delete_thread(&id).await,
+                None => Err(SessionError::Protocol(
+                    "Codex provider is unavailable".to_owned(),
+                )),
+            };
+            match result {
+                Ok(()) => deleted.push(id),
+                Err(error) => failures.push(ThreadDeletionFailure {
+                    id,
+                    message: error.to_string(),
+                }),
+            }
+        }
+        for id in openrouter_ids {
+            let id_text = id.as_str().to_owned();
+            let protected = self.state.active_provider == ProviderId::OpenRouter
+                && self.state.active_saved_thread_id() == Some(id.as_str());
+            if protected {
+                failures.push(ThreadDeletionFailure {
+                    id: id_text,
+                    message: "active saved conversation is protected".to_owned(),
+                });
+                continue;
+            }
+            let Some(openrouter) = &self.openrouter else {
+                failures.push(ThreadDeletionFailure {
+                    id: id_text,
+                    message: "OpenRouter runtime is unavailable".to_owned(),
+                });
+                continue;
+            };
+            match openrouter.delete_conversation(id).await {
+                Ok(()) => deleted.push(id_text),
+                Err(error) => failures.push(ThreadDeletionFailure {
+                    id: id_text,
+                    message: error.to_string(),
+                }),
+            }
+        }
+        self.state
+            .reduce(Action::Event(DomainEvent::ThreadDeletionFinished {
+                requested,
+                deleted,
+                failures,
+            }))
+    }
+
     pub(in crate::backend) async fn delete_threads(&mut self, ids: Vec<String>) -> Vec<Effect> {
         let requested = ids.len();
         let mut protected_ids = Vec::new();
-        if let Some(id) = self.state.preferences.thread_id.clone() {
+        if let Some(id) = self.state.preferences.codex.auto_resume_thread_id.clone() {
             protected_ids.push(id);
         }
         if let ThreadState::Ready { id } = &self.state.thread {
@@ -24,7 +90,13 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                 });
                 continue;
             }
-            match self.session.delete_thread(&id).await {
+            let result = match &mut self.session {
+                Some(session) => session.delete_thread(&id).await,
+                None => Err(SessionError::Protocol(
+                    "Codex provider is unavailable".to_owned(),
+                )),
+            };
+            match result {
                 Ok(()) => deleted.push(id),
                 Err(error) => {
                     let fatal = is_fatal_transport(&error);
@@ -66,7 +138,14 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
     }
 
     pub(in crate::backend) async fn cancel_login(&mut self, login_id: &str) -> Vec<Effect> {
-        let status = match self.session.cancel_login(login_id).await {
+        let status = match self.codex_mut() {
+            Ok(session) => session.cancel_login(login_id).await,
+            Err(_) => {
+                self.state.notice = Some("Codex provider is unavailable".to_owned());
+                return Vec::new();
+            }
+        };
+        let status = match status {
             Ok(status) => status,
             Err(error) => {
                 self.state.notice = Some(format!(
@@ -76,7 +155,14 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
             }
         };
 
-        match self.session.read_account().await {
+        let account = match self.codex_mut() {
+            Ok(session) => session.read_account().await,
+            Err(_) => {
+                self.state.notice = Some("Codex provider is unavailable".to_owned());
+                return Vec::new();
+            }
+        };
+        match account {
             Ok(account) => {
                 let effects = self.reduce_account(account);
                 if matches!(self.state.auth, crate::app::AuthState::SignedOut) {

@@ -1,13 +1,157 @@
 use super::{
-    load_notice_message, CompletedItemTracker, MAX_TRACKED_COMPLETED_ITEMS_PER_TURN,
-    MAX_TRACKED_COMPLETED_ITEM_ID_BYTES,
+    load_notice_message, BackendCoordinator, CompletedItemTracker, Effect,
+    MAX_TRACKED_COMPLETED_ITEMS_PER_TURN, MAX_TRACKED_COMPLETED_ITEM_ID_BYTES,
 };
-use crate::persistence::LoadNotice;
+use crate::persistence::{FilePreferences, LoadNotice, PreferencesPort, PreferencesV2};
+use crate::platform::{BrowserError, BrowserOpener};
 
 #[test]
 fn missing_preferences_are_a_quiet_first_run() {
     assert_eq!(load_notice_message(Some(LoadNotice::Missing)), None);
     assert!(load_notice_message(Some(LoadNotice::Corrupt)).is_some());
+}
+
+#[derive(Clone, Debug)]
+struct NoopBrowser;
+
+impl BrowserOpener for NoopBrowser {
+    fn open_login_url(&self, _value: &str) -> Result<(), BrowserError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn future_preferences_remain_byte_for_byte_unchanged_through_all_backend_writes() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("preferences.json");
+    let original = b"{\"version\":99,\"future\":{\"preserve\":true}}\n";
+    std::fs::write(&path, original).unwrap();
+    let preferences = FilePreferences::new(&path);
+    let loaded = preferences.load().unwrap();
+    assert!(!loaded.may_overwrite);
+
+    let mut backend =
+        BackendCoordinator::without_codex(preferences, NoopBrowser, "Codex unavailable".to_owned());
+    backend.startup().await.unwrap();
+    backend
+        .execute_pending(vec![Effect::Persist(PreferencesV2::default())])
+        .await
+        .unwrap();
+    backend.shutdown().await.unwrap();
+
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+}
+
+#[tokio::test]
+async fn v1_preferences_are_still_resaved_through_the_load_derived_gate() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("preferences.json");
+    std::fs::write(
+        &path,
+        br#"{
+          "version": 1,
+          "account_scope": {"kind":"chatgpt_email","value":"user@example.com"},
+          "thread_id": "thr-v1",
+          "model_id": "model-v1",
+          "reasoning_effort": "high",
+          "thread_account_scopes": {
+            "thr-v1": {"kind":"chatgpt_email","value":"user@example.com"}
+          }
+        }"#,
+    )
+    .unwrap();
+    let mut backend = BackendCoordinator::without_codex(
+        FilePreferences::new(&path),
+        NoopBrowser,
+        "Codex unavailable".to_owned(),
+    );
+
+    backend.startup().await.unwrap();
+
+    let migrated: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(migrated["version"], 2);
+    assert_eq!(migrated["codex"]["auto_resume_thread_id"], "thr-v1");
+}
+
+#[test]
+fn active_openrouter_turn_blocks_credential_replacement_and_stale_401_is_inert() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut backend = BackendCoordinator::without_codex(
+        FilePreferences::new(temp.path().join("preferences.json")),
+        NoopBrowser,
+        "Codex unavailable".to_owned(),
+    );
+    let conversation_id = crate::provider::OpenRouterConversationId::new();
+    let turn_id = crate::provider::OpenRouterTurnId::new();
+    backend.state.openrouter.auth = crate::openrouter::OpenRouterAuthStatus::Valid;
+    backend.state.turn = crate::app::TurnState::OpenRouterStreaming {
+        conversation_id: conversation_id.clone(),
+        turn_id: turn_id.clone(),
+    };
+
+    let candidate = crate::credentials::SecretValue::from_input("candidate-secret-value").unwrap();
+    assert!(backend.accept_openrouter_credential(candidate).is_err());
+    assert!(backend
+        .state
+        .notice
+        .as_deref()
+        .unwrap()
+        .contains("active OpenRouter turn"));
+
+    let stale_conversation = crate::provider::OpenRouterConversationId::new();
+    let _ = backend.reduce_openrouter_service_event(
+        crate::openrouter::OpenRouterServiceEvent::TurnFinished {
+            conversation_id: stale_conversation,
+            turn_id,
+            outcome: crate::openrouter::OpenRouterTurnOutcome::Failed,
+            assistant_text: None,
+            usage: None,
+            failure: Some(crate::openrouter::OpenRouterFailureCategory::Unauthorized),
+        },
+    );
+    assert_eq!(
+        backend.state.openrouter.auth,
+        crate::openrouter::OpenRouterAuthStatus::Valid
+    );
+}
+
+#[tokio::test]
+async fn stale_catalog_result_cannot_restore_a_pending_openrouter_conversation() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut backend = BackendCoordinator::without_codex(
+        FilePreferences::new(temp.path().join("preferences.json")),
+        NoopBrowser,
+        "Codex unavailable".to_owned(),
+    );
+    let conversation_id = crate::provider::OpenRouterConversationId::new();
+    backend.state.openrouter.credential_validation =
+        crate::app::OpenRouterCredentialValidation::Refreshing { operation_id: 9 };
+    backend.pending_openrouter_auto_resume = Some(super::PendingOpenRouterAutoResume {
+        operation_id: 9,
+        conversation_id,
+        model_id: Some("vendor/model".to_owned()),
+    });
+
+    let effects = backend
+        .process_openrouter_service_event(
+            crate::openrouter::OpenRouterServiceEvent::CatalogLoaded {
+                operation_id: 9,
+                catalog: vec![crate::openrouter::OpenRouterModel {
+                    id: "vendor/model".to_owned(),
+                    name: None,
+                    context_length: None,
+                }],
+            },
+        )
+        .await;
+
+    assert!(effects.is_empty());
+    assert!(backend.pending_openrouter_auto_resume.is_none());
+    assert_eq!(
+        backend.state.openrouter.conversation,
+        crate::app::OpenRouterConversationState::None
+    );
 }
 
 #[test]

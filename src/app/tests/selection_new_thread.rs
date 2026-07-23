@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn catalog_falls_back_and_model_change_revalidates_reasoning() {
     let mut state = AppState {
-        selected_model: Some("missing".to_owned()),
+        selected_model: Some(ModelKey::codex("missing").unwrap()),
         selected_reasoning: Some("max".to_owned()),
         ..AppState::default()
     };
@@ -11,7 +11,7 @@ fn catalog_falls_back_and_model_change_revalidates_reasoning() {
         model("m1", true, &["low", "high"], "high"),
         model("m2", false, &["low"], "low"),
     ])));
-    assert_eq!(state.selected_model.as_deref(), Some("m1"));
+    assert_eq!(state.selected_model, Some(ModelKey::codex("m1").unwrap()));
     assert_eq!(state.selected_reasoning.as_deref(), Some("high"));
     state.reduce(Action::Intent(Intent::SelectModel("m2".to_owned())));
     assert_eq!(state.selected_reasoning.as_deref(), Some("low"));
@@ -26,7 +26,10 @@ fn new_thread_is_eager_and_only_replaces_state_after_success() {
         state.reduce(Action::Intent(Intent::NewThread)),
         vec![Effect::StartNewThread]
     );
-    assert_eq!(state.preferences.thread_id.as_deref(), Some("thr-active"));
+    assert_eq!(
+        state.preferences.codex.auto_resume_thread_id.as_deref(),
+        Some("thr-active")
+    );
     assert_eq!(state.transcript[0].text, "old conversation");
     assert_eq!(state.thinking.entries[0].text, "old reasoning");
     assert_eq!(state.context_remaining_percent, Some(68));
@@ -35,7 +38,10 @@ fn new_thread_is_eager_and_only_replaces_state_after_success() {
         "server rejected it".to_owned(),
     )));
     assert!(matches!(&state.thread, ThreadState::Ready { id } if id == "thr-active"));
-    assert_eq!(state.preferences.thread_id.as_deref(), Some("thr-active"));
+    assert_eq!(
+        state.preferences.codex.auto_resume_thread_id.as_deref(),
+        Some("thr-active")
+    );
     assert_eq!(state.transcript.len(), 1);
     assert_eq!(state.thinking.entries[0].text, "old reasoning");
     assert_eq!(state.context_remaining_percent, Some(68));
@@ -53,7 +59,10 @@ fn new_thread_is_eager_and_only_replaces_state_after_success() {
     assert!(state.thinking.visible);
     assert_eq!(state.context_remaining_percent, None);
     assert!(matches!(state.turn, TurnState::Idle));
-    assert_eq!(state.preferences.thread_id.as_deref(), Some("thr-new"));
+    assert_eq!(
+        state.preferences.codex.auto_resume_thread_id.as_deref(),
+        Some("thr-new")
+    );
     assert!(matches!(effects.as_slice(), [Effect::Persist(_)]));
 }
 
@@ -175,6 +184,6 @@ fn first_catalog_default_does_not_claim_a_saved_selection_failed() {
         &["low"],
         "low",
     )])));
-    assert_eq!(state.selected_model.as_deref(), Some("m1"));
+    assert_eq!(state.selected_model, Some(ModelKey::codex("m1").unwrap()));
     assert_eq!(state.notice, None);
 }

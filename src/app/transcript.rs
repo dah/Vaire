@@ -188,6 +188,7 @@ impl AppState {
             entry.text.push_str(&delta);
         } else {
             self.transcript.push(TranscriptEntry {
+                provider: self.active_provider,
                 role: TranscriptRole::Assistant,
                 text: delta,
                 item_id: Some(item_id.to_owned()),
@@ -224,6 +225,7 @@ impl AppState {
                 entry.text = final_text.clone();
             } else {
                 self.transcript.push(TranscriptEntry {
+                    provider: self.active_provider,
                     role: TranscriptRole::Assistant,
                     text: final_text.clone(),
                     item_id: Some(item_id.to_owned()),
@@ -246,6 +248,7 @@ impl AppState {
             }
         } else {
             self.transcript.push(TranscriptEntry {
+                provider: self.active_provider,
                 role: TranscriptRole::Assistant,
                 text: final_text,
                 item_id: Some(item_id.to_owned()),

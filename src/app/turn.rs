@@ -140,7 +140,7 @@ impl AppState {
                     ConnectionState::Failed("runtime request boundary was triggered".to_owned());
                 self.pending_new_thread_scope = None;
                 self.pending_thread_deletions = None;
-                if let Some(picker) = &mut self.thread_picker {
+                if let Some(picker) = self.conversation_popup_mut() {
                     picker.phase = ThreadPickerPhase::Failed;
                     picker.confirmation = None;
                     picker.message = Some("Unexpected server request was denied".to_owned());
@@ -176,6 +176,7 @@ impl AppState {
                     thread_id: active_thread,
                     turn_id: active_turn,
                 } => active_thread == thread_id && active_turn == turn_id,
+                TurnState::OpenRouterStreaming { .. } => false,
                 TurnState::Completed {
                     turn_id: active_turn,
                 }
@@ -214,6 +215,7 @@ impl AppState {
                 turn_id: Some(turn_id),
                 ..
             } => turn_id,
+            TurnState::OpenRouterStreaming { .. } => return None,
             TurnState::Idle | TurnState::Starting | TurnState::Failed { turn_id: None, .. } => {
                 return None;
             }

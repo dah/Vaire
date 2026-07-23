@@ -20,7 +20,7 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                         Some("ignored a stale or mismatched ChatGPT login completion".to_owned());
                     Vec::new()
                 } else if completed.success {
-                    let account = self.session.read_account().await?;
+                    let account = self.codex_mut()?.read_account().await?;
                     self.reduce_account(account)
                 } else {
                     self.state.reduce(Action::Event(DomainEvent::LoginFailed(
@@ -31,7 +31,7 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                 }
             }
             ProtocolEvent::AccountUpdated => {
-                let account = self.session.read_account().await?;
+                let account = self.codex_mut()?.read_account().await?;
                 self.reduce_account(account)
             }
             ProtocolEvent::ThreadStarted(_) => Vec::new(),

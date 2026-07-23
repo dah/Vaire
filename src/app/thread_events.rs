@@ -22,7 +22,7 @@ impl AppState {
                 self.turn = TurnState::Idle;
                 self.replace_transcript(history);
                 self.thinking.clear_content();
-                self.preferences.thread_id = Some(id.clone());
+                self.preferences.set_auto_resume_thread(Some(id.clone()));
                 self.register_thread_scope(&id);
                 return vec![Effect::Persist(self.preferences.clone())];
             }
@@ -49,12 +49,12 @@ impl AppState {
                 self.thread = ThreadState::Ready { id: id.clone() };
                 self.turn = TurnState::Idle;
                 self.clear_transcript();
-                self.thread_picker = None;
+                self.close_conversation_popup();
                 self.pending_thread_deletions = None;
                 self.thinking.clear_content();
-                self.preferences.thread_id = Some(id.clone());
+                self.preferences.set_auto_resume_thread(Some(id.clone()));
                 if let AuthState::SignedIn { scope } = &self.auth {
-                    self.preferences.account_scope = scope.clone();
+                    self.preferences.codex.account_scope = scope.clone();
                 }
                 self.register_thread_scope(&id);
                 self.notice = Some("Started a new thread".to_owned());
@@ -75,12 +75,17 @@ impl AppState {
                     AuthState::SignedIn { scope: Some(scope) } => threads
                         .into_iter()
                         .filter(|thread| {
-                            self.preferences.thread_account_scopes.get(&thread.id) == Some(scope)
+                            thread.provider == ProviderId::OpenRouter
+                                || self.preferences.codex.thread_account_scopes.get(&thread.id)
+                                    == Some(scope)
                         })
                         .collect(),
-                    _ => Vec::new(),
+                    _ => threads
+                        .into_iter()
+                        .filter(|thread| thread.provider == ProviderId::OpenRouter)
+                        .collect(),
                 };
-                if let Some(picker) = &mut self.thread_picker {
+                if let Some(picker) = self.conversation_popup_mut() {
                     if matches!(picker.phase, ThreadPickerPhase::Loading) {
                         picker.threads = threads;
                         picker.selected = active_id
@@ -101,27 +106,49 @@ impl AppState {
                 }
             }
             DomainEvent::ThreadListFailed(message) => {
-                if let Some(picker) = &mut self.thread_picker {
+                if let Some(picker) = self.conversation_popup_mut() {
                     if matches!(picker.phase, ThreadPickerPhase::Loading) {
                         picker.phase = ThreadPickerPhase::Failed;
                         picker.message = Some(format!("Could not load threads: {message}"));
                     }
                 }
             }
-            DomainEvent::ThreadSwitchSucceeded { id, history } => {
-                let matches_request = self.thread_picker.as_ref().is_some_and(|picker| {
-                    matches!(&picker.phase, ThreadPickerPhase::Resuming { id: expected } if expected == &id)
+            DomainEvent::ThreadSwitchSucceeded {
+                id,
+                history,
+                model,
+                reasoning,
+            } => {
+                let matches_request = self.conversation_popup().is_some_and(|picker| {
+                    matches!(
+                        &picker.phase,
+                        ThreadPickerPhase::Resuming {
+                            provider: ProviderId::Codex,
+                            id: expected,
+                        } if expected == &id
+                    )
                 });
                 if matches_request {
+                    if !self.commit_provider_selection(ProviderId::Codex, model, Some(reasoning)) {
+                        if let Some(picker) = self.conversation_popup_mut() {
+                            picker.phase = ThreadPickerPhase::Ready;
+                            picker.message = Some(
+                                "The selected Codex model is no longer available; the active conversation was preserved"
+                                    .to_owned(),
+                            );
+                        }
+                        return Vec::new();
+                    }
+                    self.openrouter.conversation = OpenRouterConversationState::None;
                     self.reset_context_window();
                     self.thread = ThreadState::Ready { id: id.clone() };
                     self.turn = TurnState::Idle;
                     self.replace_transcript(history);
-                    self.thread_picker = None;
+                    self.close_conversation_popup();
                     self.thinking.clear_content();
-                    self.preferences.thread_id = Some(id.clone());
+                    self.preferences.set_auto_resume_thread(Some(id.clone()));
                     if let AuthState::SignedIn { scope } = &self.auth {
-                        self.preferences.account_scope = scope.clone();
+                        self.preferences.codex.account_scope = scope.clone();
                     }
                     self.register_thread_scope(&id);
                     self.notice = Some("Resumed the selected thread".to_owned());
@@ -129,9 +156,14 @@ impl AppState {
                 }
             }
             DomainEvent::ThreadSwitchFailed { id, message } => {
-                if let Some(picker) = &mut self.thread_picker {
-                    if matches!(&picker.phase, ThreadPickerPhase::Resuming { id: expected } if expected == &id)
-                    {
+                if let Some(picker) = self.conversation_popup_mut() {
+                    if matches!(
+                        &picker.phase,
+                        ThreadPickerPhase::Resuming {
+                            provider: ProviderId::Codex,
+                            id: expected,
+                        } if expected == &id
+                    ) {
                         picker.phase = ThreadPickerPhase::Ready;
                         picker.message = Some(format!(
                             "Could not resume the selected thread; the active thread was preserved: {message}"
@@ -148,7 +180,7 @@ impl AppState {
                     return Vec::new();
                 };
                 let phase_request_count =
-                    match self.thread_picker.as_ref().map(|picker| &picker.phase) {
+                    match self.conversation_popup().map(|picker| &picker.phase) {
                         Some(ThreadPickerPhase::Deleting { requested }) => *requested,
                         _ => return Vec::new(),
                     };
@@ -167,7 +199,7 @@ impl AppState {
                     && no_duplicate_results
                     && reported_ids == expected_ids;
                 if !result_matches_request {
-                    if let Some(picker) = &mut self.thread_picker {
+                    if let Some(picker) = self.conversation_popup_mut() {
                         picker.phase = ThreadPickerPhase::Failed;
                         picker.confirmation = None;
                         picker.message = Some(
@@ -178,7 +210,7 @@ impl AppState {
                 }
 
                 let active_id = self.active_saved_thread_id().map(str::to_owned);
-                if let Some(picker) = &mut self.thread_picker {
+                if let Some(picker) = self.conversation_popup_mut() {
                     let protected_reported = deleted
                         .iter()
                         .any(|id| active_id.as_deref() == Some(id.as_str()));
@@ -218,8 +250,12 @@ impl AppState {
                     picker.message = Some(message);
                     let mut removed_scope = false;
                     for id in &safe_deleted {
-                        removed_scope |=
-                            self.preferences.thread_account_scopes.remove(id).is_some();
+                        removed_scope |= self
+                            .preferences
+                            .codex
+                            .thread_account_scopes
+                            .remove(id)
+                            .is_some();
                     }
                     if removed_scope {
                         return vec![Effect::Persist(self.preferences.clone())];
@@ -234,9 +270,9 @@ impl AppState {
                 }
                 self.reset_context_window();
                 self.thread = ThreadState::Ready { id: id.clone() };
-                self.preferences.thread_id = Some(id.clone());
+                self.preferences.set_auto_resume_thread(Some(id.clone()));
                 if let AuthState::SignedIn { scope } = &self.auth {
-                    self.preferences.account_scope = scope.clone();
+                    self.preferences.codex.account_scope = scope.clone();
                 }
                 self.register_thread_scope(&id);
                 return vec![Effect::Persist(self.preferences.clone())];

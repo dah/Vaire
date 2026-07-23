@@ -16,11 +16,23 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
         }
     }
 
-    pub(in crate::backend) fn selected_model(&self) -> Result<String, BackendError> {
-        self.state
+    pub(in crate::backend) fn selected_model(
+        &self,
+        provider: ProviderId,
+    ) -> Result<ModelKey, BackendError> {
+        let model = self
+            .state
             .selected_model
             .clone()
-            .ok_or_else(|| SessionError::Protocol("no model is selected".to_owned()).into())
+            .ok_or_else(|| SessionError::Protocol("no model is selected".to_owned()))?;
+        if model.provider != provider {
+            return Err(SessionError::Protocol(format!(
+                "selected model belongs to {}, not {provider}",
+                model.provider
+            ))
+            .into());
+        }
+        Ok(model)
     }
 
     pub(in crate::backend) fn reduce_mutating_error(&mut self, error: BackendError) -> Vec<Effect> {
@@ -58,6 +70,7 @@ pub(in crate::backend) fn is_fatal_transport(error: &SessionError) -> bool {
 pub(in crate::backend) fn load_notice_message(notice: Option<LoadNotice>) -> Option<String> {
     match notice {
         None | Some(LoadNotice::Missing) => None,
+        Some(LoadNotice::MigratedV1) => Some("preferences were upgraded to version 2".to_owned()),
         Some(notice) => Some(format!("preferences were not restored: {notice:?}")),
     }
 }

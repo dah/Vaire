@@ -60,12 +60,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, ui: &UiState) {
             activity_frame,
         );
     }
-    render_composer(
-        frame,
-        regions[2],
-        &composer_wrapped,
-        state.thread_picker.is_none(),
-    );
+    render_composer(frame, regions[2], &composer_wrapped, state.popup.is_none());
     render_message_or_help(
         frame,
         regions[3],
@@ -76,8 +71,8 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, ui: &UiState) {
     if let Some(overlay) = &ui.overlay {
         render_overlay(frame, area, overlay);
     }
-    if let Some(picker) = &state.thread_picker {
-        render_thread_picker(frame, area, picker, state.preferences.thread_id.as_deref());
+    if let Some(popup) = &state.popup {
+        render_popup(frame, area, popup, state, ui.secret_mask());
     }
 }
 

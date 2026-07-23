@@ -74,13 +74,30 @@ pub enum BackendError {
     Browser(#[from] BrowserError),
     #[error("the connected app-server reported unsupported platform {0}")]
     UnsupportedPlatform(String),
+    #[error("Codex provider is unavailable")]
+    CodexUnavailable,
+}
+
+#[derive(Debug)]
+pub enum BackendRuntimeEvent {
+    Codex(Option<Result<SessionEvent, SessionError>>),
+    OpenRouter(OpenRouterServiceEvent),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(in crate::backend) struct PendingOpenRouterAutoResume {
+    pub(in crate::backend) operation_id: u64,
+    pub(in crate::backend) conversation_id: crate::provider::OpenRouterConversationId,
+    pub(in crate::backend) model_id: Option<String>,
 }
 
 pub struct BackendCoordinator<P, B> {
     pub(in crate::backend) state: AppState,
-    pub(in crate::backend) session: SessionService,
+    pub(in crate::backend) session: Option<SessionService>,
+    pub(in crate::backend) openrouter: Option<OpenRouterService>,
     pub(in crate::backend) preferences: P,
     pub(in crate::backend) browser: B,
     pub(in crate::backend) may_persist: bool,
+    pub(in crate::backend) pending_openrouter_auto_resume: Option<PendingOpenRouterAutoResume>,
     pub(in crate::backend) completed_items: CompletedItemTracker,
 }

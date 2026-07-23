@@ -15,8 +15,13 @@ use crate::codex::session::{
     SessionService,
 };
 use crate::codex::transport::TransportError;
+use crate::openrouter::{
+    OpenRouterAuthStatus, OpenRouterConversationV1, OpenRouterFailureCategory, OpenRouterService,
+    OpenRouterServiceEvent, OpenRouterTurnOutcome,
+};
 use crate::persistence::{LoadNotice, PersistenceError, PreferencesPort};
 use crate::platform::{BrowserError, BrowserOpener};
+use crate::provider::{ModelKey, ProviderId};
 
 mod effects;
 mod helpers;
@@ -26,8 +31,8 @@ mod thread_ops;
 mod types;
 
 pub(in crate::backend) use helpers::{is_fatal_transport, load_notice_message};
-pub(in crate::backend) use types::CompletedItemTracker;
-pub use types::{BackendCoordinator, BackendError};
+pub use types::{BackendCoordinator, BackendError, BackendRuntimeEvent};
+pub(in crate::backend) use types::{CompletedItemTracker, PendingOpenRouterAutoResume};
 #[cfg(test)]
 pub(in crate::backend) use types::{
     MAX_TRACKED_COMPLETED_ITEMS_PER_TURN, MAX_TRACKED_COMPLETED_ITEM_ID_BYTES,

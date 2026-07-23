@@ -78,7 +78,7 @@ IFS= read -r hold
     backend.startup().await.unwrap();
 
     backend.handle_intent(Intent::Resume).await.unwrap();
-    let picker = backend.state().thread_picker.as_ref().unwrap();
+    let picker = backend.state().conversation_popup().unwrap();
     assert!(
         matches!(picker.phase, ThreadPickerPhase::Ready),
         "unexpected picker state: {picker:?}"
@@ -110,7 +110,10 @@ IFS= read -r hold
         .await
         .unwrap();
     assert!(matches!(&backend.state().thread, ThreadState::Ready { id } if id == "thr-old-a"));
-    assert_eq!(saved.value().thread_id.as_deref(), Some("thr-old-a"));
+    assert_eq!(
+        saved.value().codex.auto_resume_thread_id.as_deref(),
+        Some("thr-old-a")
+    );
     assert_eq!(backend.state().transcript.len(), 1);
     assert_eq!(
         backend.state().transcript[0].role,
@@ -130,8 +133,7 @@ IFS= read -r hold
     assert!(matches!(
         backend
             .state()
-            .thread_picker
-            .as_ref()
+            .conversation_popup()
             .and_then(|picker| picker.confirmation.as_ref()),
         Some(ThreadDeleteConfirmation::Selected { target }) if target.id == "thr-old-b"
     ));
@@ -141,15 +143,13 @@ IFS= read -r hold
         .unwrap();
     assert!(backend
         .state()
-        .thread_picker
-        .as_ref()
+        .conversation_popup()
         .unwrap()
         .confirmation
         .is_none());
     assert!(backend
         .state()
-        .thread_picker
-        .as_ref()
+        .conversation_popup()
         .unwrap()
         .threads
         .iter()
@@ -164,8 +164,7 @@ IFS= read -r hold
         .unwrap();
     assert!(!backend
         .state()
-        .thread_picker
-        .as_ref()
+        .conversation_popup()
         .unwrap()
         .threads
         .iter()
@@ -177,8 +176,7 @@ IFS= read -r hold
         .unwrap();
     let targets = backend
         .state()
-        .thread_picker
-        .as_ref()
+        .conversation_popup()
         .unwrap()
         .confirmation
         .as_ref()
@@ -195,7 +193,7 @@ IFS= read -r hold
         .handle_intent(Intent::ThreadPickerConfirmDelete)
         .await
         .unwrap();
-    let picker = backend.state().thread_picker.as_ref().unwrap();
+    let picker = backend.state().conversation_popup().unwrap();
     assert_eq!(
         picker
             .threads
@@ -214,6 +212,9 @@ IFS= read -r hold
         .as_deref()
         .unwrap()
         .contains("app-server returned error -32010"));
-    assert_eq!(saved.value().thread_id.as_deref(), Some("thr-old-a"));
+    assert_eq!(
+        saved.value().codex.auto_resume_thread_id.as_deref(),
+        Some("thr-old-a")
+    );
     backend.shutdown().await.unwrap();
 }

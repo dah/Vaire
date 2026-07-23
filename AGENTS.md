@@ -8,7 +8,7 @@ AgentHarness currently sends no custom base or developer instructions to runtime
 
 ## Mission
 
-AgentHarness is a small, dependable local terminal client built on Codex app-server. Its first two milestones are complete: users can authenticate with a ChatGPT subscription, select an available Codex model and reasoning level, manage one active thread among account-scoped saved threads, stream replies and emitted reasoning, run Codex command/file tools, and automatically resume the working thread after restarting when the authenticated account can be safely matched.
+AgentHarness is a small, dependable local terminal client with one active conversation across Codex app-server and OpenRouter text chat. Users can authenticate independently, select a provider-labelled model, manage provider-owned saved histories, stream replies, run Codex command/file tools, and safely restore the selected provider's working conversation after restart.
 
 Preserve this working vertical slice while evolving the product deliberately. Prefer small end-to-end increments over abstractions for hypothetical features, and make every expansion beyond the shipped baseline an explicit milestone decision.
 
@@ -32,6 +32,12 @@ The following behavior is implemented and is a regression contract unless an exp
 - Enable Codex command-line and file tools with unrestricted same-user access and no approval prompts. The TUI remains conversational and has no tool cards, approval controls, or rich command-progress workflow.
 - Show the authenticated account identity and remaining context percentage in the header, and an ephemeral activity squiggle before the first assistant text.
 - Keep normal tests and CI offline; installed-CLI smoke tests remain explicit and ignored by default.
+- Support exactly two providers: Codex app-server and OpenRouter text chat. Providers beyond these remain out of scope.
+- Keep one active provider, conversation, and turn. Provider-tag models, conversations, turns, transcript, reasoning, context, and histories.
+- Use the official OpenRouter `GET /api/v1/key`, authenticated `GET /api/v1/models/user`, and SSE `POST /api/v1/chat/completions` endpoints; OpenRouter tools and multimodal input are not supported.
+- Store the OpenRouter API key through the injected credential-store port in owner-only plaintext `runtime/openrouter-home/api-key` (`0700` directory, exact `0600` regular file). This is organizational isolation, not encryption, secure storage, a sandbox, or protection from same-user/full-access processes.
+- Treat macOS Keychain migration as mandatory technical debt for a later approved milestone. Save and verify the Keychain item before deleting the plaintext file, and preserve the file on any failure.
+- Cross-provider `/model` selection is a hard blank-conversation boundary with no continuity or history transfer. `/resume` is the only operation that restores cross-provider history; same-provider model changes may retain the conversation.
 
 ## Current scope boundaries
 
@@ -39,7 +45,7 @@ The following capabilities are outside the shipped baseline. Do not introduce th
 
 - Multiple simultaneously active threads, forking, or branching.
 - Approval UI, per-command confirmation, tool cards, or a rich command-output workflow. Do not describe `approval_policy="never"` as automatic approval; supported command/file operations execute without requesting approval.
-- Additional model providers or API-key login.
+- Additional model providers beyond Codex and OpenRouter, or credential mechanisms beyond the approved OpenRouter file-backed API-key flow.
 - Plugins, skills, MCP servers, orchestration, or multi-agent execution.
 - Elaborate theming or customization that gets ahead of functional work.
 
@@ -49,6 +55,25 @@ These are durable constraints unless the project owner explicitly changes them:
 - A runtime or build dependency on RepoPrompt.
 
 The completed milestone plans under `docs/plans/` are historical implementation records, not a live roadmap. Establish and document the next milestone before widening product scope.
+
+## Completed milestone: OpenRouter chat provider
+
+The milestone documented in `docs/plans/openrouter-chat-provider-2026-07-22.md` is complete and part of the shipped regression baseline. The product remains a bounded two-provider design; providers beyond Codex and OpenRouter remain out of scope.
+
+The approved durable contracts are:
+
+- preserve the complete shipped Codex app-server experience and its safety, account-scoping, resource, testing, and full-access contracts;
+- add OpenRouter only as a text-chat provider using the official `GET /api/v1/key`, authenticated `GET /api/v1/models/user`, and SSE `POST /api/v1/chat/completions` endpoints;
+- keep exactly one active conversation and one active turn across both providers, with provider-tagged model, conversation, turn, history, reasoning, and context ownership;
+- store the OpenRouter API key through an injected credential-store port in the dedicated owner-only `runtime/openrouter-home/api-key` file: the directory is `0700`, the regular current-user-owned file is exactly `0600`, and the plaintext file is organizational isolation only—not encryption, secure storage, a sandbox, or protection from same-user processes and full-access Codex tools;
+- never put the OpenRouter key or its fragments in application state, preferences, transcripts, notices, diagnostics, runtime arguments, environment, or test snapshots;
+- treat migration of OpenRouter credentials to macOS Keychain as explicit technical debt for a later approved milestone: that migration must use the injected credential-store port, save and verify the Keychain item before deleting the plaintext file, and preserve the file on failure;
+- make every cross-provider `/model` selection a hard fresh-conversation boundary with a blank transcript and no automatic continuity or history transfer; a same-provider model change may retain the current conversation;
+- make `/resume` the only cross-provider operation that deliberately restores prior history, while retaining provider-owned inactive Codex threads and local OpenRouter conversations;
+- keep normal tests and CI offline with fake credentials, a fake credential store or temporary directories, and loopback fake HTTP/SSE; and
+- keep RepoPrompt CE optional, strictly read-only, and absent from runtime/build dependencies.
+
+Retain the plaintext-risk disclosure and Keychain-migration debt in future documentation changes.
 
 ## Completed milestone: richer interactive runtime
 
@@ -68,19 +93,20 @@ Treat further expansion beyond these capabilities as a new milestone decision wi
 The application opens directly into the chat TUI. On startup it must continue to:
 
 1. Restore non-secret local preferences.
-2. Start and initialize the Codex app-server connection.
-3. Detect the current Codex authentication state.
-4. Automatically resume the saved thread when authentication and the saved thread are valid.
-5. Otherwise remain usable and explain the next action, such as `/login` or `/resume`.
+2. Start Codex and inspect OpenRouter credentials independently so one provider's failure does not disable the other.
+3. Detect each provider's authentication and catalog state.
+4. Automatically resume only the active provider's saved conversation when its scope and local state are valid.
+5. Otherwise preserve any saved pointer, block silent replacement, and explain the next action such as `/login`, `/resume`, or `/new`.
 
 Normal text entered in the composer starts a turn in the active thread. Slash commands are the control surface for application actions. The current command vocabulary is:
 
-- `/login` or `/login browser` — start the Codex ChatGPT browser sign-in flow; `/login device` is the supported fallback when callback login is unavailable.
-- `/logout` — sign out through Codex, or cancel the currently pending sign-in.
-- `/model` — inspect or select a model returned by app-server.
-- `/reasoning` — inspect or select a reasoning level supported by the current model.
-- `/new` — eagerly create and activate a fresh thread without deleting the previous thread.
-- `/resume` — open the account-scoped saved-thread picker.
+- `/login` — open the provider/status popup. Choose Codex browser login or masked OpenRouter API-key entry; `d` starts Codex device login, `c` edits the OpenRouter enabled-model draft, and `r` revalidates/refreshes OpenRouter.
+- `/login browser` and `/login device` — direct Codex ChatGPT sign-in shortcuts.
+- `/logout` — open the provider popup and settle active work before signing out the selected provider.
+- `/model` — open the searchable, scrollable, provider-labelled model picker. Cross-provider selection immediately starts blank; use `/resume` for history.
+- `/reasoning` — inspect or select a Codex reasoning level; OpenRouter reasoning effort is unsupported.
+- `/new` — eagerly create and activate a fresh conversation for the active provider without deleting prior history.
+- `/resume` — open the unified provider-labelled Codex/OpenRouter conversation picker; this is the only explicit cross-provider history restoration path.
 - `/thinking` — toggle the right-side Reasoning panel of reasoning summaries or reasoning text emitted by app-server. Distinct from `/reasoning`, which selects the reasoning effort level.
 - `/help` — show supported commands and essential keys.
 - `/quit` — shut down cleanly and exit.
@@ -91,13 +117,13 @@ The current key contract is:
 
 - `Enter` sends and `Alt-Enter` inserts a newline.
 - `PageUp`, `PageDown`, arrow keys, `Home`, and `End` scroll the transcript.
-- In the thread picker, arrows or `j`/`k` move, `Enter` resumes, `d` requests deletion of the selected inactive thread, and `D` requests deletion of all inactive threads. Deletion requires a second `Enter`; `Escape` cancels or closes the picker. The active thread is protected.
+- In the conversation picker, arrows or `j`/`k` move, `Enter` resumes, `d` requests deletion of the selected inactive history, and `D` requests deletion of all inactive histories. Deletion requires a second `Enter`; `Escape` cancels or closes the picker. The active conversation is protected.
 - `Escape` closes local help or errors, cancels a picker action, or interrupts the active turn.
 - `Ctrl-C` shuts down cleanly.
 
-The cyan header shows the authenticated email when app-server exposes it and a right-aligned `Context N%`; it shows `Context --` when usable context-window data is unavailable. While a turn is active but no nonempty assistant text has arrived, a display-only animated squiggle appears in the conversation pane and disappears on the first text or terminal turn state.
+The cyan header identifies the active provider and its provider-specific auth/conversation/model/reasoning state, plus right-aligned `Context N%`; it shows `Context --` when usable context-window data is unavailable. While a turn is active but no nonempty assistant text has arrived, a display-only animated squiggle appears in the conversation pane and disappears on the first text or terminal turn state. The Reasoning panel shows only emitted Codex reasoning; OpenRouter reasoning fields are not collected.
 
-Do not silently create a replacement thread when resume fails. Preserve the saved ID, report the failure clearly, and let the user choose the next action. The current account scope is the normalized ChatGPT email; if app-server does not expose it, do not auto-resume or manually resume a saved thread. On a first run with no saved thread, create the single working thread when it is first needed.
+Do not silently create a replacement conversation when resume fails. Preserve the saved ID and history, enter an explicit blocking resume-failed state, and let the user choose `/resume` or `/new`. Codex account scope remains the normalized ChatGPT email; if app-server does not expose it, do not auto-resume or manually resume a saved Codex thread. OpenRouter histories are validated local owner-only files. On a first run with no saved conversation, create the single working conversation when it is first needed.
 
 ## Codex integration rules
 

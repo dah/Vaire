@@ -1,19 +1,55 @@
 use super::*;
+use crate::openrouter::{
+    OpenRouterAuthStatus, OpenRouterFailureCategory, OpenRouterModel, TokenUsage,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Effect {
     StartLogin,
     StartDeviceLogin,
-    CancelLogin { login_id: String },
+    CancelLogin {
+        login_id: String,
+    },
     Logout,
     StartNewThread,
+    StartNewOpenRouterConversation,
     ListThreads,
-    ResumeThread { id: String },
-    SwitchThread { id: String },
-    DeleteThreads { ids: Vec<String> },
-    SendMessage { text: String },
-    InterruptTurn { thread_id: String, turn_id: String },
-    Persist(PreferencesV1),
+    ResumeThread {
+        id: String,
+    },
+    SwitchThread {
+        id: String,
+        model: ModelKey,
+        reasoning: String,
+    },
+    SwitchOpenRouterConversation {
+        id: OpenRouterConversationId,
+        model: ModelKey,
+    },
+    DeleteThreads {
+        ids: Vec<String>,
+    },
+    DeleteOpenRouterConversations {
+        ids: Vec<OpenRouterConversationId>,
+    },
+    DeleteConversations {
+        codex_ids: Vec<String>,
+        openrouter_ids: Vec<OpenRouterConversationId>,
+    },
+    SendMessage {
+        text: String,
+    },
+    RefreshOpenRouter,
+    LogoutOpenRouter,
+    SendOpenRouterMessage {
+        text: String,
+    },
+    InterruptOpenRouterTurn,
+    InterruptTurn {
+        thread_id: String,
+        turn_id: String,
+    },
+    Persist(PreferencesV2),
     Shutdown,
 }
 
@@ -26,7 +62,7 @@ pub enum TurnOutcome {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DomainEvent {
-    PreferencesLoaded(PreferencesV1),
+    PreferencesLoaded(PreferencesV2),
     Connecting,
     Connected {
         generation: u64,
@@ -40,6 +76,51 @@ pub enum DomainEvent {
     LoginFailed(String),
     LoggedOut,
     CatalogLoaded(Vec<ModelChoice>),
+    OpenRouterStartup {
+        auth: OpenRouterAuthStatus,
+        catalog: Vec<OpenRouterModel>,
+    },
+    OpenRouterAuthChanged(OpenRouterAuthStatus),
+    OpenRouterCatalogLoaded(Vec<OpenRouterModel>),
+    OpenRouterCatalogLoadedForAutomaticResume(Vec<OpenRouterModel>),
+    OpenRouterOperationFailed(OpenRouterFailureCategory),
+    OpenRouterCandidateRejected(OpenRouterFailureCategory),
+    OpenRouterTurnStarted {
+        conversation_id: OpenRouterConversationId,
+        turn_id: OpenRouterTurnId,
+    },
+    OpenRouterConversationStarted {
+        conversation_id: OpenRouterConversationId,
+    },
+    OpenRouterConversationRestored {
+        conversation_id: OpenRouterConversationId,
+        history: Vec<TranscriptEntry>,
+        model: ModelKey,
+        automatic: bool,
+    },
+    OpenRouterConversationSwitchFailed {
+        conversation_id: OpenRouterConversationId,
+        message: String,
+    },
+    OpenRouterResumeFailed {
+        conversation_id: OpenRouterConversationId,
+    },
+    OpenRouterDelta {
+        conversation_id: OpenRouterConversationId,
+        turn_id: OpenRouterTurnId,
+        delta: String,
+    },
+    OpenRouterUsage {
+        conversation_id: OpenRouterConversationId,
+        turn_id: OpenRouterTurnId,
+        usage: TokenUsage,
+    },
+    OpenRouterTurnFinished {
+        conversation_id: OpenRouterConversationId,
+        turn_id: OpenRouterTurnId,
+        outcome: TurnOutcome,
+        assistant_text: Option<String>,
+    },
     ResumeStarted {
         id: String,
     },
@@ -60,6 +141,8 @@ pub enum DomainEvent {
     ThreadSwitchSucceeded {
         id: String,
         history: Vec<TranscriptEntry>,
+        model: ModelKey,
+        reasoning: String,
     },
     ThreadSwitchFailed {
         id: String,

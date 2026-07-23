@@ -1,12 +1,13 @@
 # AgentHarness
 
-AgentHarness is a small macOS-first terminal chat client with one active Codex conversation. It uses the
-installed Codex app-server and the Codex-owned ChatGPT subscription login flow; it does not offer
-API-key login or approval UI. Codex's built-in command-line and file tools are enabled.
+AgentHarness is a small macOS-first terminal chat client with one active conversation across two
+providers: Codex through the installed app-server and OpenRouter text chat. Codex uses its owned
+ChatGPT subscription login flow; OpenRouter uses a user-supplied API key. There is no approval UI,
+and Codex's built-in command-line and file tools are enabled.
 
-The TUI can create and revisit saved threads, show emitted reasoning in a Reasoning side panel, identify the
-signed-in ChatGPT account, animate the wait for the first reply text, and report the remaining model
-context when Codex supplies usable token data.
+The TUI can create and revisit provider-labelled histories, search models from both providers,
+show Codex-emitted reasoning in a Reasoning side panel, animate the wait for reply text, and report
+remaining model context when the active provider supplies usable token data.
 
 ## Run
 
@@ -23,9 +24,11 @@ authenticated tools, and read, create, modify, or delete anything your macOS acc
 This is not a sandbox; use it only with prompts and content you trust.
 
 Set AGENTHARNESS_CODEX_BIN=/absolute/path/to/codex only when codex is not on PATH.
-On first launch, enter **/login** and complete the HTTPS browser sign-in. If the callback-based
+On first launch, enter **/login** to choose Codex or OpenRouter. For Codex, complete the HTTPS browser sign-in. If the callback-based
 OpenAI page fails, run **/logout** to cancel the pending attempt and use **/login device**; the app
-opens the device verification page and displays the one-time code in the TUI. AgentHarness stores its
+opens the device verification page and displays the one-time code in the TUI. For OpenRouter, enter
+an API key in the masked editor, validate it, then use **c** in the login popup to choose the enabled
+model subset. AgentHarness stores its
 non-secret preferences and dedicated Codex runtime under
 ~/Library/Application Support/AgentHarness/; Codex owns credentials in that dedicated home.
 Preferences may include the normalized ChatGPT email and a non-secret thread-to-account registry
@@ -39,6 +42,15 @@ Tool commands start in the dedicated `runtime/conversation` directory, and files
 kept across launches. That directory and the dedicated Codex home are organizational boundaries,
 not security boundaries: commands can leave the starting directory and can reach other same-user
 paths, including Codex-owned authentication state.
+
+The OpenRouter key is stored as plaintext in the owner-only
+`runtime/openrouter-home/api-key` file (directory mode `0700`, file mode `0600`). This is
+organizational isolation, not encryption or secure storage: same-user processes, backups,
+snapshots, disk recovery, and full-access Codex commands may reach it, and logout deletion is not
+secure erasure. Migration to macOS Keychain through the injected credential-store port remains
+explicit technical debt; a future migration must save and verify the Keychain item before deleting
+the file and preserve the file on any failure. Local OpenRouter histories are also owner-only
+plaintext files.
 
 The app-server inherits the launching environment except that inherited `CODEX_*` values are
 removed and AgentHarness supplies its dedicated `CODEX_HOME`; tool shells request environment
@@ -58,22 +70,25 @@ silently replacing the active thread.
 
 - **/login**, **/login browser**, **/login device**, **/logout**, **/new**, **/resume**,
   **/thinking**, **/help**, **/quit**
-- **/model [id]** and **/reasoning [value]** use choices reported by app-server
-- **/new** eagerly creates a fresh thread without deleting the previous one
-- **/resume** opens the saved-thread picker; arrows or **j/k** navigate and **Enter** resumes
-- In the thread picker, **d** requests deletion of the selected inactive thread and **D** requests
-  deletion of all inactive threads. Both actions show their exact scope and require a second
+- **/model** opens a searchable, provider-labelled picker. Switching providers immediately starts
+  a blank conversation; **/resume** is the only operation that restores cross-provider history.
+- **/reasoning [value]** uses Codex choices; OpenRouter reasoning effort is unsupported.
+- **/new** eagerly creates a fresh conversation for the active provider without deleting history
+- **/resume** opens the provider-labelled conversation picker; arrows or **j/k** navigate and **Enter** resumes
+- In the conversation picker, **d** requests deletion of the selected inactive history and **D** requests
+  deletion of all inactive histories. Both actions show their exact scope and require a second
   **Enter** confirmation; **Escape** cancels. The active saved thread is always protected.
 - **/thinking** toggles the right-side Reasoning panel. AgentHarness requests detailed reasoning
   summaries for each turn and configures its dedicated runtime with
   `show_raw_agent_reasoning=true` at process and thread start/resume boundaries. This is
-  best-effort configuration: the panel shows reasoning text only when Codex and the selected
-  provider/model explicitly emit it, with summaries as the fallback. Hidden/private
+  best-effort configuration: for Codex the panel shows reasoning text only when the selected model
+  explicitly emits it, with summaries as the fallback. OpenRouter reasoning fields are not collected.
+  Hidden/private
   chain-of-thought is unavailable; AgentHarness neither exposes nor infers it. `/thinking`
   controls panel visibility; `/reasoning [value]` separately selects the reasoning effort level.
 - The header uses the authenticated account identity instead of a generic signed-in label and shows
   right-aligned **Context N%** when usable usage data is available, or **Context --** when it is not.
-- A small animated squiggle appears while Codex is working before the first assistant text. It is
+- A small animated squiggle appears while the active provider is working before the first assistant text. It is
   display-only and disappears on the first nonempty text or any terminal turn state.
 - **Enter** sends; **Alt-Enter** inserts a newline
 - **PageUp/PageDown**, arrow keys, **Home**, and **End** scroll the transcript

@@ -37,6 +37,7 @@ pub fn thread_choices(threads: Vec<ThreadListEntry>) -> Vec<ThreadChoice> {
                 .unwrap_or("Untitled thread")
                 .to_owned();
             ThreadChoice {
+                provider: crate::provider::ProviderId::Codex,
                 id: thread.id,
                 title,
                 updated_at: thread.updated_at,
@@ -56,6 +57,7 @@ pub fn history_entries(thread: &ThreadSnapshot) -> Vec<TranscriptEntry> {
                             if input.kind == "text" {
                                 if let Some(text) = &input.text {
                                     entries.push(TranscriptEntry {
+                                        provider: crate::provider::ProviderId::Codex,
                                         role: TranscriptRole::User,
                                         text: text.clone(),
                                         item_id: Some(item.id.clone()),
@@ -69,6 +71,7 @@ pub fn history_entries(thread: &ThreadSnapshot) -> Vec<TranscriptEntry> {
                 "agentMessage" => {
                     if let Some(text) = &item.text {
                         entries.push(TranscriptEntry {
+                            provider: crate::provider::ProviderId::Codex,
                             role: TranscriptRole::Assistant,
                             text: text.clone(),
                             item_id: Some(item.id.clone()),

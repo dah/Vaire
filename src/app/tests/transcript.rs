@@ -102,6 +102,7 @@ fn transcript_retention_is_bounded_without_breaking_stream_reconciliation() {
     };
     let history = (0..=MAX_TRANSCRIPT_ENTRIES)
         .map(|index| TranscriptEntry {
+            provider: crate::provider::ProviderId::Codex,
             role: TranscriptRole::User,
             text: format!("history-{index}"),
             item_id: None,

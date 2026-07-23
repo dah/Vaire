@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn deletion_confirmation_protects_active_and_supports_cancellation() {
     let mut state = thread_ready_state();
-    state.thread_picker = Some(ThreadPickerState {
+    state.popup = conversation_popup(ThreadPickerState {
         phase: ThreadPickerPhase::Ready,
         threads: vec![
             thread("thr-active", "Current", 30),
@@ -16,10 +16,9 @@ fn deletion_confirmation_protects_active_and_supports_cancellation() {
     assert!(state
         .reduce(Action::Intent(Intent::ThreadPickerRequestDelete))
         .is_empty());
-    assert!(state.thread_picker.as_ref().unwrap().confirmation.is_none());
+    assert!(state.conversation_popup().unwrap().confirmation.is_none());
     assert!(state
-        .thread_picker
-        .as_ref()
+        .conversation_popup()
         .unwrap()
         .message
         .as_deref()
@@ -30,15 +29,14 @@ fn deletion_confirmation_protects_active_and_supports_cancellation() {
     state.reduce(Action::Intent(Intent::ThreadPickerRequestDelete));
     assert!(matches!(
         state
-            .thread_picker
-            .as_ref()
+            .conversation_popup()
             .and_then(|picker| picker.confirmation.as_ref()),
         Some(ThreadDeleteConfirmation::Selected { target }) if target.id == "thr-old"
     ));
     assert!(state
         .reduce(Action::Intent(Intent::ThreadPickerCancelDelete))
         .is_empty());
-    assert!(state.thread_picker.as_ref().unwrap().confirmation.is_none());
+    assert!(state.conversation_popup().unwrap().confirmation.is_none());
 
     state.reduce(Action::Intent(Intent::ThreadPickerRequestDelete));
     assert_eq!(
@@ -52,14 +50,17 @@ fn deletion_confirmation_protects_active_and_supports_cancellation() {
         deleted: vec!["thr-old".to_owned()],
         failures: vec![],
     }));
-    assert_eq!(state.preferences.thread_id.as_deref(), Some("thr-active"));
-    assert_eq!(state.thread_picker.as_ref().unwrap().threads.len(), 1);
+    assert_eq!(
+        state.preferences.codex.auto_resume_thread_id.as_deref(),
+        Some("thr-active")
+    );
+    assert_eq!(state.conversation_popup().unwrap().threads.len(), 1);
 }
 
 #[test]
 fn clear_inactive_reports_partial_failures_and_never_removes_active_saved_id() {
     let mut state = thread_ready_state();
-    state.thread_picker = Some(ThreadPickerState {
+    state.popup = conversation_popup(ThreadPickerState {
         phase: ThreadPickerPhase::Ready,
         threads: vec![
             thread("thr-active", "Current", 30),
@@ -72,8 +73,7 @@ fn clear_inactive_reports_partial_failures_and_never_removes_active_saved_id() {
     });
     state.reduce(Action::Intent(Intent::ThreadPickerRequestClearInactive));
     let targets = state
-        .thread_picker
-        .as_ref()
+        .conversation_popup()
         .unwrap()
         .confirmation
         .as_ref()
@@ -100,8 +100,11 @@ fn clear_inactive_reports_partial_failures_and_never_removes_active_saved_id() {
             message: "permission denied".to_owned(),
         }],
     }));
-    let picker = state.thread_picker.as_ref().unwrap();
-    assert_eq!(state.preferences.thread_id.as_deref(), Some("thr-active"));
+    let picker = state.conversation_popup().unwrap();
+    assert_eq!(
+        state.preferences.codex.auto_resume_thread_id.as_deref(),
+        Some("thr-active")
+    );
     assert_eq!(
         picker
             .threads
@@ -121,7 +124,7 @@ fn clear_inactive_reports_partial_failures_and_never_removes_active_saved_id() {
 #[test]
 fn deletion_results_must_exactly_match_the_confirmed_target_set() {
     let mut state = thread_ready_state();
-    state.thread_picker = Some(ThreadPickerState {
+    state.popup = conversation_popup(ThreadPickerState {
         phase: ThreadPickerPhase::Ready,
         threads: vec![
             thread("thr-active", "Current", 30),
@@ -147,7 +150,7 @@ fn deletion_results_must_exactly_match_the_confirmed_target_set() {
         failures: vec![],
     }));
 
-    let picker = state.thread_picker.as_ref().unwrap();
+    let picker = state.conversation_popup().unwrap();
     assert!(matches!(picker.phase, ThreadPickerPhase::Failed));
     assert_eq!(picker.threads.len(), 3);
     assert_eq!(state.preferences, preferences);

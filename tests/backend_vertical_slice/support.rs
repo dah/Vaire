@@ -10,7 +10,7 @@ pub(super) use agentharness::codex::safety::{FullAccessPolicy, IsolationPaths};
 pub(super) use agentharness::codex::session::SessionService;
 pub(super) use agentharness::codex::transport::{AppServerTransport, ProcessSpec, RequestTimeouts};
 pub(super) use agentharness::persistence::{
-    AccountScope, LoadOutcome, PersistenceError, PreferencesPort, PreferencesV1,
+    AccountScope, CodexPreferencesV2, LoadOutcome, PersistenceError, PreferencesPort, PreferencesV2,
 };
 pub(super) use agentharness::platform::{validate_login_url, BrowserError, BrowserOpener};
 pub(super) use tempfile::tempdir;
@@ -33,16 +33,16 @@ pub(super) async fn session(root: &Path, body: &str) -> SessionService {
 
 #[derive(Clone)]
 pub(super) struct MemoryPreferences {
-    value: Arc<Mutex<PreferencesV1>>,
+    value: Arc<Mutex<PreferencesV2>>,
 }
 
 impl MemoryPreferences {
-    pub(super) fn new(value: PreferencesV1) -> Self {
+    pub(super) fn new(value: PreferencesV2) -> Self {
         Self {
             value: Arc::new(Mutex::new(value)),
         }
     }
-    pub(super) fn value(&self) -> PreferencesV1 {
+    pub(super) fn value(&self) -> PreferencesV2 {
         self.value.lock().unwrap().clone()
     }
 }
@@ -53,10 +53,11 @@ impl PreferencesPort for MemoryPreferences {
             preferences: self.value(),
             notice: None,
             may_overwrite: true,
+            needs_save: false,
         })
     }
 
-    fn save(&self, preferences: &PreferencesV1) -> Result<(), PersistenceError> {
+    fn save(&self, preferences: &PreferencesV2) -> Result<(), PersistenceError> {
         *self.value.lock().unwrap() = preferences.clone();
         Ok(())
     }
@@ -67,13 +68,14 @@ pub(super) struct FailingPreferences;
 impl PreferencesPort for FailingPreferences {
     fn load(&self) -> Result<LoadOutcome, PersistenceError> {
         Ok(LoadOutcome {
-            preferences: PreferencesV1::default(),
+            preferences: PreferencesV2::default(),
             notice: None,
             may_overwrite: true,
+            needs_save: false,
         })
     }
 
-    fn save(&self, _preferences: &PreferencesV1) -> Result<(), PersistenceError> {
+    fn save(&self, _preferences: &PreferencesV2) -> Result<(), PersistenceError> {
         Err(std::io::Error::other("simulated persistence failure").into())
     }
 }

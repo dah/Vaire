@@ -1,5 +1,10 @@
 use crate::command::HELP_TEXT;
-use crate::persistence::{AccountScope, PreferencesV1};
+#[cfg(test)]
+use crate::persistence::CodexPreferencesV2;
+use crate::persistence::{AccountScope, PreferencesV2};
+use crate::provider::{
+    ConversationRef, ModelKey, OpenRouterConversationId, OpenRouterTurnId, ProviderId, TurnRef,
+};
 use crate::text::sanitize_terminal_text;
 use std::collections::{BTreeMap, BTreeSet};
 use unicode_segmentation::UnicodeSegmentation;
@@ -8,6 +13,7 @@ use unicode_width::UnicodeWidthStr;
 mod account;
 mod actions;
 mod domain;
+mod popup;
 mod reducer;
 mod state;
 mod thinking;
@@ -18,9 +24,12 @@ mod turn;
 
 pub use actions::{Action, DomainEvent, Effect, TurnOutcome};
 pub use domain::{
-    AuthState, ConnectionState, Intent, ModelChoice, ThreadState, TranscriptEntry, TranscriptRole,
+    AuthState, ConnectionState, Intent, ModelChoice, OpenRouterConversationState,
+    OpenRouterCredentialValidation, OpenRouterState, ThreadState, TranscriptEntry, TranscriptRole,
     TranscriptTruncation, TurnState,
 };
+pub(crate) use popup::{catalog_search_matches, model_search_matches};
+pub use popup::{AuthPopupMode, PopupState};
 pub use state::AppState;
 pub use thinking::{ThinkingEntry, ThinkingKind, ThinkingState};
 pub use thread_picker::{

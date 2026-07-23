@@ -7,11 +7,15 @@ use super::{
     ACTIVITY_FRAMES, ACTIVITY_TICKS_PER_FRAME, MAX_COMPOSER_BYTES,
 };
 use crate::app::{
-    Action, AppState, AuthState, ConnectionState, DomainEvent, Intent, ThinkingEntry, ThinkingKind,
-    ThreadChoice, ThreadDeleteConfirmation, ThreadPickerPhase, ThreadPickerState, ThreadState,
-    TranscriptEntry, TranscriptRole, TurnState,
+    Action, AppState, AuthState, ConnectionState, DomainEvent, Intent, PopupState, ThinkingEntry,
+    ThinkingKind, ThreadChoice, ThreadDeleteConfirmation, ThreadPickerPhase, ThreadPickerState,
+    ThreadState, TranscriptEntry, TranscriptRole, TurnState,
 };
 use crate::persistence::AccountScope;
+
+fn conversation_popup(picker: ThreadPickerState) -> Option<PopupState> {
+    Some(PopupState::Conversation(picker))
+}
 
 fn draw(state: &AppState, ui: &UiState, width: u16, height: u16) -> Terminal<TestBackend> {
     let backend = TestBackend::new(width, height);
@@ -50,7 +54,7 @@ fn ready() -> AppState {
         thread: ThreadState::Ready {
             id: "thread".to_owned(),
         },
-        selected_model: Some("model-a".to_owned()),
+        selected_model: Some(crate::provider::ModelKey::codex("model-a").unwrap()),
         selected_reasoning: Some("high".to_owned()),
         ..AppState::default()
     }
@@ -60,6 +64,7 @@ fn waiting() -> AppState {
     let mut state = ready();
     state.turn = TurnState::Starting;
     state.transcript.push(TranscriptEntry {
+        provider: crate::provider::ProviderId::Codex,
         role: TranscriptRole::User,
         text: "hello".to_owned(),
         item_id: None,
@@ -72,4 +77,5 @@ mod conversation;
 mod display;
 mod input_activity;
 mod layout_header;
+mod openrouter_popup;
 mod thread_picker;

@@ -5,6 +5,10 @@ use super::transcript::{
 };
 use super::*;
 
+fn conversation_popup(picker: ThreadPickerState) -> Option<PopupState> {
+    Some(PopupState::Conversation(picker))
+}
+
 fn model(id: &str, default: bool, efforts: &[&str], default_effort: &str) -> ModelChoice {
     ModelChoice {
         id: id.to_owned(),
@@ -17,6 +21,7 @@ fn model(id: &str, default: bool, efforts: &[&str], default_effort: &str) -> Mod
 
 fn thread(id: &str, title: &str, updated_at: i64) -> ThreadChoice {
     ThreadChoice {
+        provider: ProviderId::Codex,
         id: id.to_owned(),
         title: title.to_owned(),
         updated_at,
@@ -26,6 +31,7 @@ fn thread(id: &str, title: &str, updated_at: i64) -> ThreadChoice {
 fn seed_thinking(state: &mut AppState, text: &str) {
     state.thinking.visible = true;
     state.thinking.entries.push(ThinkingEntry {
+        provider: crate::provider::ProviderId::Codex,
         turn_id: "turn-old".to_owned(),
         item_id: "thinking-old".to_owned(),
         kind: ThinkingKind::Summary,
@@ -84,35 +90,38 @@ fn thread_ready_state() -> AppState {
             turn_id: "turn-old".to_owned(),
         },
         models: vec![model("m1", true, &["high"], "high")],
-        selected_model: Some("m1".to_owned()),
+        selected_model: Some(ModelKey::codex("m1").unwrap()),
         selected_reasoning: Some("high".to_owned()),
         transcript: vec![TranscriptEntry {
+            provider: crate::provider::ProviderId::Codex,
             role: TranscriptRole::Assistant,
             text: "old conversation".to_owned(),
             item_id: None,
             turn_id: None,
         }],
-        preferences: PreferencesV1 {
-            account_scope: scope,
-            thread_id: Some("thr-active".to_owned()),
-            model_id: Some("m1".to_owned()),
-            reasoning_effort: Some("high".to_owned()),
-            thread_account_scopes: [
-                "thr-active",
-                "thr-old",
-                "thr-old-a",
-                "thr-old-b",
-                "thr-old-c",
-            ]
-            .into_iter()
-            .map(|id| {
-                (
-                    id.to_owned(),
-                    AccountScope::from_chatgpt_email("user@example.com").unwrap(),
-                )
-            })
-            .collect(),
-            ..PreferencesV1::default()
+        preferences: PreferencesV2 {
+            codex: CodexPreferencesV2 {
+                account_scope: scope,
+                auto_resume_thread_id: Some("thr-active".to_owned()),
+                model_id: Some("m1".to_owned()),
+                reasoning_effort: Some("high".to_owned()),
+                thread_account_scopes: [
+                    "thr-active",
+                    "thr-old",
+                    "thr-old-a",
+                    "thr-old-b",
+                    "thr-old-c",
+                ]
+                .into_iter()
+                .map(|id| {
+                    (
+                        id.to_owned(),
+                        AccountScope::from_chatgpt_email("user@example.com").unwrap(),
+                    )
+                })
+                .collect(),
+            },
+            ..PreferencesV2::default()
         },
         ..AppState::default()
     }
@@ -152,6 +161,7 @@ fn active_context_state() -> AppState {
 mod account_auth;
 mod context_activity;
 mod deletion;
+mod openrouter_integration;
 mod picker;
 mod resume;
 mod selection_new_thread;

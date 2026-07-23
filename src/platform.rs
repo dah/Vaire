@@ -10,6 +10,9 @@ pub struct AppPaths {
     pub support_dir: PathBuf,
     pub preferences_file: PathBuf,
     pub runtime_dir: PathBuf,
+    pub openrouter_dir: PathBuf,
+    pub openrouter_home_dir: PathBuf,
+    pub openrouter_credential_file: PathBuf,
     pub diagnostics_dir: PathBuf,
 }
 
@@ -27,9 +30,14 @@ impl AppPaths {
             .unwrap_or_else(|| home.join(".local").join("share"))
             .join("AgentHarness");
 
+        let runtime_dir = support_dir.join("runtime");
+        let openrouter_home_dir = runtime_dir.join("openrouter-home");
         Self {
             preferences_file: support_dir.join("preferences.json"),
-            runtime_dir: support_dir.join("runtime"),
+            runtime_dir,
+            openrouter_dir: support_dir.join("openrouter"),
+            openrouter_credential_file: openrouter_home_dir.join("api-key"),
+            openrouter_home_dir,
             diagnostics_dir: support_dir.join("diagnostics"),
             support_dir,
         }
@@ -100,6 +108,15 @@ mod tests {
         let paths = AppPaths::from_home(Path::new("/Users/example"));
         assert!(paths.support_dir.ends_with("AgentHarness"));
         assert!(paths.preferences_file.starts_with(&paths.support_dir));
+        assert_eq!(paths.openrouter_dir, paths.support_dir.join("openrouter"));
+        assert_eq!(
+            paths.openrouter_home_dir,
+            paths.runtime_dir.join("openrouter-home")
+        );
+        assert_eq!(
+            paths.openrouter_credential_file,
+            paths.openrouter_home_dir.join("api-key")
+        );
     }
 
     #[test]

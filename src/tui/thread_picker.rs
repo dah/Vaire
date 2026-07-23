@@ -4,6 +4,7 @@ pub(in crate::tui) fn render_thread_picker(
     frame: &mut Frame<'_>,
     area: Rect,
     picker: &ThreadPickerState,
+    active_provider: crate::provider::ProviderId,
     active_id: Option<&str>,
 ) {
     let width = area.width.saturating_sub(4).min(92);
@@ -52,7 +53,7 @@ pub(in crate::tui) fn render_thread_picker(
     }
 
     let block = Block::default()
-        .title(" Saved threads ")
+        .title(" Saved threads & conversations ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
     let inner = block.inner(popup);
@@ -92,7 +93,8 @@ pub(in crate::tui) fn render_thread_picker(
                 .threads
                 .iter()
                 .map(|thread| {
-                    let active = active_id == Some(thread.id.as_str());
+                    let active =
+                        thread.provider == active_provider && active_id == Some(thread.id.as_str());
                     let title = sanitize_terminal_text(&thread.title).replace('\n', " ");
                     let metadata = if active {
                         "ACTIVE — protected".to_owned()
@@ -101,7 +103,7 @@ pub(in crate::tui) fn render_thread_picker(
                     };
                     ListItem::new(vec![
                         Line::from(Span::styled(
-                            title,
+                            format!("[{}] {title}", thread.provider),
                             Style::default().add_modifier(Modifier::BOLD),
                         )),
                         Line::from(Span::styled(

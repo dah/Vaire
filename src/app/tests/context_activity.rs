@@ -106,7 +106,7 @@ fn context_resets_only_when_model_or_account_identity_actually_changes() {
         model("m1", true, &["high"], "high"),
         model("m2", false, &["high"], "high"),
     ];
-    state.selected_model = Some("m1".to_owned());
+    state.selected_model = Some(ModelKey::codex("m1").unwrap());
     state.selected_reasoning = Some("high".to_owned());
 
     state.context_remaining_percent = Some(70);
@@ -137,7 +137,7 @@ fn context_resets_only_when_model_or_account_identity_actually_changes() {
     state.auth = AuthState::SignedIn {
         scope: scope.clone(),
     };
-    state.preferences.thread_id = None;
+    state.preferences.codex.auto_resume_thread_id = None;
     state.context_remaining_percent = Some(69);
     seed_thinking(&mut state, "keep me");
     state.reduce(Action::Event(DomainEvent::AccountLoaded(scope)));
@@ -163,7 +163,7 @@ fn assistant_activity_starts_with_the_turn_and_stops_on_first_nonempty_text() {
             id: "thr".to_owned(),
         },
         models: vec![model("m1", true, &["high"], "high")],
-        selected_model: Some("m1".to_owned()),
+        selected_model: Some(ModelKey::codex("m1").unwrap()),
         selected_reasoning: Some("high".to_owned()),
         ..AppState::default()
     };

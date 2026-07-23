@@ -1,14 +1,33 @@
 use super::*;
+use crate::openrouter::{OpenRouterAuthStatus, OpenRouterModel};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Intent {
     SendMessage(String),
     NewThread,
+    ShowLogin,
     Login,
     LoginDevice,
+    ShowLogout,
     Logout,
     ShowModels,
     SelectModel(String),
+    SelectProviderModel(ModelKey),
+    RefreshOpenRouter,
+    LogoutOpenRouter,
+    PopupMoveUp,
+    PopupMoveDown,
+    PopupPageUp,
+    PopupPageDown,
+    PopupMoveFirst,
+    PopupMoveLast,
+    PopupSelect,
+    PopupClose,
+    PopupSearchAppend(char),
+    PopupSearchBackspace,
+    PopupCatalogToggle,
+    PopupOpenCatalog,
+    PopupRefresh,
     ShowReasoning,
     SelectReasoning(String),
     ToggleThinking,
@@ -33,6 +52,13 @@ pub struct ModelChoice {
     pub is_default: bool,
     pub default_reasoning_effort: String,
     pub supported_reasoning_efforts: Vec<String>,
+}
+
+impl ModelChoice {
+    /// Codex-only compatibility tag until the unified model catalog lands.
+    pub fn key(&self) -> ModelKey {
+        ModelKey::codex(self.id.clone()).expect("validated Codex model IDs are nonempty")
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -69,6 +95,10 @@ pub enum TurnState {
         thread_id: String,
         turn_id: String,
     },
+    OpenRouterStreaming {
+        conversation_id: OpenRouterConversationId,
+        turn_id: OpenRouterTurnId,
+    },
     Completed {
         turn_id: String,
     },
@@ -83,7 +113,53 @@ pub enum TurnState {
 
 impl TurnState {
     pub fn is_active(&self) -> bool {
-        matches!(self, Self::Starting | Self::Streaming { .. })
+        matches!(
+            self,
+            Self::Starting | Self::Streaming { .. } | Self::OpenRouterStreaming { .. }
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OpenRouterConversationState {
+    None,
+    Ready {
+        id: OpenRouterConversationId,
+    },
+    ResumeFailed {
+        id: OpenRouterConversationId,
+        message: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OpenRouterCredentialValidation {
+    Idle,
+    Refreshing {
+        operation_id: u64,
+    },
+    Validating {
+        operation_id: u64,
+        candidate_saved: bool,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenRouterState {
+    pub auth: OpenRouterAuthStatus,
+    pub catalog: Vec<OpenRouterModel>,
+    pub conversation: OpenRouterConversationState,
+    pub credential_validation: OpenRouterCredentialValidation,
+}
+
+impl Default for OpenRouterState {
+    fn default() -> Self {
+        Self {
+            auth: OpenRouterAuthStatus::Missing,
+            catalog: Vec::new(),
+            conversation: OpenRouterConversationState::None,
+            credential_validation: OpenRouterCredentialValidation::Idle,
+        }
     }
 }
 
@@ -95,6 +171,7 @@ pub enum TranscriptRole {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TranscriptEntry {
+    pub provider: ProviderId,
     pub role: TranscriptRole,
     pub text: String,
     pub item_id: Option<String>,

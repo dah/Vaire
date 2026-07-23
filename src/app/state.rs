@@ -2,20 +2,22 @@ use super::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppState {
+    pub active_provider: ProviderId,
     pub connection: ConnectionState,
     pub auth: AuthState,
+    pub openrouter: OpenRouterState,
     pub thread: ThreadState,
     pub turn: TurnState,
     pub models: Vec<ModelChoice>,
-    pub selected_model: Option<String>,
+    pub selected_model: Option<ModelKey>,
     pub selected_reasoning: Option<String>,
     pub context_remaining_percent: Option<u8>,
     pub context_suppressed_turn: Option<(String, String)>,
     pub transcript: Vec<TranscriptEntry>,
     pub transcript_dropped_prefix_bytes: BTreeMap<(String, String), TranscriptTruncation>,
-    pub thread_picker: Option<ThreadPickerState>,
+    pub popup: Option<PopupState>,
     pub thinking: ThinkingState,
-    pub preferences: PreferencesV1,
+    pub preferences: PreferencesV2,
     pub notice: Option<String>,
     /// The account identity captured when an eager `/new` operation began.
     /// The outer option distinguishes no request from a request made while the
@@ -28,8 +30,10 @@ pub struct AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self {
+            active_provider: ProviderId::Codex,
             connection: ConnectionState::Disconnected,
             auth: AuthState::Unknown,
+            openrouter: OpenRouterState::default(),
             thread: ThreadState::None,
             turn: TurnState::Idle,
             models: Vec::new(),
@@ -39,9 +43,9 @@ impl Default for AppState {
             context_suppressed_turn: None,
             transcript: Vec::new(),
             transcript_dropped_prefix_bytes: BTreeMap::new(),
-            thread_picker: None,
+            popup: None,
             thinking: ThinkingState::default(),
-            preferences: PreferencesV1::default(),
+            preferences: PreferencesV2::default(),
             notice: None,
             pending_new_thread_scope: None,
             pending_thread_deletions: None,
@@ -51,15 +55,74 @@ impl Default for AppState {
 }
 
 impl AppState {
+    pub fn conversation_popup(&self) -> Option<&ThreadPickerState> {
+        match self.popup.as_ref() {
+            Some(PopupState::Conversation(picker)) => Some(picker),
+            _ => None,
+        }
+    }
+
+    pub fn conversation_popup_mut(&mut self) -> Option<&mut ThreadPickerState> {
+        match self.popup.as_mut() {
+            Some(PopupState::Conversation(picker)) => Some(picker),
+            _ => None,
+        }
+    }
+
+    pub(in crate::app) fn close_conversation_popup(&mut self) {
+        if matches!(self.popup, Some(PopupState::Conversation(_))) {
+            self.popup = None;
+        }
+    }
+
+    pub fn active_conversation_ref(&self) -> Option<ConversationRef> {
+        match self.active_provider {
+            ProviderId::Codex => match &self.thread {
+                ThreadState::Ready { id } => Some(ConversationRef::Codex {
+                    thread_id: id.clone(),
+                }),
+                ThreadState::None
+                | ThreadState::Resuming { .. }
+                | ThreadState::ResumeFailed { .. }
+                | ThreadState::AccountMismatch { .. } => None,
+            },
+            ProviderId::OpenRouter => match &self.openrouter.conversation {
+                OpenRouterConversationState::Ready { id } => Some(ConversationRef::OpenRouter {
+                    conversation_id: id.clone(),
+                }),
+                OpenRouterConversationState::None
+                | OpenRouterConversationState::ResumeFailed { .. } => None,
+            },
+        }
+    }
+
+    pub fn active_turn_ref(&self) -> Option<TurnRef> {
+        match &self.turn {
+            TurnState::Streaming { thread_id, turn_id } => Some(TurnRef::Codex {
+                thread_id: thread_id.clone(),
+                turn_id: turn_id.clone(),
+            }),
+            TurnState::OpenRouterStreaming {
+                conversation_id,
+                turn_id,
+            } => Some(TurnRef::OpenRouter {
+                conversation_id: conversation_id.clone(),
+                turn_id: turn_id.clone(),
+            }),
+            _ => None,
+        }
+    }
+
     /// Returns whether the active turn is waiting for its first visible assistant payload.
     ///
     /// This is deliberately derived from turn and transcript state. The activity indicator is
     /// presentation-only and must never be inserted into conversation history or preferences.
     pub fn is_waiting_for_assistant_text(&self) -> bool {
-        if self.shutting_down
-            || !matches!(self.connection, ConnectionState::Ready { .. })
-            || !matches!(self.auth, AuthState::SignedIn { .. })
-        {
+        let provider_ready = match self.active_provider {
+            ProviderId::Codex => matches!(self.connection, ConnectionState::Ready { .. }),
+            ProviderId::OpenRouter => true,
+        };
+        if self.shutting_down || !provider_ready || !self.active_provider_is_authenticated() {
             return false;
         }
 
@@ -80,10 +143,34 @@ impl AppState {
                             entry.turn_id.as_deref() == Some(turn_id) && !entry.text.is_empty()
                         })
             }
+            TurnState::OpenRouterStreaming {
+                conversation_id,
+                turn_id,
+            } => {
+                let active_matches = matches!(
+                    &self.openrouter.conversation,
+                    OpenRouterConversationState::Ready { id } if id == conversation_id
+                );
+                active_matches
+                    && !self.transcript.iter().rev().any(|entry| {
+                        entry.turn_id.as_deref() == Some(turn_id.as_str())
+                            && entry.role == TranscriptRole::Assistant
+                            && !entry.text.is_empty()
+                    })
+            }
             TurnState::Idle
             | TurnState::Completed { .. }
             | TurnState::Interrupted { .. }
             | TurnState::Failed { .. } => false,
+        }
+    }
+
+    pub fn active_provider_is_authenticated(&self) -> bool {
+        match self.active_provider {
+            ProviderId::Codex => matches!(self.auth, AuthState::SignedIn { .. }),
+            ProviderId::OpenRouter => {
+                self.openrouter.auth == crate::openrouter::OpenRouterAuthStatus::Valid
+            }
         }
     }
 }

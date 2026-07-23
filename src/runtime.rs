@@ -17,9 +17,13 @@ use tokio::time;
 use crate::app::{Action, AppState, AuthState, ConnectionState, Intent};
 use crate::backend::BackendCoordinator;
 use crate::codex::safety::{FullAccessPolicy, IsolationPaths};
-use crate::codex::session::{SessionError, SessionEvent, SessionService};
+use crate::codex::session::SessionService;
 use crate::codex::transport::{AppServerTransport, ProcessSpec};
+use crate::credentials::{CredentialStore, FileCredentialStore};
 use crate::diagnostics::{DiagnosticSink, FileDiagnosticSink};
+use crate::openrouter::{
+    FileOpenRouterStore, OpenRouterClient, OpenRouterConversationStore, OpenRouterService,
+};
 use crate::persistence::FilePreferences;
 use crate::platform::{AppPaths, MacOsBrowser};
 
@@ -32,7 +36,7 @@ mod version;
 
 pub(in crate::runtime) use build::{build_backend, publish};
 pub(in crate::runtime) use scheduler::*;
-pub use types::{RuntimeConfig, RuntimeError, RuntimeHandle};
+pub use types::{RuntimeCommand, RuntimeConfig, RuntimeError, RuntimeHandle};
 pub(in crate::runtime) use version::verify_codex_version;
 #[cfg(test)]
 pub(in crate::runtime) use version::{

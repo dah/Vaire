@@ -9,7 +9,18 @@ pub(in crate::tui) fn render_transcript(
 ) {
     let mut lines = Vec::<Line<'static>>::new();
     if state.transcript.is_empty() && activity_frame.is_none() {
-        let prompt = match (&state.auth, &state.thread) {
+        let prompt = if state.active_provider == crate::provider::ProviderId::OpenRouter {
+            match (&state.openrouter.auth, &state.openrouter.conversation) {
+                (crate::openrouter::OpenRouterAuthStatus::Missing, _) => {
+                    "OpenRouter is signed out. Use /login to enter an API key."
+                }
+                (_, crate::app::OpenRouterConversationState::ResumeFailed { .. }) => {
+                    "The saved OpenRouter conversation could not be resumed. Use /resume or /new; it was not replaced."
+                }
+                _ => "OpenRouter ready. Type a message, use /new, or browse history with /resume.",
+            }
+        } else {
+            match (&state.auth, &state.thread) {
             (AuthState::SignedOut, _) => {
                 "Signed out. Use /login to connect your ChatGPT subscription."
             }
@@ -17,6 +28,7 @@ pub(in crate::tui) fn render_transcript(
                 "The saved thread could not be resumed. Use /resume to choose a thread or /new to start fresh; it was not replaced."
             }
             _ => "Ready. Type a message, use /new, or browse saved threads with /resume.",
+            }
         };
         lines.push(Line::from(Span::styled(
             prompt,
@@ -70,6 +82,15 @@ pub(in crate::tui) fn render_transcript(
 }
 
 pub(in crate::tui) fn render_thinking(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    if state.active_provider == crate::provider::ProviderId::OpenRouter {
+        frame.render_widget(
+            Paragraph::new("OpenRouter reasoning is not collected in this milestone.")
+                .block(Block::default().title(" Reasoning ").borders(Borders::ALL))
+                .wrap(Wrap { trim: true }),
+            area,
+        );
+        return;
+    }
     let mut lines = vec![Line::from(Span::styled(
         "Only reasoning content explicitly emitted by Codex is shown.",
         Style::default().fg(Color::DarkGray),

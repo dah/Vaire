@@ -70,6 +70,7 @@ fn activity_frames_preserve_scrolled_history_and_fit_narrow_terminals() {
     };
     state.transcript = (0..24)
         .map(|index| TranscriptEntry {
+            provider: crate::provider::ProviderId::Codex,
             role: TranscriptRole::User,
             text: format!("historical message {index}"),
             item_id: None,

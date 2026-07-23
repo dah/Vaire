@@ -107,7 +107,7 @@ fn thinking_retention_is_bounded_and_new_turn_clears_only_content() {
             turn_id: "turn".to_owned(),
         },
         models: vec![model("m", true, &["high"], "high")],
-        selected_model: Some("m".to_owned()),
+        selected_model: Some(ModelKey::codex("m").unwrap()),
         selected_reasoning: Some("high".to_owned()),
         ..AppState::default()
     };

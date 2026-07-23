@@ -43,6 +43,7 @@ async fn event_loop(
     let mut state: AppState = states.borrow_and_update().clone();
     let mut ui = UiState::default();
     ui.sync_activity_animation(&state);
+    ui.sync_secret_editor(&state);
     let mut redraw = true;
     let mut tick = time::interval(Duration::from_millis(33));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -68,6 +69,12 @@ async fn event_loop(
                             ui.overlay = Some(message.to_owned());
                         }
                     }
+                    if let Some(secret) = ui.take_submitted_secret() {
+                        if let Err((secret, message)) = runtime.try_send_openrouter_credential(secret) {
+                            ui.restore_openrouter_secret(secret);
+                            ui.overlay = Some(message.to_owned());
+                        }
+                    }
                     redraw = true;
                 }
             }
@@ -80,6 +87,7 @@ async fn event_loop(
                 } else {
                     state = states.borrow_and_update().clone();
                     ui.sync_activity_animation(&state);
+                    ui.sync_secret_editor(&state);
                 }
                 redraw = true;
             }

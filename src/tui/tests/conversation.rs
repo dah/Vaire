@@ -5,6 +5,7 @@ fn renders_ready_streaming_completed_and_error_states() {
     let mut state = ready();
     assert!(screen(&state, &UiState::default(), 100, 20).contains("thread ready"));
     state.transcript.push(TranscriptEntry {
+        provider: crate::provider::ProviderId::Codex,
         role: TranscriptRole::Assistant,
         text: "partial reply".to_owned(),
         item_id: None,
@@ -145,6 +146,7 @@ fn thinking_panel_renders_closed_open_narrow_streaming_and_error_states() {
     assert!(awaiting.contains("Awaiting emitted reasoning"));
 
     state.thinking.entries.push(ThinkingEntry {
+        provider: crate::provider::ProviderId::Codex,
         turn_id: "turn".to_owned(),
         item_id: "why".to_owned(),
         kind: ThinkingKind::Summary,

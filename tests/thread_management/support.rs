@@ -10,7 +10,7 @@ pub(super) use agentharness::codex::safety::{FullAccessPolicy, IsolationPaths};
 pub(super) use agentharness::codex::session::SessionService;
 pub(super) use agentharness::codex::transport::{AppServerTransport, ProcessSpec};
 pub(super) use agentharness::persistence::{
-    AccountScope, LoadOutcome, PersistenceError, PreferencesPort, PreferencesV1,
+    AccountScope, CodexPreferencesV2, LoadOutcome, PersistenceError, PreferencesPort, PreferencesV2,
 };
 pub(super) use agentharness::platform::{BrowserError, BrowserOpener};
 pub(super) use serde_json::json;
@@ -36,14 +36,14 @@ pub(super) async fn session(root: &Path, body: &str) -> SessionService {
 }
 
 #[derive(Clone)]
-pub(super) struct MemoryPreferences(Arc<Mutex<PreferencesV1>>);
+pub(super) struct MemoryPreferences(Arc<Mutex<PreferencesV2>>);
 
 impl MemoryPreferences {
-    pub(super) fn new(value: PreferencesV1) -> Self {
+    pub(super) fn new(value: PreferencesV2) -> Self {
         Self(Arc::new(Mutex::new(value)))
     }
 
-    pub(super) fn value(&self) -> PreferencesV1 {
+    pub(super) fn value(&self) -> PreferencesV2 {
         self.0.lock().unwrap().clone()
     }
 }
@@ -54,10 +54,11 @@ impl PreferencesPort for MemoryPreferences {
             preferences: self.value(),
             notice: None,
             may_overwrite: true,
+            needs_save: false,
         })
     }
 
-    fn save(&self, preferences: &PreferencesV1) -> Result<(), PersistenceError> {
+    fn save(&self, preferences: &PreferencesV2) -> Result<(), PersistenceError> {
         *self.0.lock().unwrap() = preferences.clone();
         Ok(())
     }
@@ -72,24 +73,26 @@ impl BrowserOpener for NoopBrowser {
     }
 }
 
-pub(super) fn preferences(thread_id: Option<&str>) -> PreferencesV1 {
+pub(super) fn preferences(thread_id: Option<&str>) -> PreferencesV2 {
     let scope = AccountScope::from_chatgpt_email("user@example.com").unwrap();
-    PreferencesV1 {
-        account_scope: Some(scope.clone()),
-        thread_id: thread_id.map(str::to_owned),
-        model_id: Some("m1".to_owned()),
-        reasoning_effort: Some("high".to_owned()),
-        thread_account_scopes: [
-            "thr-old",
-            "thr-active",
-            "thr-old-a",
-            "thr-old-b",
-            "thr-old-c",
-        ]
-        .into_iter()
-        .map(|id| (id.to_owned(), scope.clone()))
-        .collect(),
-        ..PreferencesV1::default()
+    PreferencesV2 {
+        codex: CodexPreferencesV2 {
+            account_scope: Some(scope.clone()),
+            auto_resume_thread_id: thread_id.map(str::to_owned),
+            model_id: Some("m1".to_owned()),
+            reasoning_effort: Some("high".to_owned()),
+            thread_account_scopes: [
+                "thr-old",
+                "thr-active",
+                "thr-old-a",
+                "thr-old-b",
+                "thr-old-c",
+            ]
+            .into_iter()
+            .map(|id| (id.to_owned(), scope.clone()))
+            .collect(),
+        },
+        ..PreferencesV2::default()
     }
 }
 

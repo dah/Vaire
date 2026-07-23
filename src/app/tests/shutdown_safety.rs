@@ -55,7 +55,7 @@ fn safety_violation_settles_busy_picker_and_pending_thread_work() {
         state.reduce(Action::Intent(Intent::NewThread)),
         vec![Effect::StartNewThread]
     );
-    state.thread_picker = Some(ThreadPickerState {
+    state.popup = conversation_popup(ThreadPickerState {
         phase: ThreadPickerPhase::Deleting { requested: 1 },
         threads: vec![thread("thr-old", "Old", 1)],
         selected: 0,
@@ -67,7 +67,7 @@ fn safety_violation_settles_busy_picker_and_pending_thread_work() {
         "unknown/request".to_owned(),
     )));
 
-    let picker = state.thread_picker.as_ref().unwrap();
+    let picker = state.conversation_popup().unwrap();
     assert!(matches!(picker.phase, ThreadPickerPhase::Failed));
     assert!(picker.message.as_deref().unwrap().contains("denied"));
     let snapshot = state.clone();

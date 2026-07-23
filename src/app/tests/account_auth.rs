@@ -9,10 +9,13 @@ fn signed_out_send_is_local_and_same_account_auto_resumes() {
     assert!(state.notice.as_deref().unwrap().contains("sign in"));
     let scope = AccountScope::from_chatgpt_email("a@example.com");
     state.reduce(Action::Event(DomainEvent::PreferencesLoaded(
-        PreferencesV1 {
-            account_scope: scope.clone(),
-            thread_id: Some("thr-old".to_owned()),
-            ..PreferencesV1::default()
+        PreferencesV2 {
+            codex: CodexPreferencesV2 {
+                account_scope: scope.clone(),
+                auto_resume_thread_id: Some("thr-old".to_owned()),
+                ..CodexPreferencesV2::default()
+            },
+            ..PreferencesV2::default()
         },
     )));
     assert_eq!(
@@ -77,7 +80,7 @@ fn account_switch_settles_old_turn_closes_picker_and_rejects_late_events() {
     };
     state.context_remaining_percent = Some(61);
     seed_thinking(&mut state, "old account reasoning");
-    state.thread_picker = Some(ThreadPickerState {
+    state.popup = conversation_popup(ThreadPickerState {
         phase: ThreadPickerPhase::Ready,
         threads: vec![thread("thr-old", "Old account thread", 1)],
         selected: 0,
@@ -96,7 +99,7 @@ fn account_switch_settles_old_turn_closes_picker_and_rejects_late_events() {
         state.thread,
         ThreadState::AccountMismatch { ref id } if id == "thr-active"
     ));
-    assert!(state.thread_picker.is_none());
+    assert!(state.conversation_popup().is_none());
     assert!(state.thinking.entries.is_empty());
     assert_eq!(state.context_remaining_percent, None);
 
@@ -115,9 +118,9 @@ fn account_switch_closes_picker_even_when_new_scope_matches_saved_thread() {
         id: "thr-saved".to_owned(),
     };
     state.turn = TurnState::Starting;
-    state.preferences.account_scope = saved_scope.clone();
-    state.preferences.thread_id = Some("thr-saved".to_owned());
-    state.thread_picker = Some(ThreadPickerState {
+    state.preferences.codex.account_scope = saved_scope.clone();
+    state.preferences.codex.auto_resume_thread_id = Some("thr-saved".to_owned());
+    state.popup = conversation_popup(ThreadPickerState {
         phase: ThreadPickerPhase::Ready,
         threads: vec![thread("thr-old", "Previous account thread", 1)],
         selected: 0,
@@ -128,7 +131,7 @@ fn account_switch_closes_picker_even_when_new_scope_matches_saved_thread() {
     assert!(state
         .reduce(Action::Event(DomainEvent::AccountLoaded(saved_scope)))
         .is_empty());
-    assert!(state.thread_picker.is_none());
+    assert!(state.conversation_popup().is_none());
     assert!(matches!(state.turn, TurnState::Idle));
     assert!(matches!(
         state.thread,
@@ -145,7 +148,7 @@ fn unsupported_account_detaches_saved_thread_and_rejects_late_events() {
     };
     state.context_remaining_percent = Some(61);
     seed_thinking(&mut state, "old account reasoning");
-    state.thread_picker = Some(ThreadPickerState {
+    state.popup = conversation_popup(ThreadPickerState {
         phase: ThreadPickerPhase::Ready,
         threads: vec![thread("thr-old", "Old account thread", 1)],
         selected: 0,
@@ -163,7 +166,7 @@ fn unsupported_account_detaches_saved_thread_and_rejects_late_events() {
         state.thread,
         ThreadState::AccountMismatch { ref id } if id == "thr-active"
     ));
-    assert!(state.thread_picker.is_none());
+    assert!(state.conversation_popup().is_none());
     assert!(state.thinking.entries.is_empty());
     assert_eq!(state.context_remaining_percent, None);
 

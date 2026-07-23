@@ -1,4 +1,10 @@
 use super::*;
+use crate::credentials::SecretValue;
+
+pub enum RuntimeCommand {
+    Intent(Intent),
+    OpenRouterCredential(SecretValue),
+}
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
@@ -27,10 +33,12 @@ pub enum RuntimeError {
     UnsupportedVersion(String),
     #[error("could not start the dedicated Codex app-server: {0}")]
     AppServer(String),
+    #[error("could not prepare OpenRouter support: {0}")]
+    OpenRouter(String),
 }
 
 pub struct RuntimeHandle {
-    intents: mpsc::Sender<Intent>,
+    intents: mpsc::Sender<RuntimeCommand>,
     shutdowns: mpsc::Sender<()>,
     states: watch::Receiver<AppState>,
     task: JoinHandle<()>,
@@ -59,14 +67,38 @@ impl RuntimeHandle {
     }
 
     pub async fn send(&self, intent: Intent) {
-        let _ = self.intents.send(intent).await;
+        let _ = self.intents.send(RuntimeCommand::Intent(intent)).await;
     }
 
     pub fn try_send(&self, intent: Intent) -> Result<(), &'static str> {
-        self.intents.try_send(intent).map_err(|error| match error {
-            mpsc::error::TrySendError::Full(_) => "background backend is busy; try again",
-            mpsc::error::TrySendError::Closed(_) => "background backend has stopped",
-        })
+        self.intents
+            .try_send(RuntimeCommand::Intent(intent))
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => "background backend is busy; try again",
+                mpsc::error::TrySendError::Closed(_) => "background backend has stopped",
+            })
+    }
+
+    pub fn try_send_openrouter_credential(
+        &self,
+        value: SecretValue,
+    ) -> Result<(), (SecretValue, &'static str)> {
+        self.intents
+            .try_send(RuntimeCommand::OpenRouterCredential(value))
+            .map_err(|error| {
+                let (command, message) = match error {
+                    mpsc::error::TrySendError::Full(command) => {
+                        (command, "background backend is busy; try again")
+                    }
+                    mpsc::error::TrySendError::Closed(command) => {
+                        (command, "background backend has stopped")
+                    }
+                };
+                let RuntimeCommand::OpenRouterCredential(value) = command else {
+                    unreachable!("submitted an OpenRouter credential command")
+                };
+                (value, message)
+            })
     }
 
     pub fn request_shutdown(&self) {

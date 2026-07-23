@@ -11,6 +11,7 @@ pub enum ThinkingKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ThinkingEntry {
+    pub provider: ProviderId,
     pub turn_id: String,
     pub item_id: String,
     pub kind: ThinkingKind,
@@ -52,6 +53,7 @@ impl ThinkingState {
             self.entries.remove(0);
         }
         self.entries.push(ThinkingEntry {
+            provider: crate::provider::ProviderId::Codex,
             turn_id: turn_id.to_owned(),
             item_id: item_id.to_owned(),
             kind,

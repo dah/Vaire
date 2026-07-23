@@ -57,6 +57,7 @@ fn resume_results_are_correlated_and_cannot_cross_account_boundaries() {
         .reduce(Action::Event(DomainEvent::ResumeSucceeded {
             id: "thr-active".to_owned(),
             history: vec![TranscriptEntry {
+                provider: crate::provider::ProviderId::Codex,
                 role: TranscriptRole::Assistant,
                 text: "wrong account history".to_owned(),
                 item_id: None,
@@ -77,8 +78,8 @@ fn resume_results_are_correlated_and_cannot_cross_account_boundaries() {
 #[test]
 fn account_change_and_resume_failure_preserve_saved_id() {
     let mut state = AppState::default();
-    state.preferences.thread_id = Some("thr-old".to_owned());
-    state.preferences.account_scope = AccountScope::from_chatgpt_email("old@example.com");
+    state.preferences.codex.auto_resume_thread_id = Some("thr-old".to_owned());
+    state.preferences.codex.account_scope = AccountScope::from_chatgpt_email("old@example.com");
     state.reduce(Action::Event(DomainEvent::AccountLoaded(
         AccountScope::from_chatgpt_email("new@example.com"),
     )));
@@ -87,7 +88,10 @@ fn account_change_and_resume_failure_preserve_saved_id() {
         id: "thr-old".to_owned(),
         message: "stale".to_owned(),
     }));
-    assert_eq!(state.preferences.thread_id.as_deref(), Some("thr-old"));
+    assert_eq!(
+        state.preferences.codex.auto_resume_thread_id.as_deref(),
+        Some("thr-old")
+    );
 }
 
 #[test]
@@ -101,13 +105,16 @@ fn thread_picker_requires_account_identity_and_can_safely_replace_a_mismatched_a
         thread: ThreadState::AccountMismatch {
             id: "thr-saved".to_owned(),
         },
-        preferences: PreferencesV1 {
-            account_scope: saved_scope.clone(),
-            thread_id: Some("thr-saved".to_owned()),
-            ..PreferencesV1::default()
+        preferences: PreferencesV2 {
+            codex: CodexPreferencesV2 {
+                account_scope: saved_scope.clone(),
+                auto_resume_thread_id: Some("thr-saved".to_owned()),
+                ..CodexPreferencesV2::default()
+            },
+            ..PreferencesV2::default()
         },
         models: vec![model("m1", true, &["high"], "high")],
-        selected_model: Some("m1".to_owned()),
+        selected_model: Some(ModelKey::codex("m1").unwrap()),
         ..AppState::default()
     };
 
@@ -115,16 +122,26 @@ fn thread_picker_requires_account_identity_and_can_safely_replace_a_mismatched_a
         state.reduce(Action::Intent(Intent::Resume)),
         vec![Effect::ListThreads]
     );
-    assert_eq!(state.preferences.thread_id.as_deref(), Some("thr-saved"));
+    assert_eq!(
+        state.preferences.codex.auto_resume_thread_id.as_deref(),
+        Some("thr-saved")
+    );
     assert!(matches!(
-        state.thread_picker.as_ref().map(|picker| &picker.phase),
+        state.conversation_popup().map(|picker| &picker.phase),
         Some(ThreadPickerPhase::Loading)
     ));
     state.reduce(Action::Intent(Intent::ThreadPickerClose));
 
     state.auth = AuthState::SignedIn { scope: None };
-    assert!(state.reduce(Action::Intent(Intent::Resume)).is_empty());
-    assert!(state.notice.as_deref().unwrap().contains("identity"));
+    assert_eq!(
+        state.reduce(Action::Intent(Intent::Resume)),
+        vec![Effect::ListThreads]
+    );
+    assert!(matches!(
+        state.conversation_popup().map(|picker| &picker.phase),
+        Some(ThreadPickerPhase::Loading)
+    ));
+    state.reduce(Action::Intent(Intent::ThreadPickerClose));
 
     state.auth = AuthState::SignedIn { scope: saved_scope };
     state.thread = ThreadState::ResumeFailed {
@@ -136,7 +153,7 @@ fn thread_picker_requires_account_identity_and_can_safely_replace_a_mismatched_a
         vec![Effect::ListThreads]
     );
     assert!(matches!(
-        state.thread_picker.as_ref().map(|picker| &picker.phase),
+        state.conversation_popup().map(|picker| &picker.phase),
         Some(ThreadPickerPhase::Loading)
     ));
 }

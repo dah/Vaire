@@ -1,7 +1,7 @@
 use crate::app::Intent;
 
 pub const HELP_TEXT: &str = "\
-Commands:\n  /login                 Sign in with ChatGPT in your browser\n  /login device          Use device-code sign-in if browser callback login fails\n  /login browser         Explicitly use browser callback sign-in\n  /logout                Sign out, or cancel a pending sign-in\n  /model [id]            List or select an available model\n  /reasoning [value]     List or select a reasoning level\n  /new                   Start and switch to a new thread\n  /resume                Browse and resume saved threads\n  /thinking              Toggle the Reasoning panel\n  /help                  Show this help\n  /quit                  Exit AgentHarness\nThread picker: arrows or j/k move, Enter resumes, d permanently deletes one inactive thread, D permanently clears all inactive threads, Esc closes. Deletion always requires Enter confirmation.\nKeys: Enter sends, Alt-Enter inserts a newline, Escape interrupts or closes help, PageUp/PageDown scroll, Ctrl-C quits.";
+Commands:\n  /login                 Choose Codex or OpenRouter sign-in and manage the OpenRouter catalog\n  /login browser         Start Codex browser callback sign-in directly\n  /login device          Start Codex device-code sign-in directly\n  /logout                Choose Codex or OpenRouter to sign out\n  /model                 Browse searchable Codex and OpenRouter models\n  /reasoning [value]     List or select a Codex reasoning level\n  /new                   Start and switch to a new conversation\n  /resume                Browse saved Codex and OpenRouter conversations\n  /thinking              Toggle the Reasoning panel\n  /help                  Show this help\n  /quit                  Exit AgentHarness\nProvider popup: arrows or j/k move; Enter selects. For OpenRouter, c manages the catalog and r revalidates or refreshes it; d starts Codex device login.\nModel/catalog: type to search, Backspace edits, Space toggles catalog models, Enter commits, Esc discards or closes.\nConversation picker: arrows or j/k move, Enter resumes, d permanently deletes one inactive conversation, D permanently clears all inactive conversations, Esc closes. Deletion always requires Enter confirmation.\nSwitching provider starts a new conversation; use /resume for history.\nKeys: Enter sends, Alt-Enter inserts a newline, Escape interrupts or closes help, PageUp/PageDown scroll, Ctrl-C quits.";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ParseError {
@@ -52,15 +52,14 @@ pub fn parse(input: &str) -> Result<Intent, ParseError> {
 
     match command {
         "/login" => match argument {
-            None | Some("browser") => Ok(Intent::Login),
+            None => Ok(Intent::ShowLogin),
+            Some("browser") => Ok(Intent::Login),
             Some("device") => Ok(Intent::LoginDevice),
             Some(_) => Err(ParseError::UnexpectedArgument(command.to_owned())),
         },
-        "/logout" => no_argument(Intent::Logout),
+        "/logout" => no_argument(Intent::ShowLogout),
         "/new" => no_argument(Intent::NewThread),
-        "/model" => {
-            Ok(argument.map_or(Intent::ShowModels, |id| Intent::SelectModel(id.to_owned())))
-        }
+        "/model" => no_argument(Intent::ShowModels),
         "/reasoning" => Ok(argument.map_or(Intent::ShowReasoning, |value| {
             Intent::SelectReasoning(value.to_owned())
         })),
@@ -85,10 +84,6 @@ mod tests {
         );
         assert_eq!(parse("/model"), Ok(Intent::ShowModels));
         assert_eq!(
-            parse("/model codex-current"),
-            Ok(Intent::SelectModel("codex-current".to_owned()))
-        );
-        assert_eq!(
             parse("/reasoning high"),
             Ok(Intent::SelectReasoning("high".to_owned()))
         );
@@ -96,10 +91,10 @@ mod tests {
         assert_eq!(parse("/new"), Ok(Intent::NewThread));
         assert_eq!(parse("/thinking"), Ok(Intent::ToggleThinking));
         assert_eq!(parse("/reasoning"), Ok(Intent::ShowReasoning));
-        assert_eq!(parse("/login"), Ok(Intent::Login));
+        assert_eq!(parse("/login"), Ok(Intent::ShowLogin));
         assert_eq!(parse("/login browser"), Ok(Intent::Login));
         assert_eq!(parse("/login device"), Ok(Intent::LoginDevice));
-        assert_eq!(parse("/logout"), Ok(Intent::Logout));
+        assert_eq!(parse("/logout"), Ok(Intent::ShowLogout));
         assert_eq!(parse("/help"), Ok(Intent::Help));
         assert_eq!(parse("/quit"), Ok(Intent::Quit));
         assert_eq!(
@@ -119,6 +114,10 @@ mod tests {
             Err(ParseError::UnexpectedArgument("/login".to_owned()))
         );
         assert_eq!(
+            parse("/model codex-current"),
+            Err(ParseError::UnexpectedArgument("/model".to_owned()))
+        );
+        assert_eq!(
             parse("/thinking hidden"),
             Err(ParseError::UnexpectedArgument("/thinking".to_owned()))
         );
@@ -136,10 +135,15 @@ mod tests {
             "use /login, /login browser, or /login device"
         );
         assert!(HELP_TEXT.contains("/login device"));
-        assert!(HELP_TEXT.contains("D permanently clears all inactive"));
+        assert!(HELP_TEXT.contains("Choose Codex or OpenRouter sign-in"));
+        assert!(HELP_TEXT.contains("manages the catalog"));
+        assert!(HELP_TEXT.contains("saved Codex and OpenRouter conversations"));
+        assert!(HELP_TEXT.contains("D permanently clears all inactive conversations"));
+        assert!(HELP_TEXT
+            .contains("Switching provider starts a new conversation; use /resume for history."));
         assert!(HELP_TEXT.contains("/quit"));
         assert!(HELP_TEXT.contains("/thinking              Toggle the Reasoning panel"));
-        assert!(HELP_TEXT.contains("/reasoning [value]     List or select a reasoning level"));
+        assert!(HELP_TEXT.contains("/reasoning [value]     List or select a Codex reasoning level"));
         assert!(HELP_TEXT.contains("Escape interrupts"));
     }
 }

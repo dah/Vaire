@@ -62,6 +62,44 @@ pub(in crate::tui) fn header_text(state: &AppState, width: u16) -> String {
 }
 
 pub(in crate::tui) fn status_text(state: &AppState) -> String {
+    if state.active_provider == crate::provider::ProviderId::OpenRouter {
+        let auth = match state.openrouter.auth {
+            crate::openrouter::OpenRouterAuthStatus::Missing => "signed out",
+            crate::openrouter::OpenRouterAuthStatus::Unverified => "unverified",
+            crate::openrouter::OpenRouterAuthStatus::Valid => "configured",
+            crate::openrouter::OpenRouterAuthStatus::Invalid => "invalid credential",
+            crate::openrouter::OpenRouterAuthStatus::CredentialUnavailable => {
+                "credential unavailable"
+            }
+        };
+        let conversation = match state.openrouter.conversation {
+            crate::app::OpenRouterConversationState::None => "no conversation",
+            crate::app::OpenRouterConversationState::Ready { .. } => "conversation ready",
+            crate::app::OpenRouterConversationState::ResumeFailed { .. } => "resume failed",
+        };
+        let model = state
+            .selected_model
+            .as_ref()
+            .filter(|key| key.provider == crate::provider::ProviderId::OpenRouter)
+            .map_or("model?", |key| key.id.as_str());
+        let turn = match &state.turn {
+            TurnState::Idle => "idle",
+            TurnState::Starting => "starting",
+            TurnState::OpenRouterStreaming { .. } => "streaming",
+            TurnState::Completed { .. } => "completed",
+            TurnState::Interrupted { .. } => "interrupted",
+            TurnState::Failed { .. } => "failed",
+            TurnState::Streaming { .. } => "stale Codex turn",
+        };
+        let shutdown = if state.shutting_down {
+            " • shutting down"
+        } else {
+            ""
+        };
+        return sanitize_header_text(&format!(
+            " OpenRouter • {auth} • {conversation} • {model}/reasoning n/a • {turn}{shutdown}"
+        ));
+    }
     let connection = match &state.connection {
         ConnectionState::Disconnected => "offline".to_owned(),
         ConnectionState::Connecting => "connecting".to_owned(),
@@ -89,13 +127,16 @@ pub(in crate::tui) fn status_text(state: &AppState) -> String {
         TurnState::Idle => "idle",
         TurnState::Starting => "starting",
         TurnState::Streaming { .. } => "streaming",
+        TurnState::OpenRouterStreaming { .. } => "streaming",
         TurnState::Completed { .. } => "completed",
         TurnState::Interrupted { .. } => "interrupted",
         TurnState::Failed { .. } => "failed",
     };
     let model = state
         .selected_model
-        .clone()
+        .as_ref()
+        .filter(|key| key.provider == crate::provider::ProviderId::Codex)
+        .map(|key| key.id.clone())
         .unwrap_or_else(|| "model?".to_owned());
     let reasoning = state
         .selected_reasoning
@@ -107,7 +148,7 @@ pub(in crate::tui) fn status_text(state: &AppState) -> String {
         ""
     };
     sanitize_header_text(&format!(
-        " {connection} • {auth} • {thread} • {model}/{reasoning} • {turn}{shutdown}"
+        " Codex • {connection} • {auth} • {thread} • {model}/{reasoning} • {turn}{shutdown}"
     ))
 }
 

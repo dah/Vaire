@@ -1,28 +1,54 @@
 use super::{
-    AccountScope, FilePreferences, LoadNotice, PreferencesPort, PreferencesV1,
-    MAX_PREFERENCES_BYTES, PREFERENCES_VERSION,
+    AccountScope, CodexPreferencesV2, FilePreferences, LoadNotice, OpenRouterPreferencesV2,
+    PreferencesPort, PreferencesV2, MAX_PREFERENCES_BYTES, PREFERENCES_VERSION,
 };
-use std::collections::BTreeMap;
+use crate::provider::{OpenRouterConversationId, ProviderId};
+use crate::storage::{CommitStatus, ScriptedDirectorySync};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::os::unix::fs::PermissionsExt;
+use std::sync::Arc;
 use tempfile::tempdir;
 
+fn scope() -> AccountScope {
+    AccountScope::from_chatgpt_email("user@example.com").unwrap()
+}
+
 #[test]
-fn round_trips_atomically_with_owner_only_permissions() {
+fn rename_commit_is_reported_when_directory_sync_fails() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("preferences.json");
+    let store =
+        FilePreferences::with_directory_sync(&path, Arc::new(ScriptedDirectorySync::fail_after(0)));
+
+    assert_eq!(
+        store.save_with_commit(&PreferencesV2::default()).unwrap(),
+        CommitStatus::CommittedUnverified
+    );
+    assert_eq!(store.load().unwrap().preferences, PreferencesV2::default());
+}
+
+#[test]
+fn round_trips_v2_atomically_with_owner_only_permissions() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("state").join("preferences.json");
     let store = FilePreferences::new(&path);
-    let preferences = PreferencesV1 {
+    let preferences = PreferencesV2 {
         version: PREFERENCES_VERSION,
-        account_scope: AccountScope::from_chatgpt_email(" USER@Example.COM "),
-        thread_id: Some("thr-1".to_owned()),
-        model_id: Some("model-1".to_owned()),
-        reasoning_effort: Some("high".to_owned()),
-        thread_account_scopes: BTreeMap::from([(
-            "thr-1".to_owned(),
-            AccountScope::from_chatgpt_email("user@example.com").unwrap(),
-        )]),
+        active_provider: ProviderId::Codex,
+        codex: CodexPreferencesV2 {
+            account_scope: AccountScope::from_chatgpt_email(" USER@Example.COM "),
+            auto_resume_thread_id: Some("thr-1".to_owned()),
+            model_id: Some("model-1".to_owned()),
+            reasoning_effort: Some("high".to_owned()),
+            thread_account_scopes: BTreeMap::from([("thr-1".to_owned(), scope())]),
+        },
+        openrouter: OpenRouterPreferencesV2 {
+            selected_model_id: Some("anthropic/claude".to_owned()),
+            enabled_model_ids: BTreeSet::from(["anthropic/claude".to_owned()]),
+            ..OpenRouterPreferencesV2::default()
+        },
     };
     store.save(&preferences).unwrap();
     assert_eq!(store.load().unwrap().preferences, preferences);
@@ -41,27 +67,108 @@ fn round_trips_atomically_with_owner_only_permissions() {
 }
 
 #[test]
-fn missing_corrupt_and_unknown_versions_are_clean_first_runs() {
+fn migrates_every_v1_field_exactly_and_marks_it_for_atomic_resave() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("preferences.json");
+    fs::write(
+        &path,
+        br#"{
+          "version": 1,
+          "account_scope": {"kind":"chatgpt_email","value":"user@example.com"},
+          "thread_id": "thr-v1",
+          "model_id": "model-v1",
+          "reasoning_effort": "high",
+          "thread_account_scopes": {
+            "thr-v1": {"kind":"chatgpt_email","value":"user@example.com"},
+            "thr-old": {"kind":"chatgpt_email","value":"user@example.com"}
+          }
+        }"#,
+    )
+    .unwrap();
+
+    let outcome = FilePreferences::new(&path).load().unwrap();
+    assert_eq!(outcome.notice, Some(LoadNotice::MigratedV1));
+    assert!(outcome.may_overwrite);
+    assert!(outcome.needs_save);
+    assert_eq!(outcome.preferences.version, 2);
+    assert_eq!(outcome.preferences.active_provider, ProviderId::Codex);
+    assert_eq!(
+        outcome.preferences.codex,
+        CodexPreferencesV2 {
+            account_scope: Some(scope()),
+            auto_resume_thread_id: Some("thr-v1".to_owned()),
+            model_id: Some("model-v1".to_owned()),
+            reasoning_effort: Some("high".to_owned()),
+            thread_account_scopes: BTreeMap::from([
+                ("thr-old".to_owned(), scope()),
+                ("thr-v1".to_owned(), scope()),
+            ]),
+        }
+    );
+    assert_eq!(
+        outcome.preferences.openrouter,
+        OpenRouterPreferencesV2::default()
+    );
+}
+
+#[test]
+fn missing_corrupt_and_unknown_versions_are_safe() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("preferences.json");
     let store = FilePreferences::new(&path);
     assert_eq!(store.load().unwrap().notice, Some(LoadNotice::Missing));
-    fs::write(
-            &path,
-            br#"{"version":1,"account_scope":null,"thread_id":null,"model_id":null,"reasoning_effort":null}"#,
-        )
-        .unwrap();
-    let prior_v1 = store.load().unwrap();
-    assert_eq!(prior_v1.notice, None);
-    assert!(prior_v1.preferences.thread_account_scopes.is_empty());
+
     fs::write(&path, b"{not-json").unwrap();
     let corrupt = store.load().unwrap();
     assert_eq!(corrupt.notice, Some(LoadNotice::Corrupt));
     assert!(!corrupt.may_overwrite);
+
     fs::write(&path, br#"{"version":99}"#).unwrap();
     let future = store.load().unwrap();
     assert_eq!(future.notice, Some(LoadNotice::UnsupportedVersion(99)));
     assert!(!future.may_overwrite);
+    assert!(!future.needs_save);
+}
+
+#[test]
+fn enforces_the_single_active_provider_resume_pointer_invariant() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("preferences.json");
+    let store = FilePreferences::new(&path);
+    let conversation: OpenRouterConversationId =
+        "or_00000000000000000000000000000000".parse().unwrap();
+
+    let mut codex = PreferencesV2::default();
+    codex.codex.auto_resume_thread_id = Some("thr".to_owned());
+    codex.openrouter.auto_resume_conversation_id = Some(conversation.clone());
+    assert!(store.save(&codex).is_err());
+
+    let mut openrouter = PreferencesV2 {
+        active_provider: ProviderId::OpenRouter,
+        ..PreferencesV2::default()
+    };
+    openrouter.codex.auto_resume_thread_id = Some("thr".to_owned());
+    assert!(store.save(&openrouter).is_err());
+
+    openrouter.set_auto_resume_conversation(Some(conversation));
+    assert_eq!(openrouter.active_provider, ProviderId::OpenRouter);
+    assert!(openrouter.codex.auto_resume_thread_id.is_none());
+    store.save(&openrouter).unwrap();
+
+    openrouter.set_auto_resume_thread(Some("thr-new".to_owned()));
+    assert_eq!(openrouter.active_provider, ProviderId::Codex);
+    assert!(openrouter.openrouter.auto_resume_conversation_id.is_none());
+    store.save(&openrouter).unwrap();
+
+    let mut independent_clear = PreferencesV2::default();
+    independent_clear.codex.auto_resume_thread_id = Some("thr-keep".to_owned());
+    independent_clear.set_auto_resume_conversation(None);
+    assert_eq!(
+        independent_clear.codex.auto_resume_thread_id.as_deref(),
+        Some("thr-keep")
+    );
+    independent_clear.set_auto_resume_thread(None);
+    assert!(independent_clear.codex.auto_resume_thread_id.is_none());
 }
 
 #[test]
@@ -70,11 +177,11 @@ fn rejects_semantically_corrupt_and_oversized_preferences_without_overwriting_th
     let path = temp.path().join("preferences.json");
     let store = FilePreferences::new(&path);
     let malformed = [
-            br#"{"version":1,"account_scope":{"kind":"chatgpt_email","value":" USER@example.com "},"thread_id":null,"model_id":null,"reasoning_effort":null}"#.as_slice(),
-            br#"{"version":1,"account_scope":{"kind":"chatgpt_email","value":"a@example.com"},"thread_id":"thr","model_id":null,"reasoning_effort":null,"thread_account_scopes":{"thr":{"kind":"chatgpt_email","value":"b@example.com"}}}"#.as_slice(),
-            br#"{"version":1,"account_scope":null,"thread_id":" ","model_id":null,"reasoning_effort":null}"#.as_slice(),
-            br#"{"version":4294967297}"#.as_slice(),
-        ];
+        br#"{"version":1,"account_scope":{"kind":"chatgpt_email","value":" USER@example.com "},"thread_id":null,"model_id":null,"reasoning_effort":null}"#.as_slice(),
+        br#"{"version":1,"account_scope":{"kind":"chatgpt_email","value":"a@example.com"},"thread_id":"thr","model_id":null,"reasoning_effort":null,"thread_account_scopes":{"thr":{"kind":"chatgpt_email","value":"b@example.com"}}}"#.as_slice(),
+        br#"{"version":2,"active_provider":"codex","codex":{"account_scope":null,"auto_resume_thread_id":null,"model_id":" ","reasoning_effort":null,"thread_account_scopes":{}},"openrouter":{"auto_resume_conversation_id":null,"selected_model_id":null,"enabled_model_ids":[]}}"#.as_slice(),
+        br#"{"version":4294967297}"#.as_slice(),
+    ];
     for bytes in malformed {
         fs::write(&path, bytes).unwrap();
         let outcome = store.load().unwrap();
@@ -83,17 +190,29 @@ fn rejects_semantically_corrupt_and_oversized_preferences_without_overwriting_th
     }
 
     fs::write(&path, vec![b' '; MAX_PREFERENCES_BYTES + 1]).unwrap();
-    let oversized = store.load().unwrap();
-    assert_eq!(oversized.notice, Some(LoadNotice::Corrupt));
-    assert!(!oversized.may_overwrite);
+    assert_eq!(store.load().unwrap().notice, Some(LoadNotice::Corrupt));
 
-    let valid = PreferencesV1::default();
+    let valid = PreferencesV2::default();
     store.save(&valid).unwrap();
     let before = fs::read(&path).unwrap();
     let mut too_large = valid;
-    too_large.model_id = Some("m".repeat(MAX_PREFERENCES_BYTES));
+    too_large.codex.model_id = Some("m".repeat(MAX_PREFERENCES_BYTES));
     assert!(store.save(&too_large).is_err());
     assert_eq!(fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn serialized_v2_has_no_credential_or_runtime_secret_fields() {
+    let json = serde_json::to_string(&PreferencesV2::default()).unwrap();
+    for forbidden in [
+        "api_key",
+        "credential",
+        "authorization",
+        "transcript",
+        "context_remaining",
+    ] {
+        assert!(!json.contains(forbidden));
+    }
 }
 
 #[test]
@@ -108,14 +227,14 @@ fn atomic_save_never_follows_a_predictable_legacy_temp_symlink() {
     symlink(&victim, &legacy_temp).unwrap();
 
     let store = FilePreferences::new(&path);
-    store.save(&PreferencesV1::default()).unwrap();
+    store.save(&PreferencesV2::default()).unwrap();
 
     assert_eq!(fs::read(&victim).unwrap(), b"must remain unchanged");
     assert!(!fs::symlink_metadata(&path)
         .unwrap()
         .file_type()
         .is_symlink());
-    assert_eq!(store.load().unwrap().preferences, PreferencesV1::default());
+    assert_eq!(store.load().unwrap().preferences, PreferencesV2::default());
 }
 
 #[test]
@@ -126,7 +245,7 @@ fn failed_atomic_replace_preserves_the_target_and_cleans_its_temp_file() {
     fs::write(path.join("sentinel"), b"preserve me").unwrap();
     let store = FilePreferences::new(&path);
 
-    assert!(store.save(&PreferencesV1::default()).is_err());
+    assert!(store.save(&PreferencesV2::default()).is_err());
 
     assert_eq!(fs::read(path.join("sentinel")).unwrap(), b"preserve me");
     let temp_prefix = format!(".preferences.json.{}.", std::process::id());

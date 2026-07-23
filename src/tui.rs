@@ -8,11 +8,14 @@ use ratatui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     app::{
-        AppState, AuthState, ConnectionState, Intent, ThinkingKind, ThreadDeleteConfirmation,
-        ThreadPickerPhase, ThreadPickerState, ThreadState, TranscriptRole, TurnState,
+        catalog_search_matches, model_search_matches, AppState, AuthPopupMode, AuthState,
+        ConnectionState, Intent, OpenRouterCredentialValidation, PopupState, ThinkingKind,
+        ThreadDeleteConfirmation, ThreadPickerPhase, ThreadPickerState, ThreadState,
+        TranscriptRole, TurnState,
     },
     command::{parse, HELP_TEXT},
     text::append_sanitized_terminal_text,
@@ -27,6 +30,7 @@ mod conversation;
 mod display;
 mod header_message;
 mod layout;
+mod popup;
 mod state;
 mod thread_picker;
 
@@ -35,6 +39,7 @@ pub(in crate::tui) use conversation::*;
 pub(in crate::tui) use display::*;
 pub(in crate::tui) use header_message::*;
 pub use layout::render;
+pub(in crate::tui) use popup::render_popup;
 pub use state::UiState;
 #[cfg(test)]
 pub(in crate::tui) use state::{ACTIVITY_FRAMES, ACTIVITY_TICKS_PER_FRAME, MAX_COMPOSER_BYTES};

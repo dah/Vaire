@@ -39,7 +39,7 @@ IFS= read -r hold
 
     backend.handle_intent(Intent::Resume).await.unwrap();
 
-    let picker = backend.state().thread_picker.as_ref().unwrap();
+    let picker = backend.state().conversation_popup().unwrap();
     assert!(matches!(picker.phase, ThreadPickerPhase::Failed));
     assert!(picker
         .message
@@ -47,7 +47,10 @@ IFS= read -r hold
         .unwrap()
         .contains("working directory"));
     assert!(matches!(&backend.state().thread, ThreadState::Ready { id } if id == "thr-active"));
-    assert_eq!(saved.value().thread_id.as_deref(), Some("thr-active"));
+    assert_eq!(
+        saved.value().codex.auto_resume_thread_id.as_deref(),
+        Some("thr-active")
+    );
     backend.shutdown().await.unwrap();
 }
 
@@ -76,14 +79,14 @@ IFS= read -r hold
     );
     backend.startup().await.unwrap();
     backend.handle_intent(Intent::Resume).await.unwrap();
-    let picker = backend.state().thread_picker.as_ref().unwrap();
+    let picker = backend.state().conversation_popup().unwrap();
     assert!(matches!(picker.phase, ThreadPickerPhase::Failed));
     assert!(picker
         .message
         .as_deref()
         .unwrap()
         .contains("tested protocol"));
-    assert_eq!(saved.value().thread_id, None);
+    assert_eq!(saved.value().codex.auto_resume_thread_id, None);
     assert!(matches!(backend.state().thread, ThreadState::None));
     backend.shutdown().await.unwrap();
 }
