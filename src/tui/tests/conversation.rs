@@ -7,6 +7,7 @@ fn renders_ready_streaming_completed_and_error_states() {
     state.transcript.push(TranscriptEntry {
         provider: crate::provider::ProviderId::Codex,
         role: TranscriptRole::Assistant,
+        status: TranscriptEntryStatus::Normal,
         text: "partial reply".to_owned(),
         item_id: None,
         turn_id: None,
@@ -30,6 +31,54 @@ fn renders_ready_streaming_completed_and_error_states() {
     let failed = screen(&state, &UiState::default(), 100, 20);
     assert!(failed.contains("upgrade Codex"));
     assert!(failed.contains("failed"));
+}
+
+#[test]
+fn failed_incomplete_assistant_is_explicit_in_normal_layout() {
+    let mut state = ready();
+    state.active_provider = crate::provider::ProviderId::OpenRouter;
+    state.transcript = vec![
+        TranscriptEntry {
+            provider: crate::provider::ProviderId::OpenRouter,
+            role: TranscriptRole::Assistant,
+            status: TranscriptEntryStatus::Normal,
+            text: "completed reply".to_owned(),
+            item_id: None,
+            turn_id: None,
+        },
+        TranscriptEntry {
+            provider: crate::provider::ProviderId::OpenRouter,
+            role: TranscriptRole::Assistant,
+            status: TranscriptEntryStatus::FailedIncomplete,
+            text: "retained partial reply".to_owned(),
+            item_id: None,
+            turn_id: None,
+        },
+    ];
+
+    let rendered = screen(&state, &UiState::default(), 100, 20);
+    assert!(rendered.contains("Agent:"));
+    assert!(rendered.contains("completed reply"));
+    assert!(rendered.contains("Agent (incomplete; turn failed):"));
+    assert!(rendered.contains("retained partial reply"));
+}
+
+#[test]
+fn failed_incomplete_assistant_label_remains_visible_in_narrow_layout() {
+    let mut state = ready();
+    state.active_provider = crate::provider::ProviderId::OpenRouter;
+    state.transcript.push(TranscriptEntry {
+        provider: crate::provider::ProviderId::OpenRouter,
+        role: TranscriptRole::Assistant,
+        status: TranscriptEntryStatus::FailedIncomplete,
+        text: "restored partial".to_owned(),
+        item_id: None,
+        turn_id: None,
+    });
+
+    let rendered = screen(&state, &UiState::default(), 36, 12);
+    assert!(rendered.contains("Agent (incomplete; turn failed):"));
+    assert!(rendered.contains("restored partial"));
 }
 
 #[test]
@@ -126,6 +175,15 @@ fn wraps_long_catalog_notices_and_shows_actual_turn_failure() {
     assert!(failure.contains("selected model[31m rejected"));
     assert!(failure.contains("/model and retry."));
     assert!(!failure.contains('\u{1b}'));
+
+    state.turn = TurnState::Failed {
+        turn_id: Some("turn".to_owned()),
+        message: "OpenRouter turn failed (InvalidResponse); stream stage CompletionShape"
+            .to_owned(),
+    };
+    let staged = screen(&state, &UiState::default(), 72, 18);
+    assert!(staged.contains("OpenRouter turn failed (InvalidResponse)"));
+    assert!(staged.contains("stream stage CompletionShape"));
 }
 
 #[test]

@@ -9,7 +9,7 @@ use super::{
 use crate::app::{
     Action, AppState, AuthState, ConnectionState, DomainEvent, Intent, PopupState, ThinkingEntry,
     ThinkingKind, ThreadChoice, ThreadDeleteConfirmation, ThreadPickerPhase, ThreadPickerState,
-    ThreadState, TranscriptEntry, TranscriptRole, TurnState,
+    ThreadState, TranscriptEntry, TranscriptEntryStatus, TranscriptRole, TurnState,
 };
 use crate::persistence::AccountScope;
 
@@ -66,6 +66,7 @@ fn waiting() -> AppState {
     state.transcript.push(TranscriptEntry {
         provider: crate::provider::ProviderId::Codex,
         role: TranscriptRole::User,
+        status: TranscriptEntryStatus::Normal,
         text: "hello".to_owned(),
         item_id: None,
         turn_id: None,

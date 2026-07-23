@@ -1,10 +1,13 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agentharness::app::{Intent, OpenRouterConversationState, TranscriptRole, TurnState};
+use agentharness::app::{
+    Intent, OpenRouterConversationState, TranscriptEntryStatus, TranscriptRole, TurnState,
+};
 use agentharness::backend::BackendCoordinator;
 use agentharness::codex::safety::{FullAccessPolicy, IsolationPaths};
 use agentharness::codex::session::SessionService;
@@ -13,8 +16,9 @@ use agentharness::credentials::{
     CredentialAccount, CredentialStore, FakeCredentialOperation, FakeCredentialStore, SecretValue,
 };
 use agentharness::openrouter::{
-    FileOpenRouterStore, OpenRouterAuthStatus, OpenRouterClient, OpenRouterConversationStore,
-    OpenRouterConversationV1, OpenRouterService, OpenRouterTimeouts, OpenRouterTurnOutcome,
+    ChatRole, FileOpenRouterStore, OpenRouterAuthStatus, OpenRouterClient,
+    OpenRouterConversationStore, OpenRouterConversationV2, OpenRouterService, OpenRouterTimeouts,
+    OpenRouterTurnOutcome,
 };
 use agentharness::persistence::{LoadOutcome, PersistenceError, PreferencesPort, PreferencesV2};
 use agentharness::platform::{BrowserError, BrowserOpener};
@@ -105,6 +109,164 @@ async fn read_request(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
         request.extend_from_slice(&buffer[..count]);
     }
     request
+}
+
+async fn scripted_openrouter(
+    responses: Vec<(&'static str, String)>,
+) -> (Url, Arc<Mutex<Vec<Vec<u8>>>>, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured = requests.clone();
+    let task = tokio::spawn(async move {
+        for (content_type, body) in responses {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_request(&mut socket).await;
+            captured.lock().unwrap().push(request);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    (
+        Url::parse(&format!("http://{address}")).unwrap(),
+        requests,
+        task,
+    )
+}
+
+fn openrouter_service(
+    base: Url,
+    credentials: Arc<FakeCredentialStore>,
+    store_root: &Path,
+) -> (OpenRouterService, Arc<FileOpenRouterStore>) {
+    let store = Arc::new(FileOpenRouterStore::new(store_root).unwrap());
+    let client = OpenRouterClient::with_loopback_base_url(
+        base,
+        credentials.clone(),
+        OpenRouterTimeouts {
+            connect: Duration::from_secs(1),
+            get_attempt: Duration::from_secs(1),
+            chat_headers: Duration::from_secs(1),
+            sse_idle: Duration::from_secs(1),
+            chat_total: Duration::from_secs(2),
+            retry_delay: Duration::ZERO,
+        },
+    )
+    .unwrap();
+    (
+        OpenRouterService::new(client, credentials, store.clone()),
+        store,
+    )
+}
+
+fn openrouter_preferences(model_id: &str) -> PreferencesV2 {
+    let mut preferences = PreferencesV2 {
+        active_provider: ProviderId::OpenRouter,
+        ..PreferencesV2::default()
+    };
+    preferences.openrouter.selected_model_id = Some(model_id.to_owned());
+    preferences.openrouter.enabled_model_ids = BTreeSet::from([model_id.to_owned()]);
+    preferences
+}
+
+fn catalog_responses(model_id: &str) -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "application/json",
+            r#"{"data":{"label":"offline"}}"#.to_owned(),
+        ),
+        (
+            "application/json",
+            format!(
+                r#"{{"data":[{{"id":"{model_id}","name":"Offline Model","context_length":1000}}]}}"#
+            ),
+        ),
+    ]
+}
+
+fn failed_partial_responses(model_id: &str, partial: &str) -> Vec<(&'static str, String)> {
+    let mut responses = catalog_responses(model_id);
+    responses.push((
+        "text/event-stream",
+        format!(
+            concat!(
+                "data: {{\"id\":\"chat-failed\",\"model\":\"{model_id}\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{partial}\"}},\"finish_reason\":null}}]}}\n\n",
+                "data: {{\"id\":\"chat-failed\",\"model\":\"{model_id}\",\"error\":{{\"code\":429,\"message\":\"redacted by client\",\"metadata\":{{\"error_type\":\"rate_limit_exceeded\"}}}},\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"\"}},\"finish_reason\":\"error\"}}]}}\n\n"
+            ),
+            model_id = model_id,
+            partial = partial,
+        ),
+    ));
+    responses
+}
+
+async fn pump_until_turn_settles<P: PreferencesPort, B: BrowserOpener>(
+    backend: &mut BackendCoordinator<P, B>,
+) {
+    for _ in 0..8 {
+        if !backend.state().turn.is_active() {
+            return;
+        }
+        tokio::time::timeout(Duration::from_secs(2), backend.pump_event())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    panic!("OpenRouter turn did not settle: {:?}", backend.state().turn);
+}
+
+async fn persist_failed_partial(
+    store_root: &Path,
+    model_id: &str,
+    user_text: &str,
+    partial: &str,
+) -> PreferencesV2 {
+    let (base, _requests, server) =
+        scripted_openrouter(failed_partial_responses(model_id, partial)).await;
+    let credentials = Arc::new(FakeCredentialStore::with_openrouter_key(
+        SecretValue::from_input(TEST_KEY).unwrap(),
+    ));
+    let (openrouter, store) = openrouter_service(base, credentials, store_root);
+    let preferences = MemoryPreferences(Arc::new(Mutex::new(openrouter_preferences(model_id))));
+    let mut backend = BackendCoordinator::without_codex(
+        preferences,
+        NoopBrowser,
+        "offline Codex unavailable".to_owned(),
+    )
+    .with_openrouter(openrouter);
+
+    backend.startup().await.unwrap();
+    for _ in 0..2 {
+        backend.pump_event().await.unwrap();
+    }
+    backend
+        .handle_intent(Intent::SendMessage(user_text.to_owned()))
+        .await
+        .unwrap();
+    pump_until_turn_settles(&mut backend).await;
+    assert!(matches!(backend.state().turn, TurnState::Failed { .. }));
+
+    let preferences = backend.state().preferences.clone();
+    let conversation_id = preferences
+        .openrouter
+        .auto_resume_conversation_id
+        .as_ref()
+        .unwrap();
+    let conversation = store.load_conversation(conversation_id).unwrap();
+    assert_eq!(conversation.turns.len(), 1);
+    assert_eq!(conversation.turns[0].outcome, OpenRouterTurnOutcome::Failed);
+    assert_eq!(
+        conversation.turns[0].incomplete_assistant_text.as_deref(),
+        Some(partial)
+    );
+    assert_eq!(conversation.turns[0].assistant_text, None);
+
+    backend.shutdown().await.unwrap();
+    server.await.unwrap();
+    preferences
 }
 
 async fn fake_openrouter() -> (Url, Arc<Mutex<Vec<Vec<u8>>>>, tokio::task::JoinHandle<()>) {
@@ -346,7 +508,7 @@ async fn missing_or_corrupt_cached_catalog_waits_for_exact_live_model_before_aut
         let store_root = root.path().join("openrouter");
         let store = Arc::new(FileOpenRouterStore::new(&store_root).unwrap());
         let conversation =
-            OpenRouterConversationV1::new(Default::default(), 1, "Saved conversation");
+            OpenRouterConversationV2::new(Default::default(), 1, "Saved conversation");
         let conversation_id = conversation.id.clone();
         store.save_conversation(&conversation).unwrap();
         if corrupt_catalog {
@@ -419,7 +581,7 @@ async fn refreshed_catalog_without_exact_saved_model_blocks_auto_resume_without_
         SecretValue::from_input(TEST_KEY).unwrap(),
     ));
     let store = Arc::new(FileOpenRouterStore::new(root.path().join("openrouter")).unwrap());
-    let conversation = OpenRouterConversationV1::new(Default::default(), 1, "Saved conversation");
+    let conversation = OpenRouterConversationV2::new(Default::default(), 1, "Saved conversation");
     let conversation_id = conversation.id.clone();
     store.save_conversation(&conversation).unwrap();
     let client = OpenRouterClient::with_loopback_base_url(
@@ -483,6 +645,285 @@ async fn refreshed_catalog_without_exact_saved_model_blocks_auto_resume_without_
         "vendor/model"
     );
     backend.shutdown().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_partial_survives_reopen_auto_resume_and_is_excluded_from_later_post() {
+    const MODEL: &str = "moonshotai/kimi-k3";
+    const FIRST_USER: &str = "first question";
+    const FAILED_PARTIAL: &str = "DISPLAY-ONLY-FAILED-PARTIAL";
+    const LATER_USER: &str = "later question";
+
+    let root = tempdir().unwrap();
+    let store_root = root.path().join("openrouter");
+    let preferences = persist_failed_partial(&store_root, MODEL, FIRST_USER, FAILED_PARTIAL).await;
+    let conversation_id = preferences
+        .openrouter
+        .auto_resume_conversation_id
+        .clone()
+        .unwrap();
+
+    let mut responses = catalog_responses(MODEL);
+    responses.push((
+        "text/event-stream",
+        concat!(
+            "data: {\"id\":\"chat-later\",\"model\":\"moonshotai/kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"later answer\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chat-later\",\"model\":\"moonshotai/kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"id\":\"chat-later\",\"model\":\"moonshotai/kimi-k3\",\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2,\"total_tokens\":6}}\n\n",
+            "data: [DONE]\n\n"
+        )
+        .to_owned(),
+    ));
+    let (base, requests, server) = scripted_openrouter(responses).await;
+    let credentials = Arc::new(FakeCredentialStore::with_openrouter_key(
+        SecretValue::from_input(TEST_KEY).unwrap(),
+    ));
+    let (openrouter, reopened_store) = openrouter_service(base, credentials, &store_root);
+    let mut backend = BackendCoordinator::without_codex(
+        MemoryPreferences(Arc::new(Mutex::new(preferences))),
+        NoopBrowser,
+        "offline Codex unavailable".to_owned(),
+    )
+    .with_openrouter(openrouter);
+
+    backend.startup().await.unwrap();
+    for _ in 0..2 {
+        backend.pump_event().await.unwrap();
+    }
+
+    assert_eq!(
+        backend.state().openrouter.conversation,
+        OpenRouterConversationState::Ready {
+            id: conversation_id.clone()
+        }
+    );
+    let incomplete = backend
+        .state()
+        .transcript
+        .iter()
+        .filter(|entry| {
+            entry.role == TranscriptRole::Assistant
+                && entry.status == TranscriptEntryStatus::FailedIncomplete
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(incomplete.len(), 1);
+    assert_eq!(incomplete[0].text, FAILED_PARTIAL);
+    assert_eq!(
+        backend
+            .state()
+            .transcript
+            .iter()
+            .filter(|entry| entry.role == TranscriptRole::Assistant)
+            .count(),
+        1
+    );
+
+    backend
+        .handle_intent(Intent::SendMessage(LATER_USER.to_owned()))
+        .await
+        .unwrap();
+    pump_until_turn_settles(&mut backend).await;
+    assert!(matches!(backend.state().turn, TurnState::Completed { .. }));
+
+    let reopened = reopened_store.load_conversation(&conversation_id).unwrap();
+    assert_eq!(reopened.turns.len(), 2);
+    assert_eq!(reopened.turns[0].outcome, OpenRouterTurnOutcome::Failed);
+    assert_eq!(
+        reopened.turns[0].incomplete_assistant_text.as_deref(),
+        Some(FAILED_PARTIAL)
+    );
+    assert_eq!(reopened.turns[1].outcome, OpenRouterTurnOutcome::Completed);
+    assert_eq!(
+        reopened.turns[1].assistant_text.as_deref(),
+        Some("later answer")
+    );
+
+    backend.shutdown().await.unwrap();
+    server.await.unwrap();
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    let post = String::from_utf8_lossy(&requests[2]);
+    assert!(post.starts_with("POST /api/v1/chat/completions HTTP/1.1"));
+    let body = post.split_once("\r\n\r\n").unwrap().1;
+    assert!(!body.contains(FAILED_PARTIAL));
+    let body: serde_json::Value = serde_json::from_str(body).unwrap();
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[0]["content"], FIRST_USER);
+    assert_eq!(messages[1]["role"], "user");
+    assert_eq!(messages[1]["content"], LATER_USER);
+}
+
+#[tokio::test]
+async fn unified_picker_effect_restores_failed_partial_from_reopened_real_store() {
+    const MODEL: &str = "moonshotai/kimi-k3";
+    const FAILED_PARTIAL: &str = "PICKER-RESTORED-FAILED-PARTIAL";
+
+    let root = tempdir().unwrap();
+    let store_root = root.path().join("openrouter");
+    let mut preferences =
+        persist_failed_partial(&store_root, MODEL, "picker question", FAILED_PARTIAL).await;
+    let conversation_id = preferences
+        .openrouter
+        .auto_resume_conversation_id
+        .clone()
+        .unwrap();
+    preferences.active_provider = ProviderId::Codex;
+
+    let (base, _requests, server) = scripted_openrouter(catalog_responses(MODEL)).await;
+    let credentials = Arc::new(FakeCredentialStore::with_openrouter_key(
+        SecretValue::from_input(TEST_KEY).unwrap(),
+    ));
+    let (openrouter, _reopened_store) = openrouter_service(base, credentials, &store_root);
+    let mut backend = BackendCoordinator::without_codex(
+        MemoryPreferences(Arc::new(Mutex::new(preferences))),
+        NoopBrowser,
+        "offline Codex unavailable".to_owned(),
+    )
+    .with_openrouter(openrouter);
+
+    backend.startup().await.unwrap();
+    for _ in 0..2 {
+        backend.pump_event().await.unwrap();
+    }
+    assert_eq!(backend.state().active_provider, ProviderId::Codex);
+
+    backend.handle_intent(Intent::Resume).await.unwrap();
+    backend
+        .handle_intent(Intent::ThreadPickerSelect)
+        .await
+        .unwrap();
+
+    assert_eq!(backend.state().active_provider, ProviderId::OpenRouter);
+    assert_eq!(
+        backend.state().openrouter.conversation,
+        OpenRouterConversationState::Ready {
+            id: conversation_id
+        }
+    );
+    let incomplete = backend
+        .state()
+        .transcript
+        .iter()
+        .filter(|entry| {
+            entry.role == TranscriptRole::Assistant
+                && entry.status == TranscriptEntryStatus::FailedIncomplete
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(incomplete.len(), 1);
+    assert_eq!(incomplete[0].text, FAILED_PARTIAL);
+    assert_eq!(
+        backend
+            .state()
+            .transcript
+            .iter()
+            .filter(|entry| entry.role == TranscriptRole::Assistant)
+            .count(),
+        1
+    );
+
+    backend.shutdown().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn resolved_kimi_completion_persists_through_service_and_store_reopen() {
+    const MODEL: &str = "moonshotai/kimi-k3";
+
+    let root = tempdir().unwrap();
+    let store_root = root.path().join("openrouter");
+    let mut responses = catalog_responses(MODEL);
+    responses.push((
+        "text/event-stream",
+        concat!(
+            "data: {\"id\":\"chat-kimi\",\"model\":\"moonshotai/kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chat-kimi\",\"model\":\"moonshotai/kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"id\":\"chat-kimi\",\"model\":\"moonshotai/kimi-k3-20260715\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n",
+            "data: [DONE]\n\n"
+        )
+        .to_owned(),
+    ));
+    let (base, _requests, server) = scripted_openrouter(responses).await;
+    let credentials = Arc::new(FakeCredentialStore::with_openrouter_key(
+        SecretValue::from_input(TEST_KEY).unwrap(),
+    ));
+    let (openrouter, store) = openrouter_service(base, credentials, &store_root);
+    let preferences = MemoryPreferences(Arc::new(Mutex::new(openrouter_preferences(MODEL))));
+    let mut backend = BackendCoordinator::without_codex(
+        preferences,
+        NoopBrowser,
+        "offline Codex unavailable".to_owned(),
+    )
+    .with_openrouter(openrouter);
+
+    backend.startup().await.unwrap();
+    for _ in 0..2 {
+        backend.pump_event().await.unwrap();
+    }
+    backend
+        .handle_intent(Intent::SendMessage("resolved model question".to_owned()))
+        .await
+        .unwrap();
+    pump_until_turn_settles(&mut backend).await;
+    assert!(matches!(backend.state().turn, TurnState::Completed { .. }));
+
+    let preferences = backend.state().preferences.clone();
+    let conversation_id = preferences
+        .openrouter
+        .auto_resume_conversation_id
+        .clone()
+        .unwrap();
+    let stored = store.load_conversation(&conversation_id).unwrap();
+    assert_eq!(stored.turns.len(), 1);
+    assert_eq!(stored.turns[0].outcome, OpenRouterTurnOutcome::Completed);
+    assert_eq!(stored.turns[0].model_id, MODEL);
+    assert_eq!(stored.turns[0].assistant_text.as_deref(), Some("hello"));
+    assert_eq!(stored.turns[0].incomplete_assistant_text, None);
+
+    backend.shutdown().await.unwrap();
+    server.await.unwrap();
+    drop(store);
+
+    let (base, _requests, server) = scripted_openrouter(catalog_responses(MODEL)).await;
+    let credentials = Arc::new(FakeCredentialStore::with_openrouter_key(
+        SecretValue::from_input(TEST_KEY).unwrap(),
+    ));
+    let (openrouter, reopened_store) = openrouter_service(base, credentials, &store_root);
+    let mut reopened_backend = BackendCoordinator::without_codex(
+        MemoryPreferences(Arc::new(Mutex::new(preferences))),
+        NoopBrowser,
+        "offline Codex unavailable".to_owned(),
+    )
+    .with_openrouter(openrouter);
+
+    reopened_backend.startup().await.unwrap();
+    for _ in 0..2 {
+        reopened_backend.pump_event().await.unwrap();
+    }
+    let restored = reopened_backend
+        .state()
+        .transcript
+        .iter()
+        .filter(|entry| entry.role == TranscriptRole::Assistant)
+        .collect::<Vec<_>>();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].text, "hello");
+    assert_eq!(restored[0].status, TranscriptEntryStatus::Normal);
+    let reopened = reopened_store.load_conversation(&conversation_id).unwrap();
+    assert_eq!(reopened.turns[0].outcome, OpenRouterTurnOutcome::Completed);
+    assert_eq!(reopened.turns[0].model_id, MODEL);
+    assert_eq!(reopened.turns[0].assistant_text.as_deref(), Some("hello"));
+    assert_eq!(reopened.turns[0].incomplete_assistant_text, None);
+    let canonical = reopened.canonical_messages();
+    assert_eq!(canonical.len(), 2);
+    assert_eq!(canonical[0].role, ChatRole::User);
+    assert_eq!(canonical[0].content, "resolved model question");
+    assert_eq!(canonical[1].role, ChatRole::Assistant);
+    assert_eq!(canonical[1].content, "hello");
+
+    reopened_backend.shutdown().await.unwrap();
     server.await.unwrap();
 }
 

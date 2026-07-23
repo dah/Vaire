@@ -17,8 +17,8 @@ use super::protocol::{KeyResponse, ModelsResponse};
 use super::sse::{ChatAccumulator, SseDecoder};
 use super::types::{
     ChatRequest, ChatStreamEvent, OpenRouterFailure, OpenRouterFailureCategory, OpenRouterModel,
-    MAX_CATALOG_BODY_BYTES, MAX_CATALOG_MODELS, MAX_CATALOG_TEXT_BYTES, MAX_ERROR_BODY_BYTES,
-    MAX_OUTBOUND_CHAT_BYTES,
+    OpenRouterStreamStage, MAX_CATALOG_BODY_BYTES, MAX_CATALOG_MODELS, MAX_CATALOG_TEXT_BYTES,
+    MAX_ERROR_BODY_BYTES, MAX_OUTBOUND_CHAT_BYTES,
 };
 
 const PRODUCTION_BASE_URL: &str = "https://openrouter.ai";
@@ -218,15 +218,16 @@ impl OpenRouterClient {
             .headers()
             .get(CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.to_ascii_lowercase().starts_with("text/event-stream"));
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"));
         if !content_type_ok {
-            return Err(invalid_response());
+            return Err(invalid_response().at_stage(OpenRouterStreamStage::ContentType));
         }
 
         let deadline = Instant::now() + self.timeouts.chat_total;
         let mut stream = response.bytes_stream();
         let mut decoder = SseDecoder::new();
-        let mut accumulator = ChatAccumulator::new(request.model_id().to_owned());
+        let mut accumulator = ChatAccumulator::new();
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -240,11 +241,10 @@ impl OpenRouterClient {
             match next {
                 Some(Ok(bytes)) => {
                     for data in decoder.push(&bytes)? {
-                        for event in accumulator.consume(&data)? {
+                        let consumed = accumulator.consume(&data)?;
+                        let _compatibility_stage = consumed.compatibility_stage;
+                        for event in consumed.events {
                             on_event(event);
-                        }
-                        if accumulator.is_done() {
-                            break;
                         }
                     }
                     if accumulator.is_done() {
@@ -252,11 +252,13 @@ impl OpenRouterClient {
                     }
                 }
                 Some(Err(_)) => {
-                    return Err(OpenRouterFailure::new(OpenRouterFailureCategory::Network))
+                    return Err(OpenRouterFailure::new(OpenRouterFailureCategory::Network));
                 }
                 None => {
                     for data in decoder.finish()? {
-                        for event in accumulator.consume(&data)? {
+                        let consumed = accumulator.consume(&data)?;
+                        let _compatibility_stage = consumed.compatibility_stage;
+                        for event in consumed.events {
                             on_event(event);
                         }
                     }

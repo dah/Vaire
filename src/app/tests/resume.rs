@@ -59,6 +59,7 @@ fn resume_results_are_correlated_and_cannot_cross_account_boundaries() {
             history: vec![TranscriptEntry {
                 provider: crate::provider::ProviderId::Codex,
                 role: TranscriptRole::Assistant,
+                status: TranscriptEntryStatus::Normal,
                 text: "wrong account history".to_owned(),
                 item_id: None,
                 turn_id: None,

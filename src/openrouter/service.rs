@@ -8,11 +8,12 @@ use tokio_util::sync::CancellationToken;
 use crate::credentials::{CredentialAccount, CredentialStore, SecretValue};
 use crate::provider::{OpenRouterConversationId, OpenRouterTurnId};
 
+use super::types::MAX_ASSISTANT_BYTES;
 use super::{
     ChatRequest, ChatStreamEvent, OpenRouterClient, OpenRouterConversationStore,
-    OpenRouterConversationSummary, OpenRouterConversationV1, OpenRouterFailure,
-    OpenRouterFailureCategory, OpenRouterModel, OpenRouterStoreError, OpenRouterTurnOutcome,
-    OpenRouterTurnRecord, TokenUsage,
+    OpenRouterConversationSummary, OpenRouterConversationV2, OpenRouterFailure,
+    OpenRouterFailureCategory, OpenRouterModel, OpenRouterStoreError, OpenRouterStreamStage,
+    OpenRouterTurnOutcome, OpenRouterTurnRecord, TokenUsage,
 };
 
 const EVENT_QUEUE: usize = 64;
@@ -72,8 +73,10 @@ pub enum OpenRouterServiceEvent {
         turn_id: OpenRouterTurnId,
         outcome: OpenRouterTurnOutcome,
         assistant_text: Option<String>,
+        incomplete_assistant_text: Option<String>,
         usage: Option<TokenUsage>,
         failure: Option<OpenRouterFailureCategory>,
+        failure_stage: Option<OpenRouterStreamStage>,
     },
 }
 
@@ -101,7 +104,7 @@ pub struct OpenRouterService {
 pub struct PreparedOpenRouterTurn {
     conversation_id: OpenRouterConversationId,
     turn_id: OpenRouterTurnId,
-    conversation: OpenRouterConversationV1,
+    conversation: OpenRouterConversationV2,
     request: ChatRequest,
 }
 
@@ -343,7 +346,7 @@ impl OpenRouterService {
     pub async fn load_conversation(
         &self,
         id: OpenRouterConversationId,
-    ) -> Result<OpenRouterConversationV1, OpenRouterStoreError> {
+    ) -> Result<OpenRouterConversationV2, OpenRouterStoreError> {
         let store = self.store.clone();
         tokio::task::spawn_blocking(move || store.load_conversation(&id))
             .await
@@ -359,7 +362,7 @@ impl OpenRouterService {
         let id = OpenRouterConversationId::new();
         let saved_id = id.clone();
         tokio::task::spawn_blocking(move || {
-            store.save_conversation_with_commit(&OpenRouterConversationV1::new(
+            store.save_conversation_with_commit(&OpenRouterConversationV2::new(
                 saved_id,
                 now_ms(),
                 "New conversation",
@@ -441,7 +444,7 @@ impl OpenRouterService {
                 Err(error)
                     if error.category() == super::OpenRouterStoreFailureCategory::NotFound =>
                 {
-                    OpenRouterConversationV1::new(
+                    OpenRouterConversationV2::new(
                         saved_id.clone(),
                         now_ms(),
                         title_for(&saved_text),
@@ -455,6 +458,7 @@ impl OpenRouterService {
                 model_id: saved_model,
                 user_text: saved_text,
                 assistant_text: None,
+                incomplete_assistant_text: None,
                 outcome: OpenRouterTurnOutcome::InProgress,
             });
             let request = ChatRequest::new(
@@ -487,6 +491,7 @@ impl OpenRouterService {
         if let Some(record) = prepared.conversation.turns.last_mut() {
             record.outcome = OpenRouterTurnOutcome::Failed;
             record.assistant_text = None;
+            record.incomplete_assistant_text = None;
         }
         prepared.conversation.updated_at_ms = now_ms();
         let store = self.store.clone();
@@ -518,9 +523,22 @@ impl OpenRouterService {
         self.chat_task = Some(tokio::spawn(async move {
             let mut final_text = None;
             let mut final_usage = None;
+            let mut streamed_text = String::new();
+            let mut stream_bound_exceeded = false;
+            let mut delivery_failed = false;
             let result = client
                 .chat(&request, task_cancel, |event| match event {
                     ChatStreamEvent::TextDelta(delta) => {
+                        if streamed_text
+                            .len()
+                            .checked_add(delta.len())
+                            .is_none_or(|length| length > MAX_ASSISTANT_BYTES)
+                        {
+                            stream_bound_exceeded = true;
+                            callback_cancel.cancel();
+                            return;
+                        }
+                        streamed_text.push_str(&delta);
                         if events
                             .try_send(OpenRouterServiceEvent::TextDelta {
                                 conversation_id: task_conversation_id.clone(),
@@ -529,6 +547,7 @@ impl OpenRouterService {
                             })
                             .is_err()
                         {
+                            delivery_failed = true;
                             callback_cancel.cancel();
                         }
                     }
@@ -549,42 +568,67 @@ impl OpenRouterService {
                     }
                 })
                 .await;
-            let (outcome, failure) = match result {
-                Ok(()) => (OpenRouterTurnOutcome::Completed, None),
+            let (outcome, failure, failure_stage) = match result {
+                _ if delivery_failed => (OpenRouterTurnOutcome::Interrupted, None, None),
+                _ if stream_bound_exceeded => (
+                    OpenRouterTurnOutcome::Failed,
+                    Some(OpenRouterFailureCategory::ResourceLimit),
+                    None,
+                ),
+                Ok(()) => (OpenRouterTurnOutcome::Completed, None, None),
                 Err(error) if error.category() == OpenRouterFailureCategory::Cancelled => {
-                    (OpenRouterTurnOutcome::Interrupted, None)
+                    (OpenRouterTurnOutcome::Interrupted, None, None)
                 }
-                Err(error) => (OpenRouterTurnOutcome::Failed, Some(error.category())),
+                Err(error) => (
+                    OpenRouterTurnOutcome::Failed,
+                    Some(error.category()),
+                    error.stage(),
+                ),
             };
             let assistant_text = (outcome == OpenRouterTurnOutcome::Completed)
                 .then(|| final_text.take())
                 .flatten();
+            let incomplete_assistant_text = (outcome == OpenRouterTurnOutcome::Failed
+                && !streamed_text.is_empty())
+            .then_some(streamed_text);
             if let Some(record) = conversation.turns.last_mut() {
                 record.outcome = outcome;
                 record.assistant_text = assistant_text.clone();
+                record.incomplete_assistant_text = incomplete_assistant_text.clone();
             }
             conversation.updated_at_ms = now_ms();
             let persisted = tokio::task::spawn_blocking(move || {
                 store.save_conversation_with_commit(&conversation)
             })
             .await;
-            let (outcome, failure, assistant_text) = if matches!(persisted, Ok(Ok(_))) {
-                (outcome, failure, assistant_text)
-            } else {
-                (
-                    OpenRouterTurnOutcome::Failed,
-                    Some(OpenRouterFailureCategory::CredentialStore),
-                    None,
-                )
-            };
+            let (outcome, failure, failure_stage, assistant_text, incomplete_assistant_text) =
+                if matches!(persisted, Ok(Ok(_))) {
+                    (
+                        outcome,
+                        failure,
+                        failure_stage,
+                        assistant_text,
+                        incomplete_assistant_text,
+                    )
+                } else {
+                    (
+                        OpenRouterTurnOutcome::Failed,
+                        Some(OpenRouterFailureCategory::CredentialStore),
+                        None,
+                        None,
+                        None,
+                    )
+                };
             let _ = events
                 .send(OpenRouterServiceEvent::TurnFinished {
                     conversation_id: task_conversation_id,
                     turn_id: task_turn_id,
                     outcome,
                     assistant_text,
+                    incomplete_assistant_text,
                     usage: final_usage,
                     failure,
+                    failure_stage,
                 })
                 .await;
         }));
@@ -732,7 +776,7 @@ fn title_for(text: &str) -> String {
     }
 }
 
-fn saved_model_for_request(conversation: &OpenRouterConversationV1) -> String {
+fn saved_model_for_request(conversation: &OpenRouterConversationV2) -> String {
     conversation
         .turns
         .last()
@@ -745,7 +789,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use tempfile::tempdir;
+    use tempfile::{tempdir, TempDir};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use url::Url;
 
@@ -772,6 +816,59 @@ mod tests {
         )
         .unwrap();
         OpenRouterService::new(client, credentials, store)
+    }
+
+    async fn sse_service(
+        body: &'static str,
+        keep_open: bool,
+    ) -> (
+        OpenRouterService,
+        Arc<FileOpenRouterStore>,
+        tokio::task::JoinHandle<()>,
+        TempDir,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 16 * 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            stream.write_all(body.as_bytes()).await.unwrap();
+            if keep_open {
+                std::future::pending::<()>().await;
+            }
+        });
+        let directory = tempdir().unwrap();
+        let store =
+            Arc::new(FileOpenRouterStore::new(directory.path().join("openrouter")).unwrap());
+        let credentials = Arc::new(FakeCredentialStore::with_openrouter_key(
+            SecretValue::from_input("offline-test-key").unwrap(),
+        ));
+        let client = OpenRouterClient::with_loopback_base_url(
+            base,
+            credentials.clone(),
+            OpenRouterTimeouts {
+                connect: Duration::from_secs(1),
+                get_attempt: Duration::from_secs(1),
+                chat_headers: Duration::from_secs(1),
+                sse_idle: Duration::from_secs(2),
+                chat_total: Duration::from_secs(2),
+                retry_delay: Duration::ZERO,
+            },
+        )
+        .unwrap();
+        (
+            OpenRouterService::new(client, credentials, store.clone()),
+            store,
+            server,
+            directory,
+        )
     }
 
     #[test]
@@ -929,8 +1026,11 @@ mod tests {
             },
         )
         .unwrap();
-        let mut service =
-            OpenRouterService::new(client, Arc::new(FakeCredentialStore::default()), store);
+        let mut service = OpenRouterService::new(
+            client,
+            Arc::new(FakeCredentialStore::default()),
+            store.clone(),
+        );
         for _ in 0..EVENT_QUEUE {
             service
                 .chat_events_tx
@@ -945,14 +1045,263 @@ mod tests {
             .prepare_turn(None, "vendor/model".to_owned(), "hello".to_owned())
             .await
             .unwrap();
+        let conversation_id = prepared.conversation_id().clone();
         service.launch_prepared_turn(prepared);
         tokio::time::sleep(Duration::from_millis(30)).await;
 
         tokio::time::timeout(Duration::from_secs(1), service.shutdown())
             .await
             .expect("shutdown must drain a saturated chat queue");
+        let record = &store.load_conversation(&conversation_id).unwrap().turns[0];
+        assert_eq!(record.outcome, OpenRouterTurnOutcome::Interrupted);
+        assert_eq!(record.assistant_text, None);
+        assert_eq!(record.incomplete_assistant_text, None);
         server.abort();
         let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn failed_stream_persists_and_reopens_only_the_nonempty_partial() {
+        let body = concat!(
+            "data: {\"id\":\"chat-1\",\"model\":\"vendor/model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"error\":{\"code\":429,\"message\":\"private detail\",\"metadata\":{\"error_type\":\"rate_limit_exceeded\"}},\"choices\":null,\"usage\":{\"total_tokens\":\"bad\"}}\n\n",
+        );
+        let (mut service, store, server, directory) = sse_service(body, false).await;
+        let (conversation_id, _) = service
+            .start_turn(None, "vendor/model".to_owned(), "hello".to_owned())
+            .await
+            .unwrap();
+        let mut saw_partial = false;
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(1), service.next_event())
+                .await
+                .unwrap()
+                .unwrap();
+            match event {
+                OpenRouterServiceEvent::TextDelta { delta, .. } => {
+                    saw_partial |= delta == "partial";
+                }
+                OpenRouterServiceEvent::TurnFinished {
+                    outcome,
+                    assistant_text,
+                    incomplete_assistant_text,
+                    failure,
+                    failure_stage,
+                    ..
+                } => {
+                    assert_eq!(outcome, OpenRouterTurnOutcome::Failed);
+                    assert_eq!(assistant_text, None);
+                    assert_eq!(incomplete_assistant_text.as_deref(), Some("partial"));
+                    assert_eq!(failure, Some(OpenRouterFailureCategory::RateLimited));
+                    assert_eq!(failure_stage, None);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_partial);
+        server.await.unwrap();
+
+        let record = &store.load_conversation(&conversation_id).unwrap().turns[0];
+        assert_eq!(record.outcome, OpenRouterTurnOutcome::Failed);
+        assert_eq!(record.assistant_text, None);
+        assert_eq!(record.incomplete_assistant_text.as_deref(), Some("partial"));
+        drop(service);
+        drop(store);
+
+        let reopened = FileOpenRouterStore::new(directory.path().join("openrouter")).unwrap();
+        let conversation = reopened.load_conversation(&conversation_id).unwrap();
+        assert_eq!(
+            conversation.turns[0].incomplete_assistant_text.as_deref(),
+            Some("partial")
+        );
+        assert!(conversation
+            .canonical_messages()
+            .iter()
+            .all(|message| message.content != "partial"));
+    }
+
+    #[tokio::test]
+    async fn staged_parser_failure_reaches_service_terminal_but_not_conversation_schema() {
+        let body = concat!(
+            "data: {\"model\":\"vendor/model\",\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+            "data: {\"model\":\"vendor/model\",\"choices\":[{\"delta\":null}]}\n\n",
+        );
+        let (mut service, store, server, _directory) = sse_service(body, false).await;
+        let (conversation_id, _) = service
+            .start_turn(None, "vendor/model".to_owned(), "hello".to_owned())
+            .await
+            .unwrap();
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(1), service.next_event())
+                .await
+                .unwrap()
+                .unwrap();
+            if let OpenRouterServiceEvent::TurnFinished {
+                outcome,
+                incomplete_assistant_text,
+                failure,
+                failure_stage,
+                ..
+            } = event
+            {
+                assert_eq!(outcome, OpenRouterTurnOutcome::Failed);
+                assert_eq!(incomplete_assistant_text.as_deref(), Some("partial"));
+                assert_eq!(failure, Some(OpenRouterFailureCategory::InvalidResponse));
+                assert_eq!(failure_stage, Some(OpenRouterStreamStage::CompletionShape));
+                break;
+            }
+        }
+        server.await.unwrap();
+
+        let conversation = store.load_conversation(&conversation_id).unwrap();
+        assert_eq!(conversation.turns[0].outcome, OpenRouterTurnOutcome::Failed);
+        assert_eq!(
+            conversation.turns[0].incomplete_assistant_text.as_deref(),
+            Some("partial")
+        );
+        let persisted = serde_json::to_string(&conversation).unwrap();
+        assert!(!persisted.contains("failure_stage"));
+        assert!(!persisted.contains("CompletionShape"));
+    }
+
+    #[tokio::test]
+    async fn malformed_terminal_usage_persists_completed_answer_and_reopens_canonically() {
+        let body = concat!(
+            "data: {\"id\":\"chat-1\",\"model\":\"vendor/resolved-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer\"}}]}\n\n",
+            "data: {\"id\":\"chat-1\",\"model\":\"vendor/resolved-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"id\":\"metadata-only\",\"model\":\"vendor/resolved-usage\",\"choices\":[],\"usage\":{\"total_tokens\":null}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let (mut service, store, server, directory) = sse_service(body, false).await;
+        let (conversation_id, _) = service
+            .start_turn(
+                None,
+                "vendor/requested-alias".to_owned(),
+                "hello".to_owned(),
+            )
+            .await
+            .unwrap();
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(1), service.next_event())
+                .await
+                .unwrap()
+                .unwrap();
+            if let OpenRouterServiceEvent::TurnFinished {
+                outcome,
+                assistant_text,
+                incomplete_assistant_text,
+                usage,
+                failure,
+                ..
+            } = event
+            {
+                assert_eq!(outcome, OpenRouterTurnOutcome::Completed);
+                assert_eq!(assistant_text.as_deref(), Some("answer"));
+                assert_eq!(incomplete_assistant_text, None);
+                assert_eq!(usage, None);
+                assert_eq!(failure, None);
+                break;
+            }
+        }
+        server.await.unwrap();
+        let record = &store.load_conversation(&conversation_id).unwrap().turns[0];
+        assert_eq!(record.outcome, OpenRouterTurnOutcome::Completed);
+        assert_eq!(record.model_id, "vendor/requested-alias");
+        assert_eq!(record.assistant_text.as_deref(), Some("answer"));
+        assert_eq!(record.incomplete_assistant_text, None);
+        drop(service);
+        drop(store);
+
+        let reopened = FileOpenRouterStore::new(directory.path().join("openrouter")).unwrap();
+        let conversation = reopened.load_conversation(&conversation_id).unwrap();
+        assert_eq!(
+            conversation.turns[0].outcome,
+            OpenRouterTurnOutcome::Completed
+        );
+        assert_eq!(
+            conversation.turns[0].assistant_text.as_deref(),
+            Some("answer")
+        );
+        assert_eq!(conversation.turns[0].incomplete_assistant_text, None);
+        let canonical = conversation.canonical_messages();
+        assert_eq!(canonical.len(), 2);
+        assert_eq!(canonical[0].content, "hello");
+        assert_eq!(canonical[1].content, "answer");
+    }
+
+    #[tokio::test]
+    async fn failed_stream_without_a_delta_persists_no_incomplete_text() {
+        let body = "data: {\"error\":{\"code\":429,\"message\":\"private detail\",\"metadata\":{\"error_type\":\"rate_limit_exceeded\"}},\"choices\":[]}\n\n";
+        let (mut service, store, server, _directory) = sse_service(body, false).await;
+        let (conversation_id, _) = service
+            .start_turn(None, "vendor/model".to_owned(), "hello".to_owned())
+            .await
+            .unwrap();
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(1), service.next_event())
+                .await
+                .unwrap()
+                .unwrap();
+            if let OpenRouterServiceEvent::TurnFinished {
+                outcome,
+                incomplete_assistant_text,
+                ..
+            } = event
+            {
+                assert_eq!(outcome, OpenRouterTurnOutcome::Failed);
+                assert_eq!(incomplete_assistant_text, None);
+                break;
+            }
+        }
+        server.await.unwrap();
+        assert_eq!(
+            store.load_conversation(&conversation_id).unwrap().turns[0].incomplete_assistant_text,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn interruption_after_a_delta_discards_incomplete_text() {
+        let body = "data: {\"id\":\"chat-1\",\"model\":\"vendor/model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n";
+        let (mut service, store, server, _directory) = sse_service(body, true).await;
+        let (conversation_id, _) = service
+            .start_turn(None, "vendor/model".to_owned(), "hello".to_owned())
+            .await
+            .unwrap();
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(1), service.next_event())
+                .await
+                .unwrap()
+                .unwrap();
+            if matches!(event, OpenRouterServiceEvent::TextDelta { .. }) {
+                service.interrupt_turn();
+                break;
+            }
+        }
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(1), service.next_event())
+                .await
+                .unwrap()
+                .unwrap();
+            if let OpenRouterServiceEvent::TurnFinished {
+                outcome,
+                assistant_text,
+                incomplete_assistant_text,
+                ..
+            } = event
+            {
+                assert_eq!(outcome, OpenRouterTurnOutcome::Interrupted);
+                assert_eq!(assistant_text, None);
+                assert_eq!(incomplete_assistant_text, None);
+                break;
+            }
+        }
+        server.abort();
+        let _ = server.await;
+        let record = &store.load_conversation(&conversation_id).unwrap().turns[0];
+        assert_eq!(record.outcome, OpenRouterTurnOutcome::Interrupted);
+        assert_eq!(record.incomplete_assistant_text, None);
     }
 
     #[tokio::test]
@@ -976,8 +1325,10 @@ mod tests {
                     turn_id: expected_turn,
                     outcome: OpenRouterTurnOutcome::Completed,
                     assistant_text: Some("final text".to_owned()),
+                    incomplete_assistant_text: None,
                     usage: None,
                     failure: None,
+                    failure_stage: None,
                 })
                 .await
                 .unwrap();
@@ -1022,8 +1373,10 @@ mod tests {
                     turn_id: expected_turn,
                     outcome: OpenRouterTurnOutcome::Interrupted,
                     assistant_text: None,
+                    incomplete_assistant_text: None,
                     usage: None,
                     failure: None,
+                    failure_stage: None,
                 })
                 .await
                 .unwrap();

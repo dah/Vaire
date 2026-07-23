@@ -190,12 +190,25 @@ impl AppState {
             self.transcript.push(TranscriptEntry {
                 provider: self.active_provider,
                 role: TranscriptRole::Assistant,
+                status: TranscriptEntryStatus::Normal,
                 text: delta,
                 item_id: Some(item_id.to_owned()),
                 turn_id: Some(turn_id.to_owned()),
             });
         }
         self.enforce_transcript_bound();
+    }
+
+    pub(in crate::app) fn mark_failed_incomplete(&mut self, turn_id: &str, item_id: &str) -> bool {
+        let Some(entry) = self.transcript.iter_mut().find(|entry| {
+            entry.role == TranscriptRole::Assistant
+                && entry.item_id.as_deref() == Some(item_id)
+                && entry.turn_id.as_deref() == Some(turn_id)
+        }) else {
+            return false;
+        };
+        entry.status = TranscriptEntryStatus::FailedIncomplete;
+        true
     }
 
     pub(in crate::app) fn reconcile_final(
@@ -227,6 +240,7 @@ impl AppState {
                 self.transcript.push(TranscriptEntry {
                     provider: self.active_provider,
                     role: TranscriptRole::Assistant,
+                    status: TranscriptEntryStatus::Normal,
                     text: final_text.clone(),
                     item_id: Some(item_id.to_owned()),
                     turn_id: Some(turn_id.to_owned()),
@@ -250,6 +264,7 @@ impl AppState {
             self.transcript.push(TranscriptEntry {
                 provider: self.active_provider,
                 role: TranscriptRole::Assistant,
+                status: TranscriptEntryStatus::Normal,
                 text: final_text,
                 item_id: Some(item_id.to_owned()),
                 turn_id: Some(turn_id.to_owned()),

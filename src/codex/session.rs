@@ -16,7 +16,9 @@ use super::protocol::{
 };
 use super::safety::{FullAccessPolicy, IsolationPaths};
 use super::transport::{AppServerTransport, TransportError};
-use crate::app::{ModelChoice, ThreadChoice, TranscriptEntry, TranscriptRole};
+use crate::app::{
+    ModelChoice, ThreadChoice, TranscriptEntry, TranscriptEntryStatus, TranscriptRole,
+};
 use crate::persistence::AccountScope;
 
 mod auth;

@@ -16,9 +16,9 @@ pub use store::{
 };
 pub use types::{
     ChatMessage, ChatRequest, ChatRole, ChatStreamEvent, OpenRouterConversationSummary,
-    OpenRouterConversationV1, OpenRouterFailure, OpenRouterFailureCategory, OpenRouterModel,
-    OpenRouterStoreError, OpenRouterStoreFailureCategory, OpenRouterTurnOutcome,
-    OpenRouterTurnRecord, TokenUsage,
+    OpenRouterConversationV2, OpenRouterFailure, OpenRouterFailureCategory, OpenRouterModel,
+    OpenRouterStoreError, OpenRouterStoreFailureCategory, OpenRouterStreamStage,
+    OpenRouterTurnOutcome, OpenRouterTurnRecord, TokenUsage,
 };
 
 #[cfg(test)]

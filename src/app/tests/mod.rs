@@ -95,6 +95,7 @@ fn thread_ready_state() -> AppState {
         transcript: vec![TranscriptEntry {
             provider: crate::provider::ProviderId::Codex,
             role: TranscriptRole::Assistant,
+            status: TranscriptEntryStatus::Normal,
             text: "old conversation".to_owned(),
             item_id: None,
             turn_id: None,

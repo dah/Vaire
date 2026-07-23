@@ -297,6 +297,7 @@ impl AppState {
                     self.transcript.push(TranscriptEntry {
                         provider: self.active_provider,
                         role: TranscriptRole::User,
+                        status: TranscriptEntryStatus::Normal,
                         text: text.clone(),
                         item_id: None,
                         turn_id: None,

@@ -1,3 +1,4 @@
+use super::lifecycle::openrouter_history;
 use super::{
     load_notice_message, BackendCoordinator, CompletedItemTracker, Effect,
     MAX_TRACKED_COMPLETED_ITEMS_PER_TURN, MAX_TRACKED_COMPLETED_ITEM_ID_BYTES,
@@ -9,6 +10,79 @@ use crate::platform::{BrowserError, BrowserOpener};
 fn missing_preferences_are_a_quiet_first_run() {
     assert_eq!(load_notice_message(Some(LoadNotice::Missing)), None);
     assert!(load_notice_message(Some(LoadNotice::Corrupt)).is_some());
+}
+
+#[test]
+fn shared_openrouter_history_restores_failed_partials_with_explicit_status() {
+    use crate::app::{TranscriptEntryStatus, TranscriptRole};
+    use crate::openrouter::{
+        OpenRouterConversationV2, OpenRouterTurnOutcome, OpenRouterTurnRecord,
+    };
+    use crate::provider::{OpenRouterConversationId, OpenRouterTurnId};
+
+    let mut conversation =
+        OpenRouterConversationV2::new(OpenRouterConversationId::new(), 1, "history");
+    conversation.turns = vec![
+        OpenRouterTurnRecord {
+            id: OpenRouterTurnId::new(),
+            model_id: "vendor/model".to_owned(),
+            user_text: "completed user".to_owned(),
+            assistant_text: Some("completed assistant".to_owned()),
+            incomplete_assistant_text: None,
+            outcome: OpenRouterTurnOutcome::Completed,
+        },
+        OpenRouterTurnRecord {
+            id: OpenRouterTurnId::new(),
+            model_id: "vendor/model".to_owned(),
+            user_text: "failed user".to_owned(),
+            assistant_text: None,
+            incomplete_assistant_text: Some("failed partial".to_owned()),
+            outcome: OpenRouterTurnOutcome::Failed,
+        },
+        OpenRouterTurnRecord {
+            id: OpenRouterTurnId::new(),
+            model_id: "vendor/model".to_owned(),
+            user_text: "interrupted user".to_owned(),
+            assistant_text: None,
+            incomplete_assistant_text: None,
+            outcome: OpenRouterTurnOutcome::Interrupted,
+        },
+    ];
+
+    let history = openrouter_history(&conversation);
+    assert_eq!(
+        history
+            .iter()
+            .map(|entry| (entry.role.clone(), entry.status, entry.text.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                TranscriptRole::User,
+                TranscriptEntryStatus::Normal,
+                "completed user",
+            ),
+            (
+                TranscriptRole::Assistant,
+                TranscriptEntryStatus::Normal,
+                "completed assistant",
+            ),
+            (
+                TranscriptRole::User,
+                TranscriptEntryStatus::Normal,
+                "failed user",
+            ),
+            (
+                TranscriptRole::Assistant,
+                TranscriptEntryStatus::FailedIncomplete,
+                "failed partial",
+            ),
+            (
+                TranscriptRole::User,
+                TranscriptEntryStatus::Normal,
+                "interrupted user",
+            ),
+        ]
+    );
 }
 
 #[derive(Clone, Debug)]
@@ -106,14 +180,59 @@ fn active_openrouter_turn_blocks_credential_replacement_and_stale_401_is_inert()
             turn_id,
             outcome: crate::openrouter::OpenRouterTurnOutcome::Failed,
             assistant_text: None,
+            incomplete_assistant_text: None,
             usage: None,
             failure: Some(crate::openrouter::OpenRouterFailureCategory::Unauthorized),
+            failure_stage: None,
         },
     );
     assert_eq!(
         backend.state.openrouter.auth,
         crate::openrouter::OpenRouterAuthStatus::Valid
     );
+}
+
+#[test]
+fn service_failed_partial_reaches_the_app_with_failed_incomplete_status() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut backend = BackendCoordinator::without_codex(
+        FilePreferences::new(temp.path().join("preferences.json")),
+        NoopBrowser,
+        "Codex unavailable".to_owned(),
+    );
+    let conversation_id = crate::provider::OpenRouterConversationId::new();
+    let turn_id = crate::provider::OpenRouterTurnId::new();
+    backend.state.active_provider = crate::provider::ProviderId::OpenRouter;
+    backend.state.turn = crate::app::TurnState::OpenRouterStreaming {
+        conversation_id: conversation_id.clone(),
+        turn_id: turn_id.clone(),
+    };
+
+    let _ = backend.reduce_openrouter_service_event(
+        crate::openrouter::OpenRouterServiceEvent::TurnFinished {
+            conversation_id,
+            turn_id,
+            outcome: crate::openrouter::OpenRouterTurnOutcome::Failed,
+            assistant_text: None,
+            incomplete_assistant_text: Some("durable partial".to_owned()),
+            usage: None,
+            failure: Some(crate::openrouter::OpenRouterFailureCategory::InvalidResponse),
+            failure_stage: Some(crate::openrouter::OpenRouterStreamStage::CompletionShape),
+        },
+    );
+
+    assert_eq!(backend.state.transcript.len(), 1);
+    assert_eq!(backend.state.transcript[0].text, "durable partial");
+    assert_eq!(
+        backend.state.transcript[0].status,
+        crate::app::TranscriptEntryStatus::FailedIncomplete
+    );
+    assert!(matches!(
+        &backend.state.turn,
+        crate::app::TurnState::Failed { message, .. }
+            if message
+                == "OpenRouter turn failed (InvalidResponse); stream stage CompletionShape"
+    ));
 }
 
 #[tokio::test]

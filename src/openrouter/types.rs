@@ -1,6 +1,6 @@
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 use crate::provider::{ModelKey, OpenRouterConversationId, OpenRouterTurnId, ProviderId};
@@ -152,10 +152,30 @@ pub enum OpenRouterFailureCategory {
     Remote,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OpenRouterStreamStage {
+    ContentType,
+    SseFrameLimit,
+    SseUtf8,
+    ChunkJson,
+    ProviderErrorShape,
+    CompletionShape,
+    ChoiceCardinality,
+    ChoiceIndex,
+    ResponseId,
+    Model,
+    PostTerminal,
+    AfterDone,
+    PrematureEof,
+    AssistantLimit,
+    UsageDropped,
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct OpenRouterFailure {
     category: OpenRouterFailureCategory,
     status: Option<u16>,
+    stage: Option<OpenRouterStreamStage>,
 }
 
 impl OpenRouterFailure {
@@ -163,6 +183,7 @@ impl OpenRouterFailure {
         Self {
             category,
             status: None,
+            stage: None,
         }
     }
 
@@ -170,7 +191,13 @@ impl OpenRouterFailure {
         Self {
             category,
             status: Some(status),
+            stage: None,
         }
+    }
+
+    pub(crate) fn at_stage(mut self, stage: OpenRouterStreamStage) -> Self {
+        self.stage = Some(stage);
+        self
     }
 
     pub fn category(self) -> OpenRouterFailureCategory {
@@ -180,6 +207,10 @@ impl OpenRouterFailure {
     pub fn status(self) -> Option<u16> {
         self.status
     }
+
+    pub fn stage(self) -> Option<OpenRouterStreamStage> {
+        self.stage
+    }
 }
 
 impl fmt::Debug for OpenRouterFailure {
@@ -188,6 +219,7 @@ impl fmt::Debug for OpenRouterFailure {
             .debug_struct("OpenRouterFailure")
             .field("category", &self.category)
             .field("status", &self.status)
+            .field("stage", &self.stage)
             .finish()
     }
 }
@@ -198,7 +230,11 @@ impl fmt::Display for OpenRouterFailure {
             formatter,
             "OpenRouter operation failed ({:?})",
             self.category
-        )
+        )?;
+        if let Some(stage) = self.stage {
+            write!(formatter, " at stream stage {stage:?}")?;
+        }
+        Ok(())
     }
 }
 
@@ -214,16 +250,21 @@ pub enum OpenRouterTurnOutcome {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpenRouterTurnRecord {
     pub id: OpenRouterTurnId,
     pub model_id: String,
     pub user_text: String,
+    #[serde(deserialize_with = "deserialize_required_nullable_string")]
     pub assistant_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incomplete_assistant_text: Option<String>,
     pub outcome: OpenRouterTurnOutcome,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct OpenRouterConversationV1 {
+#[serde(deny_unknown_fields)]
+pub struct OpenRouterConversationV2 {
     pub version: u32,
     pub id: OpenRouterConversationId,
     pub created_at_ms: u64,
@@ -232,10 +273,10 @@ pub struct OpenRouterConversationV1 {
     pub turns: Vec<OpenRouterTurnRecord>,
 }
 
-impl OpenRouterConversationV1 {
+impl OpenRouterConversationV2 {
     pub fn new(id: OpenRouterConversationId, now_ms: u64, title: impl Into<String>) -> Self {
         Self {
-            version: 1,
+            version: 2,
             id,
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
@@ -244,7 +285,7 @@ impl OpenRouterConversationV1 {
         }
     }
 
-    /// Returns only user messages and successfully completed assistant messages.
+    /// Returns every user message and only successfully completed assistant messages.
     pub fn canonical_messages(&self) -> Vec<ChatMessage> {
         let mut messages = Vec::new();
         for turn in &self.turns {
@@ -265,6 +306,59 @@ impl OpenRouterConversationV1 {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct OpenRouterTurnRecordV1 {
+    pub id: OpenRouterTurnId,
+    pub model_id: String,
+    pub user_text: String,
+    #[serde(deserialize_with = "deserialize_required_nullable_string")]
+    pub assistant_text: Option<String>,
+    pub outcome: OpenRouterTurnOutcome,
+}
+
+fn deserialize_required_nullable_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct OpenRouterConversationV1 {
+    pub version: u32,
+    pub id: OpenRouterConversationId,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub title: String,
+    pub turns: Vec<OpenRouterTurnRecordV1>,
+}
+
+impl From<OpenRouterConversationV1> for OpenRouterConversationV2 {
+    fn from(legacy: OpenRouterConversationV1) -> Self {
+        Self {
+            version: 2,
+            id: legacy.id,
+            created_at_ms: legacy.created_at_ms,
+            updated_at_ms: legacy.updated_at_ms,
+            title: legacy.title,
+            turns: legacy
+                .turns
+                .into_iter()
+                .map(|turn| OpenRouterTurnRecord {
+                    id: turn.id,
+                    model_id: turn.model_id,
+                    user_text: turn.user_text,
+                    assistant_text: turn.assistant_text,
+                    incomplete_assistant_text: None,
+                    outcome: turn.outcome,
+                })
+                .collect(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct OpenRouterConversationSummary {
     pub id: OpenRouterConversationId,
@@ -281,6 +375,7 @@ pub enum OpenRouterStoreFailureCategory {
     Delete,
     Permissions,
     Corrupt,
+    UnsupportedVersion,
     ResourceLimit,
     NotFound,
 }

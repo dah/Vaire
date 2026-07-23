@@ -50,7 +50,16 @@ snapshots, disk recovery, and full-access Codex commands may reach it, and logou
 secure erasure. Migration to macOS Keychain through the injected credential-store port remains
 explicit technical debt; a future migration must save and verify the Keychain item before deleting
 the file and preserve the file on any failure. Local OpenRouter histories are also owner-only
-plaintext files.
+plaintext files. When an OpenRouter stream emits nonempty assistant text and then fails, schema V2
+retains that partial only for display. Startup and **/resume** restore it under the explicit
+**Agent (incomplete; turn failed):** label, but it is excluded from canonical history and every later
+model request. In-progress and interrupted output is not checkpointed. OpenRouter SSE
+events are bounded and validated through terminal completion. Provider error objects take
+precedence over malformed completion metadata; a valid numeric status controls classification even
+when symbolic metadata conflicts. Malformed optional usage is discarded without failing an
+otherwise valid answer, and a provider-resolved semantic model is checked for internal stream
+consistency without being compared to the requested alias. Parser failures add a closed static
+stream stage to the visible turn-failure message without persisting response payload or stage data.
 
 The app-server inherits the launching environment except that inherited `CODEX_*` values are
 removed and AgentHarness supplies its dedicated `CODEX_HOME`; tool shells request environment

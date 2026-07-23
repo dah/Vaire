@@ -346,17 +346,29 @@ impl AppState {
                 turn_id,
                 outcome,
                 assistant_text,
+                incomplete_assistant_text,
+                failure_stage,
             } => {
                 if !self.matches_openrouter_turn(&conversation_id, &turn_id) {
                     return Vec::new();
                 }
-                if let Some(text) = assistant_text {
+                let terminal_snapshot = match &outcome {
+                    TurnOutcome::Completed => assistant_text.as_deref().map(|text| (text, false)),
+                    TurnOutcome::Failed(_) => incomplete_assistant_text
+                        .as_deref()
+                        .map(|text| (text, true)),
+                    TurnOutcome::Interrupted => None,
+                };
+                if let Some((text, failed_incomplete)) = terminal_snapshot {
                     if self
-                        .reconcile_final(turn_id.as_str(), "openrouter-assistant", &text)
+                        .reconcile_final(turn_id.as_str(), "openrouter-assistant", text)
                         .is_err()
                     {
                         self.notice =
                             Some("OpenRouter final response contradicted streamed text".to_owned());
+                    } else if failed_incomplete {
+                        let _ =
+                            self.mark_failed_incomplete(turn_id.as_str(), "openrouter-assistant");
                     }
                 }
                 self.turn = match outcome {
@@ -366,10 +378,17 @@ impl AppState {
                     TurnOutcome::Interrupted => TurnState::Interrupted {
                         turn_id: turn_id.as_str().to_owned(),
                     },
-                    TurnOutcome::Failed(message) => TurnState::Failed {
-                        turn_id: Some(turn_id.as_str().to_owned()),
-                        message,
-                    },
+                    TurnOutcome::Failed(message) => {
+                        let message = if let Some(stage) = failure_stage {
+                            format!("{message}; stream stage {stage:?}")
+                        } else {
+                            message
+                        };
+                        TurnState::Failed {
+                            turn_id: Some(turn_id.as_str().to_owned()),
+                            message,
+                        }
+                    }
                 };
             }
             _ => unreachable!("event routed to the wrong reducer"),

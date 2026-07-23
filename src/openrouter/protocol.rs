@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use super::types::{OpenRouterModel, TokenUsage};
+use super::types::OpenRouterModel;
 
 #[derive(Deserialize)]
 pub(crate) struct KeyResponse {
@@ -43,10 +43,7 @@ pub(crate) struct ChatChunk {
     pub id: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
-    #[serde(default)]
     pub choices: Vec<Choice>,
-    #[serde(default)]
-    pub usage: Option<TokenUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -56,7 +53,7 @@ pub(crate) struct Choice {
     #[serde(default)]
     pub delta: Delta,
     #[serde(default)]
-    pub finish_reason: Option<serde_json::Value>,
+    pub finish_reason: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]

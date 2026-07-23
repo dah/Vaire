@@ -375,6 +375,8 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                                 turn_id,
                                 outcome: TurnOutcome::Interrupted,
                                 assistant_text: None,
+                                incomplete_assistant_text: None,
+                                failure_stage: None,
                             },
                         )));
                     }

@@ -10,7 +10,7 @@ use crate::credentials::{FakeCredentialOperation, FakeCredentialStore, SecretVal
 
 use super::{
     ChatMessage, ChatRequest, ChatRole, ChatStreamEvent, OpenRouterClient,
-    OpenRouterFailureCategory, OpenRouterTimeouts,
+    OpenRouterFailureCategory, OpenRouterStreamStage, OpenRouterTimeouts, TokenUsage,
 };
 
 const TEST_KEY: &str = "sk-or-v1-recognizable-offline-test-key";
@@ -239,6 +239,7 @@ async fn catalog_retries_only_retryable_get_and_remote_bodies_are_redacted() {
 #[tokio::test]
 async fn chat_posts_canonical_body_and_decodes_fragmented_sse_without_retry() {
     let scripts = vec![Script::sse(&[
+        ": keepalive\nevent: completion\ndata: {\"id\":\"chat-1\",\"model\":\"vendor/model\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"not collected\"},\"finish_reason\":null}]}\n\n",
         "data: {\"id\":\"chat-1\",\"model\":\"vendor/model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hel",
         "lo\"},\"finish_reason\":null}]}\n\n",
         "data: {\"id\":\"chat-1\",\"model\":\"vendor/model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
@@ -292,6 +293,327 @@ async fn chat_posts_canonical_body_and_decodes_fragmented_sse_without_retry() {
 }
 
 #[tokio::test]
+async fn chat_accepts_repeated_empty_non_error_finish_markers() {
+    let scripts = vec![Script::sse(&[
+        "data: {\"id\":\"chat-1\",\"model\":\"vendor/model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chat-1\",\"model\":\"vendor/model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"id\":\"chat-1\",\"model\":\"vendor/model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}],\"usage\":{\"total_tokens\":3}}\n\n",
+        "data: [DONE]\n\n",
+    ])];
+    let (base, _, server) = fake_server(scripts).await;
+    let client = test_client(base, credentials());
+    let request = ChatRequest::new(
+        "vendor/model",
+        vec![ChatMessage {
+            role: ChatRole::User,
+            content: "hi".to_owned(),
+        }],
+    )
+    .unwrap();
+    let mut events = Vec::new();
+
+    client
+        .chat(&request, CancellationToken::new(), |event| {
+            events.push(event)
+        })
+        .await
+        .unwrap();
+    server.await.unwrap();
+
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ChatStreamEvent::TextDelta(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ChatStreamEvent::TextDelta(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec!["hello"]
+    );
+    assert!(events.contains(&ChatStreamEvent::Usage(TokenUsage {
+        total_tokens: 3,
+        ..TokenUsage::default()
+    })));
+    assert!(matches!(
+        events.last(),
+        Some(ChatStreamEvent::Finished {
+            assistant_text,
+            usage: Some(TokenUsage { total_tokens: 3, .. })
+        }) if assistant_text == "hello"
+    ));
+}
+
+#[tokio::test]
+async fn chat_classifies_a_bare_error_finish_after_terminal_as_remote() {
+    let scripts = vec![Script::sse(&[
+        "data: {\"id\":\"chat-1\",\"model\":\"vendor/model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chat-1\",\"model\":\"vendor/model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"id\":\"chat-1\",\"model\":\"vendor/model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"error\"}]}\n\n",
+    ])];
+    let (base, _, server) = fake_server(scripts).await;
+    let client = test_client(base, credentials());
+    let request = ChatRequest::new(
+        "vendor/model",
+        vec![ChatMessage {
+            role: ChatRole::User,
+            content: "hi".to_owned(),
+        }],
+    )
+    .unwrap();
+    let mut events = Vec::new();
+
+    let error = client
+        .chat(&request, CancellationToken::new(), |event| {
+            events.push(event)
+        })
+        .await
+        .unwrap_err();
+    server.await.unwrap();
+
+    assert_eq!(error.category(), OpenRouterFailureCategory::Remote);
+    assert_eq!(error.stage(), None);
+    assert_eq!(
+        events,
+        vec![ChatStreamEvent::TextDelta("partial".to_owned())]
+    );
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, ChatStreamEvent::Finished { .. })));
+}
+
+#[tokio::test]
+async fn chat_accepts_resolved_model_metadata_in_the_terminal_usage_chunk() {
+    let scripts = vec![Script::sse(&[
+        "data: {\"id\":\"chat-1\",\"model\":\"moonshotai/kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chat-1\",\"model\":\"moonshotai/kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"id\":\"chat-1\",\"model\":\"moonshotai/kimi-k3-20260715\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n",
+        "data: [DONE]\n\n",
+    ])];
+    let (base, _, server) = fake_server(scripts).await;
+    let client = test_client(base, credentials());
+    let request = ChatRequest::new(
+        "moonshotai/kimi-k3",
+        vec![ChatMessage {
+            role: ChatRole::User,
+            content: "hi".to_owned(),
+        }],
+    )
+    .unwrap();
+    let mut events = Vec::new();
+
+    client
+        .chat(&request, CancellationToken::new(), |event| {
+            events.push(event)
+        })
+        .await
+        .unwrap();
+    server.await.unwrap();
+
+    assert!(matches!(
+        events.last(),
+        Some(ChatStreamEvent::Finished {
+            assistant_text,
+            usage: Some(_)
+        }) if assistant_text == "hello"
+    ));
+}
+
+#[tokio::test]
+async fn chat_accepts_a_semantic_resolved_alias_and_ignores_metadata_identity() {
+    let scripts = vec![Script::sse(&[
+        "data: {\"id\":\"chat-resolved\",\"model\":\"vendor/resolved-20260723\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"resolved\"}}]}\n\n",
+        "data: {\"id\":\"chat-resolved\",\"model\":\"vendor/resolved-20260723\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"id\":\"metadata-other\",\"model\":\"vendor/resolved-usage\",\"choices\":[],\"usage\":{\"total_tokens\":4}}\n\n",
+        "data: [DONE]\n\n",
+    ])];
+    let (base, _, server) = fake_server(scripts).await;
+    let client = test_client(base, credentials());
+    let request = ChatRequest::new(
+        "vendor/requested-alias",
+        vec![ChatMessage {
+            role: ChatRole::User,
+            content: "hi".to_owned(),
+        }],
+    )
+    .unwrap();
+    let mut events = Vec::new();
+
+    client
+        .chat(&request, CancellationToken::new(), |event| {
+            events.push(event)
+        })
+        .await
+        .unwrap();
+    server.await.unwrap();
+
+    assert!(matches!(
+        events.last(),
+        Some(ChatStreamEvent::Finished {
+            assistant_text,
+            usage: Some(TokenUsage { total_tokens: 4, .. })
+        }) if assistant_text == "resolved"
+    ));
+}
+
+#[tokio::test]
+async fn chat_rejects_a_conflicting_later_semantic_model() {
+    let scripts = vec![Script::sse(&[
+        "data: {\"model\":\"vendor/resolved-a\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n",
+        "data: {\"model\":\"vendor/resolved-b\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+    ])];
+    let (base, _, server) = fake_server(scripts).await;
+    let client = test_client(base, credentials());
+    let request = ChatRequest::new(
+        "vendor/requested-alias",
+        vec![ChatMessage {
+            role: ChatRole::User,
+            content: "hi".to_owned(),
+        }],
+    )
+    .unwrap();
+    let mut events = Vec::new();
+
+    let error = client
+        .chat(&request, CancellationToken::new(), |event| {
+            events.push(event)
+        })
+        .await
+        .unwrap_err();
+    server.await.unwrap();
+
+    assert_eq!(error.category(), OpenRouterFailureCategory::InvalidResponse);
+    assert_eq!(error.stage(), Some(OpenRouterStreamStage::Model));
+    assert_eq!(
+        events,
+        vec![ChatStreamEvent::TextDelta("partial".to_owned())]
+    );
+}
+
+#[tokio::test]
+async fn chat_classifies_a_documented_midstream_error_after_partial_text() {
+    let scripts = vec![Script::sse(&[
+        "data: {\"id\":\"chat-1\",\"model\":\"moonshotai/kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chat-1\",\"model\":\"moonshotai/kimi-k3\",\"error\":{\"code\":429,\"message\":\"sensitive upstream detail\",\"metadata\":{\"error_type\":\"rate_limit_exceeded\"}},\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\"},\"finish_reason\":\"error\"}]}\n\n",
+    ])];
+    let (base, _, server) = fake_server(scripts).await;
+    let client = test_client(base, credentials());
+    let request = ChatRequest::new(
+        "moonshotai/kimi-k3",
+        vec![ChatMessage {
+            role: ChatRole::User,
+            content: "hi".to_owned(),
+        }],
+    )
+    .unwrap();
+    let mut events = Vec::new();
+
+    let error = client
+        .chat(&request, CancellationToken::new(), |event| {
+            events.push(event)
+        })
+        .await
+        .unwrap_err();
+    server.await.unwrap();
+
+    assert_eq!(error.category(), OpenRouterFailureCategory::RateLimited);
+    assert_eq!(error.status(), Some(429));
+    assert_eq!(error.stage(), None);
+    assert!(events.contains(&ChatStreamEvent::TextDelta("partial".to_owned())));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, ChatStreamEvent::Finished { .. })));
+    assert!(!format!("{error:?}").contains("sensitive upstream detail"));
+}
+
+#[tokio::test]
+async fn chat_provider_error_precedes_malformed_siblings() {
+    for error_event in [
+        "data: {\"error\":{\"code\":429,\"message\":\"SENSITIVE\"},\"choices\":null,\"usage\":{\"total_tokens\":\"bad\"}}\n\n",
+        "data: {\"error\":{\"code\":\"429\"},\"choices\":[{\"index\":0,\"delta\":null}]}\n\n",
+        "data: {\"error\":{\"code\":\"429\",\"message\":\"SENSITIVE\",\"metadata\":{\"error_type\":\"authentication\"}},\"choices\":null}\n\n",
+    ] {
+        let (base, _, server) = fake_server(vec![Script::sse(&[error_event])]).await;
+        let client = test_client(base, credentials());
+        let request = ChatRequest::new(
+            "vendor/model",
+            vec![ChatMessage {
+                role: ChatRole::User,
+                content: "hi".to_owned(),
+            }],
+        )
+        .unwrap();
+        let error = client
+            .chat(&request, CancellationToken::new(), |_| {})
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert_eq!(error.category(), OpenRouterFailureCategory::RateLimited);
+        assert_eq!(error.status(), Some(429));
+        assert_eq!(error.stage(), None);
+        assert!(!format!("{error:?}").contains("SENSITIVE"));
+        assert!(!error.to_string().contains("SENSITIVE"));
+    }
+}
+
+#[tokio::test]
+async fn chat_completes_after_malformed_terminal_usage_and_preserves_valid_usage() {
+    for (usage_events, expected_total) in [
+        (
+            vec!["data: {\"choices\":[],\"usage\":{\"total_tokens\":\"bad\"}}\n\n"],
+            None,
+        ),
+        (
+            vec![
+                "data: {\"choices\":[],\"usage\":{\"total_tokens\":3}}\n\n",
+                "data: {\"choices\":[],\"usage\":{\"total_tokens\":null}}\n\n",
+            ],
+            Some(3),
+        ),
+    ] {
+        let mut parts = vec![
+            "data: {\"model\":\"resolved\",\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n",
+            "data: {\"model\":\"resolved\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        ];
+        parts.extend(usage_events);
+        parts.push("data: [DONE]\n\n");
+        let (base, _, server) = fake_server(vec![Script::sse(&parts)]).await;
+        let client = test_client(base, credentials());
+        let request = ChatRequest::new(
+            "requested-alias",
+            vec![ChatMessage {
+                role: ChatRole::User,
+                content: "hi".to_owned(),
+            }],
+        )
+        .unwrap();
+        let mut events = Vec::new();
+        client
+            .chat(&request, CancellationToken::new(), |event| {
+                events.push(event)
+            })
+            .await
+            .unwrap();
+        server.await.unwrap();
+        let Some(ChatStreamEvent::Finished {
+            assistant_text,
+            usage,
+        }) = events.last()
+        else {
+            panic!("missing terminal event");
+        };
+        assert_eq!(assistant_text, "answer");
+        assert_eq!(usage.map(|usage| usage.total_tokens), expected_total);
+    }
+}
+
+#[tokio::test]
 async fn malformed_sse_and_cancellation_fail_once_without_post_retry() {
     let (base, requests, server) = fake_server(vec![Script::sse(&["data: not-json\n\n"])]).await;
     let client = test_client(base, credentials());
@@ -309,6 +631,7 @@ async fn malformed_sse_and_cancellation_fail_once_without_post_retry() {
         .unwrap_err();
     server.await.unwrap();
     assert_eq!(error.category(), OpenRouterFailureCategory::InvalidResponse);
+    assert_eq!(error.stage(), Some(OpenRouterStreamStage::ChunkJson));
     assert_eq!(requests.lock().unwrap().len(), 1);
 
     let mut hanging = Script::sse(&["data: {\"choices\":[]}\n\n", "data: [DONE]\n\n"]);
@@ -328,6 +651,39 @@ async fn malformed_sse_and_cancellation_fail_once_without_post_retry() {
     assert_eq!(error.category(), OpenRouterFailureCategory::Cancelled);
     assert_eq!(requests.lock().unwrap().len(), 1);
     server.abort();
+}
+
+#[tokio::test]
+async fn chat_stages_content_type_and_premature_eof_failures() {
+    let mut wrong_content_type = Script::json(200, "{}");
+    wrong_content_type.content_type = "text/event-streaming";
+    let (base, _, server) = fake_server(vec![wrong_content_type]).await;
+    let client = test_client(base, credentials());
+    let request = ChatRequest::new(
+        "vendor/model",
+        vec![ChatMessage {
+            role: ChatRole::User,
+            content: "hi".to_owned(),
+        }],
+    )
+    .unwrap();
+    let error = client
+        .chat(&request, CancellationToken::new(), |_| {})
+        .await
+        .unwrap_err();
+    server.await.unwrap();
+    assert_eq!(error.stage(), Some(OpenRouterStreamStage::ContentType));
+
+    let (base, _, server) = fake_server(vec![Script::sse(&[
+        "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+    ])])
+    .await;
+    let error = test_client(base, credentials())
+        .chat(&request, CancellationToken::new(), |_| {})
+        .await
+        .unwrap_err();
+    server.await.unwrap();
+    assert_eq!(error.stage(), Some(OpenRouterStreamStage::PrematureEof));
 }
 
 #[tokio::test]

@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::TranscriptEntryStatus;
 
 pub(in crate::tui) fn render_transcript(
     frame: &mut Frame<'_>,
@@ -21,13 +22,13 @@ pub(in crate::tui) fn render_transcript(
             }
         } else {
             match (&state.auth, &state.thread) {
-            (AuthState::SignedOut, _) => {
-                "Signed out. Use /login to connect your ChatGPT subscription."
-            }
-            (_, ThreadState::ResumeFailed { .. }) => {
-                "The saved thread could not be resumed. Use /resume to choose a thread or /new to start fresh; it was not replaced."
-            }
-            _ => "Ready. Type a message, use /new, or browse saved threads with /resume.",
+                (AuthState::SignedOut, _) => {
+                    "Signed out. Use /login to connect your ChatGPT subscription."
+                }
+                (_, ThreadState::ResumeFailed { .. }) => {
+                    "The saved thread could not be resumed. Use /resume to choose a thread or /new to start fresh; it was not replaced."
+                }
+                _ => "Ready. Type a message, use /new, or browse saved threads with /resume.",
             }
         };
         lines.push(Line::from(Span::styled(
@@ -36,12 +37,17 @@ pub(in crate::tui) fn render_transcript(
         )));
     } else {
         for entry in &state.transcript {
-            let (prefix, color) = match entry.role {
-                TranscriptRole::User => ("You", Color::Green),
-                TranscriptRole::Assistant => ("Agent", Color::Cyan),
+            let (label, color) = match (&entry.role, entry.status) {
+                (TranscriptRole::User, _) => ("You:", Color::Green),
+                (TranscriptRole::Assistant, TranscriptEntryStatus::Normal) => {
+                    ("Agent:", Color::Cyan)
+                }
+                (TranscriptRole::Assistant, TranscriptEntryStatus::FailedIncomplete) => {
+                    ("Agent (incomplete; turn failed):", Color::Yellow)
+                }
             };
             lines.push(Line::from(Span::styled(
-                format!("{prefix}:"),
+                label,
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             )));
             let text = sanitize_terminal_text(&entry.text);

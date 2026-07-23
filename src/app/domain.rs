@@ -169,10 +169,17 @@ pub enum TranscriptRole {
     Assistant,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TranscriptEntryStatus {
+    Normal,
+    FailedIncomplete,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TranscriptEntry {
     pub provider: ProviderId,
     pub role: TranscriptRole,
+    pub status: TranscriptEntryStatus,
     pub text: String,
     pub item_id: Option<String>,
     pub turn_id: Option<String>,

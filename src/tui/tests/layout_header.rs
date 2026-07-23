@@ -149,6 +149,7 @@ fn handles_small_terminals_and_malicious_control_text() {
     state.transcript.push(TranscriptEntry {
         provider: crate::provider::ProviderId::Codex,
         role: TranscriptRole::Assistant,
+        status: TranscriptEntryStatus::Normal,
         text: "safe\u{1b}[31m\ttext\u{0007}".to_owned(),
         item_id: None,
         turn_id: None,

@@ -16,7 +16,7 @@ use crate::codex::session::{
 };
 use crate::codex::transport::TransportError;
 use crate::openrouter::{
-    OpenRouterAuthStatus, OpenRouterConversationV1, OpenRouterFailureCategory, OpenRouterService,
+    OpenRouterAuthStatus, OpenRouterConversationV2, OpenRouterFailureCategory, OpenRouterService,
     OpenRouterServiceEvent, OpenRouterTurnOutcome,
 };
 use crate::persistence::{LoadNotice, PersistenceError, PreferencesPort};

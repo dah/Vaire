@@ -104,6 +104,7 @@ fn transcript_retention_is_bounded_without_breaking_stream_reconciliation() {
         .map(|index| TranscriptEntry {
             provider: crate::provider::ProviderId::Codex,
             role: TranscriptRole::User,
+            status: TranscriptEntryStatus::Normal,
             text: format!("history-{index}"),
             item_id: None,
             turn_id: None,
@@ -159,6 +160,35 @@ fn transcript_retention_bounds_newline_and_display_width_floods() {
         .text
         .ends_with("WIDTH-TAIL"));
     assert!(state.transcript_dropped_prefix_bytes.len() <= 1);
+}
+
+#[test]
+fn restored_failed_incomplete_status_survives_sanitization_and_bounds() {
+    let history = (0..=MAX_TRANSCRIPT_ENTRIES)
+        .map(|index| TranscriptEntry {
+            provider: ProviderId::OpenRouter,
+            role: TranscriptRole::Assistant,
+            status: if index == MAX_TRANSCRIPT_ENTRIES {
+                TranscriptEntryStatus::FailedIncomplete
+            } else {
+                TranscriptEntryStatus::Normal
+            },
+            text: if index == MAX_TRANSCRIPT_ENTRIES {
+                "partial\u{1b}[31m".to_owned()
+            } else {
+                format!("history-{index}")
+            },
+            item_id: Some("openrouter-assistant".to_owned()),
+            turn_id: Some(format!("turn-{index}")),
+        })
+        .collect();
+    let mut state = AppState::default();
+    state.replace_transcript(history);
+
+    assert_eq!(state.transcript.len(), MAX_TRANSCRIPT_ENTRIES);
+    let retained = state.transcript.last().unwrap();
+    assert_eq!(retained.status, TranscriptEntryStatus::FailedIncomplete);
+    assert_eq!(retained.text, "partial[31m");
 }
 
 #[test]

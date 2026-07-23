@@ -1,5 +1,7 @@
 use super::*;
-use crate::openrouter::{OpenRouterAuthStatus, OpenRouterFailureCategory, OpenRouterModel};
+use crate::openrouter::{
+    OpenRouterAuthStatus, OpenRouterFailureCategory, OpenRouterModel, OpenRouterStreamStage,
+};
 
 fn openrouter_model(id: &str) -> OpenRouterModel {
     OpenRouterModel {
@@ -7,6 +9,137 @@ fn openrouter_model(id: &str) -> OpenRouterModel {
         name: Some(id.to_owned()),
         context_length: Some(4096),
     }
+}
+
+fn streaming_openrouter_state() -> (AppState, OpenRouterConversationId, OpenRouterTurnId) {
+    let conversation_id = OpenRouterConversationId::new();
+    let turn_id = OpenRouterTurnId::new();
+    (
+        AppState {
+            active_provider: ProviderId::OpenRouter,
+            turn: TurnState::OpenRouterStreaming {
+                conversation_id: conversation_id.clone(),
+                turn_id: turn_id.clone(),
+            },
+            ..AppState::default()
+        },
+        conversation_id,
+        turn_id,
+    )
+}
+
+#[test]
+fn failed_openrouter_partial_reconciles_and_marks_only_the_matching_live_entry() {
+    let (mut state, conversation_id, turn_id) = streaming_openrouter_state();
+    state.reduce(Action::Event(DomainEvent::OpenRouterDelta {
+        conversation_id: conversation_id.clone(),
+        turn_id: turn_id.clone(),
+        delta: "partial".to_owned(),
+    }));
+    state.reduce(Action::Event(DomainEvent::OpenRouterTurnFinished {
+        conversation_id,
+        turn_id: turn_id.clone(),
+        outcome: TurnOutcome::Failed("provider failed".to_owned()),
+        assistant_text: None,
+        incomplete_assistant_text: Some("partial tail".to_owned()),
+        failure_stage: Some(OpenRouterStreamStage::CompletionShape),
+    }));
+
+    assert!(matches!(
+        &state.turn,
+        TurnState::Failed { message, .. }
+            if message == "provider failed; stream stage CompletionShape"
+    ));
+    assert_eq!(state.transcript.len(), 1);
+    assert_eq!(state.transcript[0].text, "partial tail");
+    assert_eq!(
+        state.transcript[0].status,
+        TranscriptEntryStatus::FailedIncomplete
+    );
+    assert_eq!(
+        state.transcript[0].turn_id.as_deref(),
+        Some(turn_id.as_str())
+    );
+}
+
+#[test]
+fn completed_and_interrupted_openrouter_terminals_keep_normal_status() {
+    let (mut completed, conversation_id, turn_id) = streaming_openrouter_state();
+    completed.reduce(Action::Event(DomainEvent::OpenRouterDelta {
+        conversation_id: conversation_id.clone(),
+        turn_id: turn_id.clone(),
+        delta: "done".to_owned(),
+    }));
+    completed.reduce(Action::Event(DomainEvent::OpenRouterTurnFinished {
+        conversation_id,
+        turn_id,
+        outcome: TurnOutcome::Completed,
+        assistant_text: Some("done final".to_owned()),
+        incomplete_assistant_text: Some("ignored invalid partial".to_owned()),
+        failure_stage: None,
+    }));
+    assert_eq!(completed.transcript[0].text, "done final");
+    assert_eq!(
+        completed.transcript[0].status,
+        TranscriptEntryStatus::Normal
+    );
+
+    let (mut interrupted, conversation_id, turn_id) = streaming_openrouter_state();
+    interrupted.reduce(Action::Event(DomainEvent::OpenRouterDelta {
+        conversation_id: conversation_id.clone(),
+        turn_id: turn_id.clone(),
+        delta: "live only".to_owned(),
+    }));
+    interrupted.reduce(Action::Event(DomainEvent::OpenRouterTurnFinished {
+        conversation_id,
+        turn_id,
+        outcome: TurnOutcome::Interrupted,
+        assistant_text: Some("ignored completed".to_owned()),
+        incomplete_assistant_text: Some("ignored incomplete".to_owned()),
+        failure_stage: None,
+    }));
+    assert_eq!(interrupted.transcript[0].text, "live only");
+    assert_eq!(
+        interrupted.transcript[0].status,
+        TranscriptEntryStatus::Normal
+    );
+}
+
+#[test]
+fn stale_or_contradictory_failed_terminal_cannot_mark_streamed_text_authoritative() {
+    let (mut stale, conversation_id, turn_id) = streaming_openrouter_state();
+    stale.reduce(Action::Event(DomainEvent::OpenRouterDelta {
+        conversation_id: conversation_id.clone(),
+        turn_id: turn_id.clone(),
+        delta: "active".to_owned(),
+    }));
+    stale.reduce(Action::Event(DomainEvent::OpenRouterTurnFinished {
+        conversation_id: OpenRouterConversationId::new(),
+        turn_id: turn_id.clone(),
+        outcome: TurnOutcome::Failed("stale".to_owned()),
+        assistant_text: None,
+        incomplete_assistant_text: Some("active stale".to_owned()),
+        failure_stage: Some(OpenRouterStreamStage::AfterDone),
+    }));
+    assert!(matches!(stale.turn, TurnState::OpenRouterStreaming { .. }));
+    assert_eq!(stale.transcript[0].text, "active");
+    assert_eq!(stale.transcript[0].status, TranscriptEntryStatus::Normal);
+
+    stale.reduce(Action::Event(DomainEvent::OpenRouterTurnFinished {
+        conversation_id,
+        turn_id,
+        outcome: TurnOutcome::Failed("provider failed".to_owned()),
+        assistant_text: None,
+        incomplete_assistant_text: Some("contradiction".to_owned()),
+        failure_stage: None,
+    }));
+    assert!(matches!(stale.turn, TurnState::Failed { .. }));
+    assert_eq!(stale.transcript[0].text, "active");
+    assert_eq!(stale.transcript[0].status, TranscriptEntryStatus::Normal);
+    assert_eq!(
+        stale.notice.as_deref(),
+        Some("OpenRouter final response contradicted streamed text")
+    );
 }
 
 #[test]
@@ -32,6 +165,7 @@ fn cross_provider_model_selection_is_a_hard_blank_boundary() {
     state.transcript.push(TranscriptEntry {
         provider: crate::provider::ProviderId::Codex,
         role: TranscriptRole::Assistant,
+        status: TranscriptEntryStatus::Normal,
         text: "must not cross".to_owned(),
         item_id: Some("item".to_owned()),
         turn_id: Some("turn".to_owned()),
@@ -126,6 +260,7 @@ fn cross_provider_blank_boundary_survives_restart_until_lazy_first_send() {
         transcript: vec![TranscriptEntry {
             provider: ProviderId::Codex,
             role: TranscriptRole::Assistant,
+            status: TranscriptEntryStatus::Normal,
             text: "must stay behind".to_owned(),
             item_id: None,
             turn_id: None,
@@ -331,6 +466,7 @@ fn same_provider_selection_and_catalog_draft_preserve_history_and_stale_ids() {
     state.transcript.push(TranscriptEntry {
         provider: crate::provider::ProviderId::OpenRouter,
         role: TranscriptRole::User,
+        status: TranscriptEntryStatus::Normal,
         text: "retained".to_owned(),
         item_id: None,
         turn_id: None,
@@ -455,6 +591,7 @@ fn post_store_unauthorized_catalog_failure_marks_candidate_invalid_without_losin
     state.transcript.push(TranscriptEntry {
         provider: ProviderId::OpenRouter,
         role: TranscriptRole::Assistant,
+        status: TranscriptEntryStatus::Normal,
         text: "preserve history".to_owned(),
         item_id: None,
         turn_id: None,
@@ -533,6 +670,7 @@ fn codex_lifecycle_events_preserve_active_openrouter_state() {
     base.transcript.push(TranscriptEntry {
         provider: ProviderId::OpenRouter,
         role: TranscriptRole::Assistant,
+        status: TranscriptEntryStatus::Normal,
         text: "keep".to_owned(),
         item_id: Some("openrouter-assistant".to_owned()),
         turn_id: Some(turn_id.as_str().to_owned()),
@@ -613,6 +751,7 @@ fn unified_resume_switches_codex_to_openrouter_with_destination_model() {
     let history = vec![TranscriptEntry {
         provider: ProviderId::OpenRouter,
         role: TranscriptRole::Assistant,
+        status: TranscriptEntryStatus::FailedIncomplete,
         text: "restored OpenRouter".to_owned(),
         item_id: None,
         turn_id: None,
@@ -639,6 +778,7 @@ fn unified_resume_switches_codex_to_openrouter_with_destination_model() {
     let late_history = vec![TranscriptEntry {
         provider: ProviderId::OpenRouter,
         role: TranscriptRole::Assistant,
+        status: TranscriptEntryStatus::Normal,
         text: "late duplicate".to_owned(),
         item_id: None,
         turn_id: None,
@@ -774,6 +914,7 @@ fn unified_resume_switches_openrouter_to_codex_with_saved_model_and_reasoning() 
     let history = vec![TranscriptEntry {
         provider: ProviderId::Codex,
         role: TranscriptRole::Assistant,
+        status: TranscriptEntryStatus::Normal,
         text: "restored Codex".to_owned(),
         item_id: None,
         turn_id: None,

@@ -1,6 +1,7 @@
 use super::*;
 use crate::openrouter::{
-    OpenRouterAuthStatus, OpenRouterFailureCategory, OpenRouterModel, TokenUsage,
+    OpenRouterAuthStatus, OpenRouterFailureCategory, OpenRouterModel, OpenRouterStreamStage,
+    TokenUsage,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -120,6 +121,8 @@ pub enum DomainEvent {
         turn_id: OpenRouterTurnId,
         outcome: TurnOutcome,
         assistant_text: Option<String>,
+        incomplete_assistant_text: Option<String>,
+        failure_stage: Option<OpenRouterStreamStage>,
     },
     ResumeStarted {
         id: String,

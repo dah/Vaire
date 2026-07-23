@@ -437,6 +437,8 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                     turn_id,
                     outcome: TurnOutcome::Interrupted,
                     assistant_text: None,
+                    incomplete_assistant_text: None,
+                    failure_stage: None,
                 }));
         }
         let settled_preferences = self.state.preferences.clone();
@@ -689,8 +691,10 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                 turn_id,
                 outcome,
                 assistant_text,
+                incomplete_assistant_text,
                 usage,
                 failure,
+                failure_stage,
             } => {
                 let authoritative_turn = matches!(
                     &self.state.turn,
@@ -729,6 +733,8 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                         turn_id,
                         outcome,
                         assistant_text,
+                        incomplete_assistant_text,
+                        failure_stage,
                     }))
             }
         }
@@ -736,27 +742,38 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
 }
 
 pub(in crate::backend) fn openrouter_history(
-    conversation: &OpenRouterConversationV1,
+    conversation: &OpenRouterConversationV2,
 ) -> Vec<crate::app::TranscriptEntry> {
     let mut history = Vec::new();
     for turn in &conversation.turns {
         history.push(crate::app::TranscriptEntry {
             provider: crate::provider::ProviderId::OpenRouter,
             role: crate::app::TranscriptRole::User,
+            status: crate::app::TranscriptEntryStatus::Normal,
             text: turn.user_text.clone(),
             item_id: None,
             turn_id: Some(turn.id.as_str().to_owned()),
         });
-        if turn.outcome == OpenRouterTurnOutcome::Completed {
-            if let Some(text) = &turn.assistant_text {
-                history.push(crate::app::TranscriptEntry {
-                    provider: crate::provider::ProviderId::OpenRouter,
-                    role: crate::app::TranscriptRole::Assistant,
-                    text: text.clone(),
-                    item_id: Some("openrouter-assistant".to_owned()),
-                    turn_id: Some(turn.id.as_str().to_owned()),
-                });
-            }
+        let assistant = match turn.outcome {
+            OpenRouterTurnOutcome::Completed => turn
+                .assistant_text
+                .as_ref()
+                .map(|text| (text, crate::app::TranscriptEntryStatus::Normal)),
+            OpenRouterTurnOutcome::Failed => turn
+                .incomplete_assistant_text
+                .as_ref()
+                .map(|text| (text, crate::app::TranscriptEntryStatus::FailedIncomplete)),
+            OpenRouterTurnOutcome::InProgress | OpenRouterTurnOutcome::Interrupted => None,
+        };
+        if let Some((text, status)) = assistant {
+            history.push(crate::app::TranscriptEntry {
+                provider: crate::provider::ProviderId::OpenRouter,
+                role: crate::app::TranscriptRole::Assistant,
+                status,
+                text: text.clone(),
+                item_id: Some("openrouter-assistant".to_owned()),
+                turn_id: Some(turn.id.as_str().to_owned()),
+            });
         }
     }
     history

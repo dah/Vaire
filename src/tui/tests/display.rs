@@ -6,6 +6,7 @@ fn transcript_bottom_scroll_accounts_for_word_wrap_slack() {
     state.transcript.push(TranscriptEntry {
         provider: crate::provider::ProviderId::Codex,
         role: TranscriptRole::Assistant,
+        status: TranscriptEntryStatus::Normal,
         text: format!("{}TAIL", "abcdefghijklmnopqr ".repeat(8)),
         item_id: Some("item".to_owned()),
         turn_id: Some("turn".to_owned()),
@@ -44,6 +45,7 @@ fn transcript_and_reasoning_window_past_u16_logical_rows() {
     state.transcript.push(TranscriptEntry {
         provider: crate::provider::ProviderId::Codex,
         role: TranscriptRole::Assistant,
+        status: TranscriptEntryStatus::Normal,
         text: format!("{}TRANSCRIPT-TAIL", "\n".repeat(usize::from(u16::MAX) + 32)),
         item_id: Some("item".to_owned()),
         turn_id: Some("turn".to_owned()),

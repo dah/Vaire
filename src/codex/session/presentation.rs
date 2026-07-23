@@ -59,6 +59,7 @@ pub fn history_entries(thread: &ThreadSnapshot) -> Vec<TranscriptEntry> {
                                     entries.push(TranscriptEntry {
                                         provider: crate::provider::ProviderId::Codex,
                                         role: TranscriptRole::User,
+                                        status: TranscriptEntryStatus::Normal,
                                         text: text.clone(),
                                         item_id: Some(item.id.clone()),
                                         turn_id: Some(turn.id.clone()),
@@ -73,6 +74,7 @@ pub fn history_entries(thread: &ThreadSnapshot) -> Vec<TranscriptEntry> {
                         entries.push(TranscriptEntry {
                             provider: crate::provider::ProviderId::Codex,
                             role: TranscriptRole::Assistant,
+                            status: TranscriptEntryStatus::Normal,
                             text: text.clone(),
                             item_id: Some(item.id.clone()),
                             turn_id: Some(turn.id.clone()),

@@ -25,8 +25,8 @@ mod turn;
 pub use actions::{Action, DomainEvent, Effect, TurnOutcome};
 pub use domain::{
     AuthState, ConnectionState, Intent, ModelChoice, OpenRouterConversationState,
-    OpenRouterCredentialValidation, OpenRouterState, ThreadState, TranscriptEntry, TranscriptRole,
-    TranscriptTruncation, TurnState,
+    OpenRouterCredentialValidation, OpenRouterState, ThreadState, TranscriptEntry,
+    TranscriptEntryStatus, TranscriptRole, TranscriptTruncation, TurnState,
 };
 pub(crate) use popup::{catalog_search_matches, model_search_matches};
 pub use popup::{AuthPopupMode, PopupState};

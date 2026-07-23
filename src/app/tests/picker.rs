@@ -35,6 +35,7 @@ fn picker_ignores_mismatched_results_then_atomically_switches_threads() {
             history: vec![TranscriptEntry {
                 provider: ProviderId::Codex,
                 role: TranscriptRole::Assistant,
+                status: TranscriptEntryStatus::Normal,
                 text: "wrong history".to_owned(),
                 item_id: None,
                 turn_id: None,
@@ -56,6 +57,7 @@ fn picker_ignores_mismatched_results_then_atomically_switches_threads() {
     let history = vec![TranscriptEntry {
         provider: ProviderId::Codex,
         role: TranscriptRole::Assistant,
+        status: TranscriptEntryStatus::Normal,
         text: "target history".to_owned(),
         item_id: Some("agent-b".to_owned()),
         turn_id: Some("turn-b".to_owned()),
@@ -98,6 +100,7 @@ fn successful_picker_switch_rejects_every_stale_old_turn_event() {
         history: vec![TranscriptEntry {
             provider: ProviderId::Codex,
             role: TranscriptRole::Assistant,
+            status: TranscriptEntryStatus::Normal,
             text: "target history".to_owned(),
             item_id: Some("agent-b".to_owned()),
             turn_id: Some("turn-b".to_owned()),
@@ -171,6 +174,7 @@ fn picker_navigation_and_failed_switch_preserve_the_active_thread() {
     let history = vec![TranscriptEntry {
         provider: ProviderId::Codex,
         role: TranscriptRole::User,
+        status: TranscriptEntryStatus::Normal,
         text: "restored".to_owned(),
         item_id: None,
         turn_id: None,
