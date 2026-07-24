@@ -1,0 +1,9 @@
+pub(in crate::openrouter) const MAX_CATALOG_BODY_BYTES: usize = 4 * 1024 * 1024;
+pub(in crate::openrouter) const MAX_CATALOG_MODELS: usize = 10_000;
+pub(in crate::openrouter) const MAX_CATALOG_TEXT_BYTES: usize = 8 * 1024 * 1024;
+pub(in crate::openrouter) const MAX_MODEL_ID_BYTES: usize = 512;
+pub(in crate::openrouter) const MAX_MODEL_NAME_BYTES: usize = 1024;
+pub(in crate::openrouter) const MAX_OUTBOUND_CHAT_BYTES: usize = 1024 * 1024;
+pub(in crate::openrouter) const MAX_SSE_EVENT_BYTES: usize = 256 * 1024;
+pub(in crate::openrouter) const MAX_ASSISTANT_BYTES: usize = 1024 * 1024;
+pub(in crate::openrouter) const MAX_ERROR_BODY_BYTES: usize = 16 * 1024;
