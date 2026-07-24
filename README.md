@@ -2,8 +2,8 @@
 
 Vairë is a small macOS-first terminal chat client with one active conversation across three
 providers: Codex through the installed app-server, OpenRouter text chat, and Claude Code through
-the installed non-interactive CLI. Codex uses its owned ChatGPT subscription login flow.
-OpenRouter and Claude use user-supplied API keys. There is no approval UI; Codex and Claude
+the installed non-interactive CLI. Codex and Claude Code use their native subscription login
+flows; OpenRouter uses a user-supplied API key. There is no approval UI; Codex and Claude
 command/file tools run with unrestricted same-user access.
 
 The TUI can create and revisit provider-labelled histories, search models from all providers,
@@ -37,10 +37,10 @@ On first launch, enter **/login** and choose a provider:
   cancel it and use **/login device**.
 - OpenRouter opens a masked API-key editor, validates the key, and lets you use **c** in the login
   popup to choose the enabled model subset.
-- Claude opens a masked Anthropic Console API-key editor. Vairë does not discover, import, reuse,
-  or automate Claude.ai Free/Pro/Max subscription OAuth: Anthropic's policy requires third-party
-  products to use Console API keys or a supported cloud provider. The key is treated as configured
-  after a local CLI credential-source check and is remotely validated by the first real turn.
+- Claude temporarily suspends the TUI and runs the native `claude auth login --claudeai` flow in
+  the terminal. Claude Code owns browser authentication, token refresh, and macOS Keychain
+  storage; Vairë never reads, copies, receives, or persists the subscription token. After the CLI
+  exits, Vairë restores the TUI and verifies the resulting state with `claude auth status --json`.
 
 Vairë stores non-secret preferences and dedicated provider runtime state under
 `~/Library/Application Support/vaire/`. Preferences may include the normalized ChatGPT email,
@@ -69,17 +69,32 @@ ceilings and never auto-register a discovered thread.
 Codex tools start in persistent non-project `runtime/conversation`; Claude tools start in the separate persistent non-project `runtime/claude-conversation` directory.
 Files created there survive restarts. This directory and the dedicated provider homes are
 organizational boundaries only: full-access commands can leave them and reach arbitrary same-user
-paths, including provider authentication state and Vairë's plaintext API-key files.
+paths, including provider authentication state, Claude Code's Keychain-backed login, and Vairë's
+plaintext OpenRouter key.
 
-The OpenRouter key is stored in owner-only plaintext
-`runtime/openrouter-home/api-key`; the Anthropic Console key is stored in owner-only plaintext
-`runtime/anthropic-home/api-key`. Each directory is exact mode `0700` and each regular,
-current-user-owned key file is exact mode `0600`. This is not encryption, secure storage, a
-sandbox, or protection from same-user processes, backups, snapshots, disk recovery, process
-inspection, or full-access model-run commands. Logout deletion is not secure erasure. OpenRouter's
-migration to macOS Keychain through the injected credential-store port remains explicit technical
-debt: a future migration must save and verify the Keychain item before deleting the file and
-preserve the file on any failure.
+The OpenRouter key is stored in owner-only plaintext `runtime/openrouter-home/api-key`; its
+directory is exact mode `0700` and the regular current-user-owned key file is exact mode `0600`.
+This is not encryption, secure storage, a sandbox, or protection from same-user processes,
+backups, snapshots, disk recovery, process inspection, or full-access model-run commands. Logout
+deletion is not secure erasure. OpenRouter's migration to macOS Keychain through the injected
+credential-store port remains explicit technical debt: a future migration must save and verify
+the Keychain item before deleting the file and preserve the file on any failure.
+
+Claude credentials remain entirely owned by Claude Code. On macOS the native CLI stores its
+login in Keychain; Vairë neither opens that item nor creates an Anthropic credential file. Claude
+**/logout** invokes the native CLI logout and therefore also signs the installed Claude Code CLI
+out. If an earlier experimental Vairë build created `runtime/anthropic-home/api-key`, current
+versions never reference, read, import, overwrite, or delete it through Vairë credential code;
+remove it manually only after deciding that the obsolete data is no longer needed. This does not
+make the file unreachable: unrestricted same-user model commands can still access it.
+
+Immediately before every Claude turn, Vairë rechecks `claude auth status --json`; a signed-out,
+unsupported, or unverifiable result blocks the turn. Vairë's supported Claude status contract does
+not expose a stable account identifier, so it never silently auto-restores a saved Claude session
+at startup or after authentication. It preserves the local pointer and requires **/resume** to
+deliberately restore it or **/new** to start blank. Claude registrations are same-user local records,
+not provider-account-scoped records; if the installed CLI is switched directly between two
+supported Claude.ai subscriptions, Vairë cannot distinguish those subscription identities.
 
 OpenRouter histories and Vairë's Claude registrations/display histories are owner-only plaintext.
 If either stream emits nonempty assistant text and then fails, Vairë retains that partial only for
@@ -94,14 +109,18 @@ forgets Vairë's registration and bounded display history; it does not claim to 
 Claude-owned session data.
 
 Claude runs with a dedicated `runtime/claude-home` configuration directory. Safe mode and direct
-flags disable inherited `CLAUDE.md`, user/project settings, hooks, plugins, skills, MCP, Chrome,
+flags disable inherited `CLAUDE.md`, user/project settings, hooks, plugins, skills, Chrome,
 WebFetch/WebSearch, interactive questions, subagents, and agent teams for this milestone. Vairë
-removes inherited `ANTHROPIC_*` and `CLAUDE_*` variables before injecting only the selected
-Console key into the Claude child environment. Environment cleanup is not a security boundary:
-other ambient authority such as `DATABASE_URL`, `SSH_AUTH_SOCK`, Keychain, credential/config
-files, and authenticated CLIs may remain available to model-run commands.
+keeps strict MCP mode enabled and passes the accepted empty configuration `{"mcpServers":{}}`, so
+no MCP servers are configured.
 
-The initial Claude model choices are Anthropic's documented selectors `default`, `opus`,
+Vairë removes inherited `ANTHROPIC_*` and `CLAUDE_*` variables before injecting only non-secret
+runtime configuration such as `CLAUDE_CONFIG_DIR`; authentication is resolved internally by Claude Code.
+Environment cleanup is not a security boundary: other ambient authority such as `DATABASE_URL`,
+`SSH_AUTH_SOCK`, Keychain, credential/config files, and authenticated CLIs may remain available to
+model-run commands.
+
+The initial Claude model choices are Anthropic's documented selectors `default`, `fable`, `opus`,
 `sonnet`, and `haiku`; they are aliases, not a fabricated account catalog. Stream initialization
 and terminal metadata establish the provider-reported model. Selecting a different Claude alias
 starts a fresh blank Claude conversation because resumed CLI sessions retain their original model.
@@ -159,5 +178,6 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
 ```
 
-Installed-CLI smoke tests are explicit, ignored, and do not require provider login or network
-access.
+Normal Claude tests use fake executables and temporary configuration directories and never inspect
+Keychain, real tokens, or a user's Claude configuration. Installed-CLI smoke tests are explicit,
+ignored, and do not require provider login or network access.

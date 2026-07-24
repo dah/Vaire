@@ -1,3 +1,6 @@
+#[cfg(target_os = "macos")]
+use std::collections::VecDeque;
+use std::path::Path;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
@@ -9,11 +12,12 @@ use tokio::task::JoinHandle;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
-use crate::credentials::SecretValue;
-
-use super::config::apply_claude_environment;
+use super::config::{apply_claude_environment, SUBSCRIPTION_SETTINGS};
 use super::protocol::{ClaudeProtocolError, MAX_STDERR_BYTES, MAX_STREAM_LINE_BYTES};
-use super::{ClaudeCliPolicy, ClaudeInvocation, ClaudeStreamEvent, ClaudeStreamParser};
+use super::{
+    ClaudeAuthAction, ClaudeCliPolicy, ClaudeInvocation, ClaudeRuntimeError, ClaudeStreamEvent,
+    ClaudeStreamParser,
+};
 
 const MAX_PROMPT_BYTES: usize = 128 * 1024;
 const SIGNAL_GRACE: Duration = Duration::from_millis(300);
@@ -21,6 +25,9 @@ const STDIN_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const FINAL_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
 const STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 const KILL_REAP_TIMEOUT: Duration = Duration::from_secs(1);
+const AUTH_TREE_STOP_TIMEOUT: Duration = Duration::from_millis(500);
+const AUTH_PROCESS_STOP_TIMEOUT: Duration = Duration::from_millis(50);
+const MAX_AUTH_DESCENDANTS: usize = 1_024;
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub enum ClaudeProcessError {
@@ -42,6 +49,442 @@ pub enum ClaudeProcessError {
     Interrupted,
     #[error("Claude process was interrupted after it started")]
     InterruptedAfterSpawn,
+}
+
+pub async fn run_claude_auth_action(
+    executable: &Path,
+    config_dir: &Path,
+    cwd: &Path,
+    action: ClaudeAuthAction,
+    cancellation: CancellationToken,
+) -> Result<(), ClaudeRuntimeError> {
+    if cancellation.is_cancelled() {
+        return Err(ClaudeRuntimeError::AuthCancelled);
+    }
+    let mut command = Command::new(executable);
+    apply_claude_environment(&mut command, config_dir);
+    command
+        .kill_on_drop(true)
+        .current_dir(cwd)
+        .args([
+            "--safe-mode",
+            "--settings",
+            SUBSCRIPTION_SETTINGS,
+            "--setting-sources",
+            "",
+        ])
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    match action {
+        ClaudeAuthAction::Login => {
+            command.args(["auth", "login", "--claudeai"]);
+        }
+        ClaudeAuthAction::Logout => {
+            command.args(["auth", "logout"]);
+        }
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|_| ClaudeRuntimeError::AuthAction)?;
+    let Some(leader_pid) = child
+        .id()
+        .and_then(|id| i32::try_from(id).ok())
+        .filter(|id| *id > 0)
+    else {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        return Err(ClaudeRuntimeError::AuthAction);
+    };
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => {}
+        status = child.wait() => {
+            return status
+                .map_err(|_| ClaudeRuntimeError::AuthAction)
+                .and_then(|status| {
+                    status
+                        .success()
+                        .then_some(())
+                        .ok_or(ClaudeRuntimeError::AuthAction)
+                })
+        }
+    }
+    match terminate_auth_child(child, leader_pid).await {
+        Ok(()) => Err(ClaudeRuntimeError::AuthCancelled),
+        Err(error) => Err(error),
+    }
+}
+
+async fn terminate_auth_child(child: Child, leader_pid: i32) -> Result<(), ClaudeRuntimeError> {
+    terminate_auth_child_with_limit(child, leader_pid, MAX_AUTH_DESCENDANTS).await
+}
+
+#[cfg(target_os = "macos")]
+async fn terminate_auth_child_with_limit(
+    mut child: Child,
+    leader_pid: i32,
+    descendant_limit: usize,
+) -> Result<(), ClaudeRuntimeError> {
+    let mut descendants = Vec::new();
+    let mut cleanup_failed = false;
+    let stop_deadline = std::time::Instant::now() + AUTH_TREE_STOP_TIMEOUT;
+    // SAFETY: getpid has no preconditions and returns the current Vairë process identity.
+    let leader =
+        match stop_and_pin_auth_process(leader_pid, unsafe { libc::getpid() }, stop_deadline) {
+            Ok(Some(leader)) => Some(leader),
+            Ok(None) => {
+                cleanup_failed = true;
+                None
+            }
+            Err(ClaudeRuntimeError::AuthAction) => {
+                cleanup_failed = true;
+                None
+            }
+            Err(error) => return Err(error),
+        };
+    if let Some(leader) = leader {
+        if collect_stopped_auth_descendants(
+            leader,
+            &mut descendants,
+            descendant_limit,
+            stop_deadline,
+        )
+        .is_err()
+        {
+            cleanup_failed = true;
+        }
+        for identity in descendants.iter().rev().copied() {
+            if kill_pinned_auth_process(identity).is_err() {
+                cleanup_failed = true;
+            }
+        }
+        if kill_pinned_auth_process(leader).is_err() {
+            cleanup_failed = true;
+        }
+    }
+    if cleanup_failed {
+        let _ = child.start_kill();
+    }
+    let wait_result = reap_auth_child(child).await;
+    if cleanup_failed || wait_result.is_err() {
+        Err(ClaudeRuntimeError::AuthAction)
+    } else {
+        Ok(())
+    }
+}
+
+async fn reap_auth_child(mut child: Child) -> Result<(), ClaudeRuntimeError> {
+    match time::timeout(KILL_REAP_TIMEOUT, child.wait()).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(_)) | Err(_) => {
+            let _ = child.start_kill();
+            // SIGKILL cannot be ignored. Finish waitpid ownership here rather than detaching a
+            // reaper that Tokio shutdown could abort and turn into an unreaped zombie.
+            let _ = child.wait().await;
+            Err(ClaudeRuntimeError::AuthAction)
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn terminate_auth_child_with_limit(
+    mut child: Child,
+    leader_pid: i32,
+    _descendant_limit: usize,
+) -> Result<(), ClaudeRuntimeError> {
+    let stop_result = signal_auth_process(leader_pid, libc::SIGSTOP);
+    let signal_result = signal_auth_process(leader_pid, libc::SIGKILL);
+    if stop_result.is_err() || signal_result.is_err() {
+        let _ = child.start_kill();
+    }
+    let wait_result = reap_auth_child(child).await;
+    if stop_result.is_err() || signal_result.is_err() || wait_result.is_err() {
+        Err(ClaudeRuntimeError::AuthAction)
+    } else {
+        Ok(())
+    }
+}
+
+fn signal_auth_process(pid: i32, signal: i32) -> Result<bool, ClaudeRuntimeError> {
+    // SAFETY: kill targets one positive PID obtained directly from the spawned auth tree.
+    if unsafe { libc::kill(pid, signal) } == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(false)
+    } else {
+        Err(ClaudeRuntimeError::AuthAction)
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AuthProcessIdentity {
+    pid: i32,
+    parent_pid: i32,
+    start_seconds: u64,
+    start_microseconds: u64,
+}
+
+#[cfg(target_os = "macos")]
+impl AuthProcessIdentity {
+    fn is_same_instance(self, other: Self) -> bool {
+        self.pid == other.pid
+            && self.start_seconds == other.start_seconds
+            && self.start_microseconds == other.start_microseconds
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AuthProcessSnapshot {
+    identity: AuthProcessIdentity,
+    status: u32,
+}
+
+#[cfg(target_os = "macos")]
+fn read_auth_process_snapshot(pid: i32) -> Result<Option<AuthProcessSnapshot>, ClaudeRuntimeError> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let info_size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>())
+        .map_err(|_| ClaudeRuntimeError::AuthAction)?;
+    // SAFETY: proc_pidinfo writes at most `info_size` bytes to this correctly aligned buffer and
+    // retains no pointer. The value is read only after a full-size result.
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast::<libc::c_void>(),
+            info_size,
+        )
+    };
+    let read_error = std::io::Error::last_os_error().raw_os_error();
+    if read == info_size {
+        // SAFETY: an exact full-size result initializes the complete proc_bsdinfo structure.
+        let info = unsafe { info.assume_init() };
+        let reported_pid =
+            i32::try_from(info.pbi_pid).map_err(|_| ClaudeRuntimeError::AuthAction)?;
+        if reported_pid != pid {
+            return Err(ClaudeRuntimeError::AuthAction);
+        }
+        return Ok(Some(AuthProcessSnapshot {
+            identity: AuthProcessIdentity {
+                pid,
+                parent_pid: i32::try_from(info.pbi_ppid)
+                    .map_err(|_| ClaudeRuntimeError::AuthAction)?,
+                start_seconds: info.pbi_start_tvsec,
+                start_microseconds: info.pbi_start_tvusec,
+            },
+            status: info.pbi_status,
+        }));
+    }
+
+    // Apple's wrapper maps the underlying syscall failure to zero while preserving errno. Capture
+    // it immediately: a vanished (including unreaped zombie) PID is absence; every other zero or
+    // positive short read is an identity-inspection failure.
+    if read == 0 && read_error == Some(libc::ESRCH) {
+        Ok(None)
+    } else {
+        Err(ClaudeRuntimeError::AuthAction)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn resume_auth_process_if_same_instance(identity: AuthProcessIdentity) {
+    let Ok(Some(current)) = read_auth_process_snapshot(identity.pid) else {
+        return;
+    };
+    if current.identity.is_same_instance(identity) && current.status == libc::SSTOP {
+        let _ = signal_auth_process(identity.pid, libc::SIGCONT);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn stop_and_pin_auth_process(
+    pid: i32,
+    expected_parent: i32,
+    cleanup_deadline: std::time::Instant,
+) -> Result<Option<AuthProcessIdentity>, ClaudeRuntimeError> {
+    if std::time::Instant::now() >= cleanup_deadline {
+        return Err(ClaudeRuntimeError::AuthAction);
+    }
+    let Some(before) = read_auth_process_snapshot(pid)? else {
+        return Ok(None);
+    };
+    if before.identity.parent_pid != expected_parent {
+        return Err(ClaudeRuntimeError::AuthAction);
+    }
+    if before.status == libc::SZOMB {
+        return Ok(None);
+    }
+    if before.status == libc::SSTOP {
+        return Ok(Some(before.identity));
+    }
+    if !signal_auth_process(pid, libc::SIGSTOP)? {
+        return Ok(None);
+    }
+
+    let deadline = cleanup_deadline.min(std::time::Instant::now() + AUTH_PROCESS_STOP_TIMEOUT);
+    loop {
+        let current = match read_auth_process_snapshot(pid) {
+            Ok(current) => current,
+            Err(error) => {
+                // The leader is held by Child and a descendant's parent remains stopped, so this
+                // PID cannot normally be reused here. Best-effort resume avoids stranding a
+                // process if identity inspection itself failed after our SIGSTOP.
+                let _ = signal_auth_process(pid, libc::SIGCONT);
+                return Err(error);
+            }
+        };
+        match current {
+            None => return Ok(None),
+            Some(current)
+                if !current.identity.is_same_instance(before.identity)
+                    || current.identity.parent_pid != expected_parent =>
+            {
+                // Never kill a changed identity. If our immediately preceding SIGSTOP landed on
+                // the newly observed instance, resume that exact stopped snapshot before failing.
+                resume_auth_process_if_same_instance(current.identity);
+                return Err(ClaudeRuntimeError::AuthAction);
+            }
+            Some(current) if current.status == libc::SZOMB => return Ok(None),
+            Some(current) if current.status == libc::SSTOP => {
+                return Ok(Some(current.identity));
+            }
+            Some(_) => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            resume_auth_process_if_same_instance(before.identity);
+            return Err(ClaudeRuntimeError::AuthAction);
+        }
+        std::thread::yield_now();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn require_stopped_auth_process(identity: AuthProcessIdentity) -> Result<(), ClaudeRuntimeError> {
+    let Some(current) = read_auth_process_snapshot(identity.pid)? else {
+        return Err(ClaudeRuntimeError::AuthAction);
+    };
+    if current.identity == identity && current.status == libc::SSTOP {
+        Ok(())
+    } else {
+        Err(ClaudeRuntimeError::AuthAction)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn kill_pinned_auth_process(identity: AuthProcessIdentity) -> Result<(), ClaudeRuntimeError> {
+    let Some(current) = read_auth_process_snapshot(identity.pid)? else {
+        return Ok(());
+    };
+    if current.identity != identity || current.status != libc::SSTOP {
+        if current.identity.is_same_instance(identity) {
+            resume_auth_process_if_same_instance(identity);
+        }
+        return Err(ClaudeRuntimeError::AuthAction);
+    }
+    signal_auth_process(identity.pid, libc::SIGKILL).map(|_| ())
+}
+
+#[cfg(target_os = "macos")]
+fn list_stopped_auth_children(
+    parent: AuthProcessIdentity,
+    allowance: usize,
+) -> Result<(Vec<i32>, bool), ClaudeRuntimeError> {
+    require_stopped_auth_process(parent)?;
+    // libproc's null-buffer sizing result is global process-table headroom, not a filtered child
+    // count. Read one PID beyond the remaining retention budget instead: that sentinel proves
+    // overflow while every retained slot still receives a concrete PID to clean.
+    let capacity = allowance
+        .checked_add(1)
+        .ok_or(ClaudeRuntimeError::AuthAction)?;
+    let mut children = vec![0_i32; capacity];
+    let buffer_bytes = capacity
+        .checked_mul(std::mem::size_of::<i32>())
+        .and_then(|bytes| i32::try_from(bytes).ok())
+        .ok_or(ClaudeRuntimeError::AuthAction)?;
+    // SAFETY: the buffer is writable for exactly `buffer_bytes`; libproc retains no pointer.
+    let filled = unsafe {
+        libc::proc_listchildpids(
+            parent.pid,
+            children.as_mut_ptr().cast::<libc::c_void>(),
+            buffer_bytes,
+        )
+    };
+    if filled < 0 {
+        return Err(ClaudeRuntimeError::AuthAction);
+    }
+    let filled = usize::try_from(filled).map_err(|_| ClaudeRuntimeError::AuthAction)?;
+    if filled > capacity {
+        return Err(ClaudeRuntimeError::AuthAction);
+    }
+    children.truncate(filled.min(allowance));
+    require_stopped_auth_process(parent)?;
+    Ok((children, filled > allowance))
+}
+
+#[cfg(target_os = "macos")]
+fn collect_stopped_auth_descendants(
+    root: AuthProcessIdentity,
+    descendants: &mut Vec<AuthProcessIdentity>,
+    limit: usize,
+    stop_deadline: std::time::Instant,
+) -> Result<(), ClaudeRuntimeError> {
+    let mut parents = VecDeque::from([root]);
+    let mut failed = false;
+    while let Some(parent) = parents.pop_front() {
+        if std::time::Instant::now() >= stop_deadline {
+            failed = true;
+            break;
+        }
+        let allowance = limit.saturating_sub(descendants.len());
+        let children = match list_stopped_auth_children(parent, allowance) {
+            Ok((children, overflow)) => {
+                failed |= overflow;
+                children
+            }
+            Err(_) => {
+                failed = true;
+                continue;
+            }
+        };
+
+        // Stop every direct sibling that fits before descending into any one subtree. With the
+        // parent already stopped this reaches a stable fixed point and minimizes fork/reparent
+        // races. Parents are retained before descendants, so reverse-order cleanup remains
+        // leaf-first.
+        let mut stopped_children = Vec::new();
+        for child_pid in children.into_iter().filter(|pid| *pid > 0) {
+            if std::time::Instant::now() >= stop_deadline {
+                failed = true;
+                break;
+            }
+            if descendants.iter().any(|identity| identity.pid == child_pid) {
+                failed = true;
+                continue;
+            }
+            match stop_and_pin_auth_process(child_pid, parent.pid, stop_deadline) {
+                Ok(Some(identity)) => {
+                    descendants.push(identity);
+                    stopped_children.push(identity);
+                }
+                // An enumerated child that exits before it can be pinned may already have
+                // reparented descendants. Preserve the retained set but fail the complete proof.
+                Ok(None) | Err(_) => {
+                    failed = true;
+                }
+            }
+        }
+        parents.extend(stopped_children);
+    }
+    if failed {
+        Err(ClaudeRuntimeError::AuthAction)
+    } else {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -119,7 +562,6 @@ impl ClaudeChild {
         invocation: &ClaudeInvocation,
         expected_session: crate::provider::ClaudeSessionId,
         prompt: &str,
-        key: SecretValue,
         cancellation: &CancellationToken,
     ) -> Result<Self, ClaudeProcessError> {
         if prompt.is_empty() || prompt.len() > MAX_PROMPT_BYTES {
@@ -130,7 +572,7 @@ impl ClaudeChild {
         }
         let args = policy.args(invocation);
         let mut command = Command::new(policy.executable());
-        apply_claude_environment(&mut command, policy.home(), Some(&key));
+        apply_claude_environment(&mut command, policy.home());
         command
             .args(args)
             .current_dir(policy.cwd())
@@ -663,10 +1105,6 @@ mod process_boundary_tests {
         }
     }
 
-    fn key() -> SecretValue {
-        SecretValue::from_input("test-console-key").unwrap()
-    }
-
     async fn wait_for_pid_gone(pid: i32) -> bool {
         time::timeout(Duration::from_secs(1), async {
             loop {
@@ -681,6 +1119,37 @@ mod process_boundary_tests {
         })
         .await
         .is_ok()
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn wait_for_auth_instance_terminated(identity: AuthProcessIdentity) -> bool {
+        time::timeout(Duration::from_secs(2), async {
+            loop {
+                match read_auth_process_snapshot(identity.pid) {
+                    Ok(None) => break,
+                    Ok(Some(current))
+                        if !current.identity.is_same_instance(identity)
+                            || current.status == libc::SZOMB =>
+                    {
+                        break;
+                    }
+                    Ok(Some(_)) | Err(_) => time::sleep(Duration::from_millis(10)).await,
+                }
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn kill_test_auth_instance(identity: AuthProcessIdentity) {
+        if read_auth_process_snapshot(identity.pid)
+            .ok()
+            .flatten()
+            .is_some_and(|current| current.identity.is_same_instance(identity))
+        {
+            kill_test_pid(identity.pid);
+        }
     }
 
     fn kill_test_pid(pid: i32) {
@@ -710,14 +1179,7 @@ mod process_boundary_tests {
         let prompt = "x".repeat(MAX_PROMPT_BYTES);
         let result = time::timeout(
             Duration::from_secs(4),
-            ClaudeChild::spawn(
-                &policy,
-                &invocation(),
-                session(),
-                &prompt,
-                key(),
-                &cancellation,
-            ),
+            ClaudeChild::spawn(&policy, &invocation(), session(), &prompt, &cancellation),
         )
         .await
         .expect("post-spawn cancellation must clean up promptly");
@@ -740,16 +1202,10 @@ mod process_boundary_tests {
         );
         let policy = test_policy(script, root.path());
         let cancellation = CancellationToken::new();
-        let mut child = ClaudeChild::spawn(
-            &policy,
-            &invocation(),
-            session(),
-            "hello",
-            key(),
-            &cancellation,
-        )
-        .await
-        .unwrap();
+        let mut child =
+            ClaudeChild::spawn(&policy, &invocation(), session(), "hello", &cancellation)
+                .await
+                .unwrap();
 
         let error = time::timeout(Duration::from_secs(3), async {
             loop {
@@ -793,16 +1249,10 @@ mod process_boundary_tests {
         let descendant_pid_path = root.path().join("fake-claude.descendant-pid");
         let policy = test_policy(script, root.path());
         let cancellation = CancellationToken::new();
-        let mut child = ClaudeChild::spawn(
-            &policy,
-            &invocation(),
-            session(),
-            "hello",
-            key(),
-            &cancellation,
-        )
-        .await
-        .unwrap();
+        let mut child =
+            ClaudeChild::spawn(&policy, &invocation(), session(), "hello", &cancellation)
+                .await
+                .unwrap();
         assert!(matches!(
             child.next_event().await.unwrap(),
             Some(ClaudeStreamEvent::Initialized { .. })
@@ -847,16 +1297,10 @@ mod process_boundary_tests {
         let descendant_pid_path = root.path().join("fake-claude.descendant-pid");
         let policy = test_policy(script, root.path());
         let cancellation = CancellationToken::new();
-        let mut child = ClaudeChild::spawn(
-            &policy,
-            &invocation(),
-            session(),
-            "hello",
-            key(),
-            &cancellation,
-        )
-        .await
-        .unwrap();
+        let mut child =
+            ClaudeChild::spawn(&policy, &invocation(), session(), "hello", &cancellation)
+                .await
+                .unwrap();
         let mut saw_terminal = false;
         while let Some(event) = child.next_event().await.unwrap() {
             saw_terminal |= matches!(event, ClaudeStreamEvent::Terminal { success: true, .. });
@@ -887,6 +1331,205 @@ mod process_boundary_tests {
                 ProcessLifecycleEvent::Signal(libc::SIGKILL),
                 ProcessLifecycleEvent::ReapStarted,
             ]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn pinned_auth_cleanup_refuses_changed_process_identity() {
+        let root = TempDir::new().unwrap();
+        let script = write_cli(root.path(), "#!/bin/sh\nexec sleep 30\n");
+        let mut child = Command::new(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = i32::try_from(child.id().unwrap()).unwrap();
+        // SAFETY: getpid has no preconditions and identifies this test process, the direct parent.
+        let parent_pid = unsafe { libc::getpid() };
+        let stop_deadline = std::time::Instant::now() + AUTH_TREE_STOP_TIMEOUT;
+        let identity = stop_and_pin_auth_process(pid, parent_pid, stop_deadline)
+            .unwrap()
+            .expect("live child must be stopped and pinned");
+
+        let mut wrong_parent = identity;
+        wrong_parent.parent_pid = wrong_parent.parent_pid.saturating_add(1);
+        let mut wrong_start = identity;
+        wrong_start.start_microseconds = wrong_start.start_microseconds.wrapping_add(1);
+        let wrong_start_result = kill_pinned_auth_process(wrong_start);
+        let still_pinned_after_start_mismatch = read_auth_process_snapshot(pid).unwrap();
+        let wrong_parent_result = kill_pinned_auth_process(wrong_parent);
+        let still_same_process_after_parent_mismatch = read_auth_process_snapshot(pid).unwrap();
+        let repinned = stop_and_pin_auth_process(
+            pid,
+            parent_pid,
+            std::time::Instant::now() + AUTH_TREE_STOP_TIMEOUT,
+        )
+        .unwrap()
+        .expect("the rejected process must remain available for exact cleanup");
+
+        let cleanup_result = kill_pinned_auth_process(repinned);
+        if cleanup_result.is_err() {
+            let _ = signal_auth_process(pid, libc::SIGCONT);
+            let _ = child.start_kill();
+        }
+        let wait_result = time::timeout(Duration::from_secs(2), child.wait()).await;
+
+        assert_eq!(wrong_parent_result, Err(ClaudeRuntimeError::AuthAction));
+        assert_eq!(wrong_start_result, Err(ClaudeRuntimeError::AuthAction));
+        assert!(still_pinned_after_start_mismatch.is_some_and(|snapshot| {
+            snapshot.identity == identity && snapshot.status == libc::SSTOP
+        }));
+        assert!(still_same_process_after_parent_mismatch
+            .is_some_and(|snapshot| snapshot.identity.is_same_instance(identity)));
+        assert_eq!(repinned, identity);
+        assert_eq!(cleanup_result, Ok(()));
+        assert!(wait_result.is_ok_and(|result| result.is_ok()));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn auth_descendant_exact_limit_is_complete_and_kills_every_child() {
+        let root = TempDir::new().unwrap();
+        let script = write_cli(
+            root.path(),
+            "#!/bin/sh\nsleep 30 &\nfirst=$!\nsleep 30 &\nsecond=$!\nprintf '%s %s\\n' \"$first\" \"$second\" > \"$0.descendant-pids\"\n: > \"$0.ready\"\nwait\n",
+        );
+        let ready = root.path().join("fake-claude.ready");
+        let pids_path = root.path().join("fake-claude.descendant-pids");
+        let child = Command::new(&script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let leader_pid = i32::try_from(child.id().unwrap()).unwrap();
+        time::timeout(Duration::from_secs(2), async {
+            while !ready.exists() {
+                time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("fake auth CLI must create both descendants");
+        let pids = fs::read_to_string(pids_path)
+            .unwrap()
+            .split_whitespace()
+            .map(|pid| pid.parse::<i32>().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(pids.len(), 2);
+        let identities = pids
+            .iter()
+            .map(|pid| {
+                read_auth_process_snapshot(*pid)
+                    .unwrap()
+                    .expect("fake descendant must still be live")
+                    .identity
+            })
+            .collect::<Vec<_>>();
+
+        let cleanup_result = time::timeout(
+            Duration::from_secs(3),
+            terminate_auth_child_with_limit(child, leader_pid, 2),
+        )
+        .await
+        .expect("exact-cap auth cleanup must remain bounded");
+        let (leader_gone, first_terminated, second_terminated) = tokio::join!(
+            wait_for_pid_gone(leader_pid),
+            wait_for_auth_instance_terminated(identities[0]),
+            wait_for_auth_instance_terminated(identities[1])
+        );
+        if !leader_gone {
+            kill_test_pid(leader_pid);
+        }
+        for (identity, terminated) in identities
+            .into_iter()
+            .zip([first_terminated, second_terminated])
+        {
+            if !terminated {
+                kill_test_auth_instance(identity);
+            }
+        }
+
+        assert_eq!(cleanup_result, Ok(()));
+        assert!(leader_gone, "the auth leader must be reaped");
+        assert!(
+            first_terminated && second_terminated,
+            "an exact-cap traversal must clean every descendant"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn auth_descendant_limit_cleans_retained_prefix_and_reports_failure() {
+        let root = TempDir::new().unwrap();
+        let script = write_cli(
+            root.path(),
+            "#!/bin/sh\nsleep 30 &\nfirst=$!\nsleep 30 &\nsecond=$!\nprintf '%s %s\\n' \"$first\" \"$second\" > \"$0.descendant-pids\"\n: > \"$0.ready\"\nwait\n",
+        );
+        let ready = root.path().join("fake-claude.ready");
+        let pids_path = root.path().join("fake-claude.descendant-pids");
+        let child = Command::new(&script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let leader_pid = i32::try_from(child.id().unwrap()).unwrap();
+        time::timeout(Duration::from_secs(2), async {
+            while !ready.exists() {
+                time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("fake auth CLI must create both descendants");
+        let pids = fs::read_to_string(pids_path)
+            .unwrap()
+            .split_whitespace()
+            .map(|pid| pid.parse::<i32>().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(pids.len(), 2);
+        let identities = pids
+            .iter()
+            .map(|pid| {
+                read_auth_process_snapshot(*pid)
+                    .unwrap()
+                    .expect("fake descendant must still be live")
+                    .identity
+            })
+            .collect::<Vec<_>>();
+
+        let cleanup_result = time::timeout(
+            Duration::from_secs(3),
+            terminate_auth_child_with_limit(child, leader_pid, 1),
+        )
+        .await
+        .expect("capped auth cleanup must remain bounded");
+        let (leader_gone, first_terminated, second_terminated) = tokio::join!(
+            wait_for_pid_gone(leader_pid),
+            wait_for_auth_instance_terminated(identities[0]),
+            wait_for_auth_instance_terminated(identities[1])
+        );
+        if !leader_gone {
+            kill_test_pid(leader_pid);
+        }
+        for (identity, terminated) in identities
+            .into_iter()
+            .zip([first_terminated, second_terminated])
+        {
+            if !terminated {
+                kill_test_auth_instance(identity);
+            }
+        }
+
+        assert_eq!(cleanup_result, Err(ClaudeRuntimeError::AuthAction));
+        assert!(
+            leader_gone,
+            "the auth leader must be reaped even on overflow"
+        );
+        assert!(
+            first_terminated || second_terminated,
+            "the safely retained descendant prefix must still be killed"
         );
     }
 }

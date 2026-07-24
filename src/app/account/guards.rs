@@ -61,8 +61,15 @@ impl AppState {
             if !matches!(self.claude.availability, ClaudeAvailability::Ready) {
                 return Some("Claude Code runtime is not available".to_owned());
             }
-            if self.claude.auth != ClaudeAuthStatus::Valid {
-                return Some("configure Claude Code with /login before sending".to_owned());
+            if !matches!(self.claude.auth_operation, ClaudeAuthOperation::Idle) {
+                return Some(
+                    "wait for the current Claude authentication operation to finish".to_owned(),
+                );
+            }
+            if self.claude.auth != ClaudeAuthStatus::Subscription {
+                return Some(
+                    "sign in to a Claude subscription with /login before sending".to_owned(),
+                );
             }
             let Some(model) = self
                 .selected_model

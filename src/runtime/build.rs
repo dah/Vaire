@@ -1,7 +1,15 @@
 use super::*;
 
+#[cfg(test)]
 pub(in crate::runtime) async fn build_backend(
     config: RuntimeConfig,
+) -> Result<BackendCoordinator<FilePreferences, MacOsBrowser>, RuntimeError> {
+    build_backend_with_claude_resolution(config, None).await
+}
+
+pub(in crate::runtime) async fn build_backend_with_claude_resolution(
+    config: RuntimeConfig,
+    claude_resolution: Option<Result<PathBuf, ClaudeRuntimeError>>,
 ) -> Result<BackendCoordinator<FilePreferences, MacOsBrowser>, RuntimeError> {
     fs::create_dir_all(&config.paths.support_dir).map_err(RuntimeError::Paths)?;
     fs::set_permissions(&config.paths.support_dir, fs::Permissions::from_mode(0o700))
@@ -34,19 +42,12 @@ pub(in crate::runtime) async fn build_backend(
     let claude = async {
         prepare_private_directory(&config.paths.claude_cli_home_dir)?;
         prepare_private_directory(&config.paths.claude_conversation_dir)?;
-        let credentials: Arc<dyn CredentialStore> = Arc::new(
-            FileCredentialStore::new(
-                CredentialAccount::AnthropicConsoleApiKey,
-                &config.paths.anthropic_credential_home_dir,
-                &config.paths.anthropic_credential_file,
-            )
-            .map_err(|error| RuntimeError::Claude(error.to_string()))?,
-        );
         let store: Arc<dyn ClaudeSessionStore> = Arc::new(
             FileClaudeSessionStore::new(&config.paths.claude_store_dir)
                 .map_err(|error| RuntimeError::Claude(error.to_string()))?,
         );
-        let executable = resolve_claude(config.claude_override.as_deref())
+        let executable = claude_resolution
+            .unwrap_or_else(|| resolve_claude(config.claude_override.as_deref()))
             .map_err(|error| RuntimeError::Claude(error.to_string()))?;
         verify_claude_version(
             &executable,
@@ -60,8 +61,8 @@ pub(in crate::runtime) async fn build_backend(
             config.paths.claude_cli_home_dir.clone(),
             config.paths.claude_conversation_dir.clone(),
         );
-        let service = ClaudeService::new(policy.clone(), credentials.clone(), store);
-        Ok::<_, RuntimeError>(ClaudeBackendRuntime::new(service, credentials, policy))
+        let service = ClaudeService::new(policy.clone(), store);
+        Ok::<_, RuntimeError>(ClaudeBackendRuntime::new(service, policy))
     }
     .await;
 

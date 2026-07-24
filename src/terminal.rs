@@ -1,4 +1,6 @@
+use std::fs::{File, OpenOptions};
 use std::io::{self, stdout};
+use std::os::fd::AsRawFd;
 
 use crossterm::{
     cursor::{Hide, Show},
@@ -12,20 +14,48 @@ pub trait TerminalOps {
     fn restore(&mut self) -> io::Result<()>;
 }
 
-#[derive(Debug, Default)]
-pub struct SystemTerminalOps;
+pub struct SystemTerminalOps {
+    tty: File,
+    original_mode: libc::termios,
+}
+
+impl SystemTerminalOps {
+    pub fn capture() -> io::Result<Self> {
+        let tty = OpenOptions::new().read(true).write(true).open("/dev/tty")?;
+        let mut original_mode = std::mem::MaybeUninit::<libc::termios>::uninit();
+        // SAFETY: `original_mode` points to writable storage for one termios value, the tty fd is
+        // valid for the lifetime of this object, and tcgetattr retains neither pointer nor fd.
+        if unsafe { libc::tcgetattr(tty.as_raw_fd(), original_mode.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: tcgetattr returned success and therefore initialized the value.
+        let original_mode = unsafe { original_mode.assume_init() };
+        Ok(Self { tty, original_mode })
+    }
+
+    fn restore_original_mode(&self) -> io::Result<()> {
+        // SAFETY: both the tty fd and termios reference remain valid for the duration of the call;
+        // tcsetattr retains neither.
+        if unsafe { libc::tcsetattr(self.tty.as_raw_fd(), libc::TCSANOW, &self.original_mode) } == 0
+        {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+}
 
 impl TerminalOps for SystemTerminalOps {
     fn enter(&mut self) -> io::Result<()> {
         enter_with_restore(
             enable_raw_mode,
             || execute!(stdout(), EnterAlternateScreen, EnableBracketedPaste, Hide),
-            restore_system_terminal,
+            || restore_system_terminal(self),
         )
     }
 
     fn restore(&mut self) -> io::Result<()> {
-        restore_system_terminal()
+        restore_system_terminal(self)
     }
 }
 
@@ -51,10 +81,11 @@ where
     Ok(())
 }
 
-fn restore_system_terminal() -> io::Result<()> {
+fn restore_system_terminal(terminal: &SystemTerminalOps) -> io::Result<()> {
     let screen_result = execute!(stdout(), Show, DisableBracketedPaste, LeaveAlternateScreen);
     let raw_result = disable_raw_mode();
-    screen_result.and(raw_result)
+    let original_result = terminal.restore_original_mode();
+    screen_result.and(raw_result).and(original_result)
 }
 
 /// Owns terminal mode restoration. Explicit restoration and Drop are idempotent.
@@ -78,6 +109,33 @@ impl<T: TerminalOps> TerminalGuard<T> {
             self.active = false;
         }
         result
+    }
+
+    /// Temporarily yields terminal I/O to a native foreground CLI.
+    ///
+    /// This is an alias for restoration so callers cannot accidentally leave raw mode or the
+    /// alternate screen active while another process owns stdin/stdout.
+    pub fn suspend(&mut self) -> io::Result<()> {
+        self.restore()
+    }
+
+    /// Forces the terminal back to its normal state after a native foreground CLI used it.
+    ///
+    /// A child killed by a signal may not restore tty modes before exiting. Marking the guard
+    /// active before the idempotent restore also ensures `Drop` retries a transient failure.
+    pub fn normalize_after_foreground_child(&mut self) -> io::Result<()> {
+        self.active = true;
+        self.restore()
+    }
+
+    /// Re-enters Vairë's terminal mode after a foreground child has exited.
+    pub fn resume(&mut self) -> io::Result<()> {
+        if self.active {
+            return Ok(());
+        }
+        self.ops.enter()?;
+        self.active = true;
+        Ok(())
     }
 }
 
@@ -179,6 +237,55 @@ mod tests {
         .unwrap();
 
         assert!(guard.restore().is_err());
+        drop(guard);
+
+        assert_eq!(restores.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn suspend_and_resume_transfer_terminal_ownership_in_order() {
+        let (ops, enters, restores) = mock();
+        let mut guard = TerminalGuard::enter(ops).unwrap();
+
+        guard.suspend().unwrap();
+        guard.suspend().unwrap();
+        assert_eq!(enters.load(Ordering::SeqCst), 1);
+        assert_eq!(restores.load(Ordering::SeqCst), 1);
+
+        guard.resume().unwrap();
+        guard.resume().unwrap();
+        assert_eq!(enters.load(Ordering::SeqCst), 2);
+        assert_eq!(restores.load(Ordering::SeqCst), 1);
+
+        drop(guard);
+        assert_eq!(restores.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn foreground_child_normalization_restores_even_while_suspended() {
+        let (ops, enters, restores) = mock();
+        let mut guard = TerminalGuard::enter(ops).unwrap();
+        guard.suspend().unwrap();
+
+        guard.normalize_after_foreground_child().unwrap();
+
+        assert_eq!(enters.load(Ordering::SeqCst), 1);
+        assert_eq!(restores.load(Ordering::SeqCst), 2);
+        drop(guard);
+        assert_eq!(restores.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn failed_suspend_never_allows_a_second_enter() {
+        let restores = Arc::new(AtomicUsize::new(0));
+        let mut guard = TerminalGuard::enter(FailOnceRestoreOps {
+            restores: Arc::clone(&restores),
+        })
+        .unwrap();
+
+        assert!(guard.suspend().is_err());
+        // The guard still considers itself active after a failed restore, so resume is a no-op.
+        guard.resume().unwrap();
         drop(guard);
 
         assert_eq!(restores.load(Ordering::SeqCst), 2);

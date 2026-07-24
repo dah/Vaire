@@ -59,6 +59,7 @@ impl ModelKey {
 #[serde(rename_all = "snake_case")]
 pub enum ClaudeModelAlias {
     Default,
+    Fable,
     Opus,
     Sonnet,
     Haiku,
@@ -68,6 +69,7 @@ impl ClaudeModelAlias {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Default => "default",
+            Self::Fable => "fable",
             Self::Opus => "opus",
             Self::Sonnet => "sonnet",
             Self::Haiku => "haiku",
@@ -87,6 +89,7 @@ impl FromStr for ClaudeModelAlias {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "default" => Ok(Self::Default),
+            "fable" => Ok(Self::Fable),
             "opus" => Ok(Self::Opus),
             "sonnet" => Ok(Self::Sonnet),
             "haiku" => Ok(Self::Haiku),
@@ -410,6 +413,7 @@ mod tests {
     fn claude_aliases_have_stable_lowercase_strings() {
         for (alias, expected) in [
             (ClaudeModelAlias::Default, "default"),
+            (ClaudeModelAlias::Fable, "fable"),
             (ClaudeModelAlias::Opus, "opus"),
             (ClaudeModelAlias::Sonnet, "sonnet"),
             (ClaudeModelAlias::Haiku, "haiku"),
@@ -417,9 +421,11 @@ mod tests {
             assert_eq!(alias.as_str(), expected);
             assert_eq!(alias.to_string(), expected);
             assert_eq!(expected.parse::<ClaudeModelAlias>().unwrap(), alias);
+            let encoded = serde_json::to_string(&alias).unwrap();
+            assert_eq!(encoded, format!("\"{expected}\""));
             assert_eq!(
-                serde_json::to_string(&alias).unwrap(),
-                format!("\"{expected}\"")
+                serde_json::from_str::<ClaudeModelAlias>(&encoded).unwrap(),
+                alias
             );
         }
         assert!("Sonnet".parse::<ClaudeModelAlias>().is_err());

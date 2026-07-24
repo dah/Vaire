@@ -4,7 +4,10 @@ use crate::credentials::SecretValue;
 pub enum RuntimeCommand {
     Intent(Intent),
     OpenRouterCredential(SecretValue),
-    ClaudeCredential(SecretValue),
+    ClaudeAuthFinished {
+        request: crate::app::ClaudeAuthRequest,
+        result: Result<(), crate::claude::ClaudeRuntimeError>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -103,6 +106,9 @@ pub struct RuntimeHandle {
     shutdowns: mpsc::Sender<()>,
     states: watch::Receiver<AppState>,
     task: JoinHandle<()>,
+    claude_auth_executable: Result<PathBuf, ClaudeRuntimeError>,
+    claude_auth_home: PathBuf,
+    claude_auth_cwd: PathBuf,
 }
 
 impl RuntimeHandle {
@@ -114,12 +120,24 @@ impl RuntimeHandle {
         let (state_tx, state_rx) = watch::channel(initial);
         let (intent_tx, intent_rx) = mpsc::channel(32);
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
-        let task = tokio::spawn(run_backend(config, intent_rx, shutdown_rx, state_tx));
+        let claude_auth_executable = resolve_claude(config.claude_override.as_deref());
+        let claude_auth_home = config.paths.claude_cli_home_dir.clone();
+        let claude_auth_cwd = config.paths.claude_conversation_dir.clone();
+        let task = tokio::spawn(run_backend(
+            config,
+            Some(claude_auth_executable.clone()),
+            intent_rx,
+            shutdown_rx,
+            state_tx,
+        ));
         Self {
             intents: intent_tx,
             shutdowns: shutdown_tx,
             states: state_rx,
             task,
+            claude_auth_executable,
+            claude_auth_home,
+            claude_auth_cwd,
         }
     }
 
@@ -162,40 +180,41 @@ impl RuntimeHandle {
             })
     }
 
-    pub fn try_send_provider_credential(
+    pub async fn run_claude_auth(
         &self,
-        provider: crate::provider::ProviderId,
-        value: SecretValue,
-    ) -> Result<(), (SecretValue, &'static str)> {
-        match provider {
-            crate::provider::ProviderId::OpenRouter => self.try_send_openrouter_credential(value),
-            crate::provider::ProviderId::Claude => self.try_send_claude_credential(value),
-            crate::provider::ProviderId::Codex => {
-                Err((value, "Codex authentication does not accept an API key"))
-            }
-        }
+        action: crate::claude::ClaudeAuthAction,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<(), crate::claude::ClaudeRuntimeError> {
+        let executable = self
+            .claude_auth_executable
+            .as_ref()
+            .map_err(|error| *error)?;
+        verify_claude_version_cancellable(
+            executable,
+            &self.claude_auth_home,
+            Duration::from_secs(3),
+            &cancellation,
+        )
+        .await?;
+        crate::claude::run_claude_auth_action(
+            executable,
+            &self.claude_auth_home,
+            &self.claude_auth_cwd,
+            action,
+            cancellation,
+        )
+        .await
     }
 
-    pub fn try_send_claude_credential(
+    pub async fn finish_claude_auth(
         &self,
-        value: SecretValue,
-    ) -> Result<(), (SecretValue, &'static str)> {
+        request: crate::app::ClaudeAuthRequest,
+        result: Result<(), crate::claude::ClaudeRuntimeError>,
+    ) -> Result<(), &'static str> {
         self.intents
-            .try_send(RuntimeCommand::ClaudeCredential(value))
-            .map_err(|error| {
-                let (command, message) = match error {
-                    mpsc::error::TrySendError::Full(command) => {
-                        (command, "background backend is busy; try again")
-                    }
-                    mpsc::error::TrySendError::Closed(command) => {
-                        (command, "background backend has stopped")
-                    }
-                };
-                let RuntimeCommand::ClaudeCredential(value) = command else {
-                    unreachable!("submitted a Claude credential command")
-                };
-                (value, message)
-            })
+            .send(RuntimeCommand::ClaudeAuthFinished { request, result })
+            .await
+            .map_err(|_| "background backend has stopped")
     }
 
     pub fn request_shutdown(&self) {
@@ -208,5 +227,105 @@ impl RuntimeHandle {
             self.task.abort();
             let _ = self.task.await;
         }
+    }
+}
+
+#[cfg(test)]
+mod claude_auth_tests {
+    use std::fs;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::path::Path;
+
+    use super::*;
+
+    fn write_fake_claude(path: &Path, version: &str, marker: &Path) {
+        fs::write(
+            path,
+            format!(
+                r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf '%s\n' '{version}'
+  exit 0
+fi
+case " $* " in
+  *" auth status --json "*)
+    printf '%s\n' '{{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}}'
+    ;;
+  *" auth login --claudeai "*)
+    : > '{marker}'
+    ;;
+esac
+"#,
+                marker = marker.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    fn config(root: &Path, claude_override: &Path) -> RuntimeConfig {
+        let paths = AppPaths::from_home(root);
+        for directory in [&paths.claude_cli_home_dir, &paths.claude_conversation_dir] {
+            fs::create_dir_all(directory).unwrap();
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        RuntimeConfig {
+            paths,
+            codex_override: Some(root.join("missing-codex").into_os_string()),
+            claude_override: Some(claude_override.as_os_str().to_owned()),
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_reuses_the_executable_identity_pinned_for_backend_startup() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("claude-first");
+        let second = root.path().join("claude-second");
+        let first_marker = root.path().join("first-login");
+        let second_marker = root.path().join("second-login");
+        write_fake_claude(&first, crate::claude::TESTED_CLAUDE_VERSION, &first_marker);
+        write_fake_claude(
+            &second,
+            crate::claude::TESTED_CLAUDE_VERSION,
+            &second_marker,
+        );
+        let link = root.path().join("claude-current");
+        symlink(&first, &link).unwrap();
+
+        let runtime = RuntimeHandle::spawn(config(root.path(), &link));
+        fs::remove_file(&link).unwrap();
+        symlink(&second, &link).unwrap();
+
+        runtime
+            .run_claude_auth(
+                crate::claude::ClaudeAuthAction::Login,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(first_marker.exists());
+        assert!(!second_marker.exists());
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn auth_rejects_a_freshly_outdated_pinned_executable_before_login() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("claude-outdated");
+        let marker = root.path().join("outdated-login");
+        write_fake_claude(&executable, "2.1.177", &marker);
+        let runtime = RuntimeHandle::spawn(config(root.path(), &executable));
+
+        let result = runtime
+            .run_claude_auth(
+                crate::claude::ClaudeAuthAction::Login,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await;
+
+        assert_eq!(result, Err(ClaudeRuntimeError::UnsupportedVersion));
+        assert!(!marker.exists());
+        runtime.shutdown().await;
     }
 }

@@ -1,17 +1,16 @@
 use super::*;
 use crate::app::{
-    AuthPopupMode, ClaudeAvailability, ClaudeConversationState, ClaudeCredentialValidation,
+    AuthPopupMode, ClaudeAuthOperation, ClaudeAuthRequest, ClaudeAvailability,
+    ClaudeConversationState,
 };
 use crate::claude::{ClaudeAuthStatus, ClaudeModelMetadata};
 use crate::provider::{ModelKey, ProviderId};
-
-const FAKE_CONSOLE_KEY: &str = "sk-ant-api03-fake-claude-ui-key";
 
 fn claude_ready() -> AppState {
     let mut state = ready();
     state.active_provider = ProviderId::Claude;
     state.claude.availability = ClaudeAvailability::Ready;
-    state.claude.auth = ClaudeAuthStatus::Valid;
+    state.claude.auth = ClaudeAuthStatus::Subscription;
     state.selected_model = Some(ModelKey::claude("sonnet").unwrap());
     state.selected_reasoning = None;
     state.context_remaining_percent = None;
@@ -29,7 +28,7 @@ fn auth_popup_navigates_and_renders_all_three_providers() {
     assert!(rendered.contains("Codex"));
     assert!(rendered.contains("OpenRouter"));
     assert!(rendered.contains("> Claude"));
-    assert!(rendered.contains("Console key configured"));
+    assert!(rendered.contains("subscription connected"));
 
     let mut ui = UiState::default();
     assert_eq!(
@@ -49,44 +48,50 @@ fn auth_popup_navigates_and_renders_all_three_providers() {
 }
 
 #[test]
-fn claude_console_key_is_masked_provider_tagged_and_restorable() {
+fn claude_login_uses_native_browser_flow_without_a_secret_editor() {
     let mut state = claude_ready();
-    state.popup = Some(PopupState::ProviderSecret {
-        provider: ProviderId::Claude,
+    state.popup = Some(PopupState::Auth {
+        mode: AuthPopupMode::Login,
+        selected: ProviderId::Claude,
     });
     let mut ui = UiState::default();
     ui.sync_secret_editor(&state);
-    ui.handle_event_for_state(Event::Paste(FAKE_CONSOLE_KEY.to_owned()), &state);
-    let rendered = screen(&state, &ui, 70, 16);
-    assert!(rendered.contains("Anthropic Console credential"));
-    assert!(rendered.contains("••••••••"));
-    assert!(!rendered.contains(FAKE_CONSOLE_KEY));
-    assert!(!format!("{ui:?}").contains(FAKE_CONSOLE_KEY));
-
-    ui.handle_event_for_state(
-        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-        &state,
-    );
-    let (provider, secret) = ui.take_submitted_secret().expect("submitted Console key");
-    assert_eq!(provider, ProviderId::Claude);
-    assert_eq!(secret.expose_bytes(), FAKE_CONSOLE_KEY.as_bytes());
-
-    ui.restore_provider_secret(provider, secret);
-    ui.handle_event_for_state(
-        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-        &state,
-    );
-    let (provider, retried) = ui.take_submitted_secret().expect("retried Console key");
-    assert_eq!(provider, ProviderId::Claude);
-    assert_eq!(retried.expose_bytes(), FAKE_CONSOLE_KEY.as_bytes());
-
-    state.claude.credential_validation = ClaudeCredentialValidation::Validating {
-        operation_id: 1,
-        candidate_saved: false,
-    };
-    ui.sync_secret_editor(&state);
     assert_eq!(ui.secret_mask(), None);
-    assert!(screen(&state, &ui, 70, 16).contains("Validating Anthropic Console credential"));
+    let rendered = screen(&state, &ui, 76, 18);
+    assert!(rendered.contains("native browser login"));
+    assert!(!rendered.contains("API key"));
+    assert_eq!(
+        ui.handle_event_for_state(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &state,
+        ),
+        Some(Intent::PopupSelect)
+    );
+    let effects = state.reduce(Action::Intent(Intent::PopupSelect));
+    assert_eq!(effects, vec![crate::app::Effect::LoginClaude]);
+    assert!(state.popup.is_none());
+    assert!(ui.take_submitted_secret().is_none());
+
+    state.claude.auth_operation = ClaudeAuthOperation::AwaitingTerminal {
+        request: ClaudeAuthRequest {
+            operation_id: 1,
+            action: crate::claude::ClaudeAuthAction::Login,
+        },
+    };
+    state.popup = Some(PopupState::Auth {
+        mode: AuthPopupMode::Login,
+        selected: ProviderId::Claude,
+    });
+    assert!(screen(&state, &ui, 76, 18).contains("signing in via browser"));
+
+    state.claude.auth_operation = ClaudeAuthOperation::Idle;
+    state.popup = Some(PopupState::Auth {
+        mode: AuthPopupMode::Logout,
+        selected: ProviderId::Claude,
+    });
+    let logout_popup = screen(&state, &ui, 76, 18);
+    assert!(logout_popup.contains("Claude also signs out"));
+    assert!(logout_popup.contains("system Claude"));
 }
 
 #[test]
@@ -102,11 +107,11 @@ fn claude_header_empty_states_reasoning_and_models_are_provider_specific() {
     assert!(rendered_header.contains("reasoning n/a"));
     assert!(rendered_header.ends_with("Context --"));
 
-    state.claude.auth = ClaudeAuthStatus::Missing;
+    state.claude.auth = ClaudeAuthStatus::SignedOut;
     let signed_out = screen(&state, &UiState::default(), 90, 20);
-    assert!(signed_out.contains("Anthropic Console API key"));
+    assert!(signed_out.contains("Claude subscription"));
 
-    state.claude.auth = ClaudeAuthStatus::Valid;
+    state.claude.auth = ClaudeAuthStatus::Subscription;
     state.claude.conversation = ClaudeConversationState::ResumeFailed {
         id: "00000000-0000-4000-8000-000000000000".parse().unwrap(),
         message: "missing".to_owned(),

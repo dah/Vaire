@@ -201,15 +201,16 @@ pub enum ClaudeConversationState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ClaudeCredentialValidation {
+pub struct ClaudeAuthRequest {
+    pub operation_id: u64,
+    pub action: crate::claude::ClaudeAuthAction,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClaudeAuthOperation {
     Idle,
-    Refreshing {
-        operation_id: u64,
-    },
-    Validating {
-        operation_id: u64,
-        candidate_saved: bool,
-    },
+    Checking { operation_id: u64 },
+    AwaitingTerminal { request: ClaudeAuthRequest },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -218,17 +219,17 @@ pub struct ClaudeState {
     pub auth: ClaudeAuthStatus,
     pub conversation: ClaudeConversationState,
     pub resolved_model: Option<ClaudeModelMetadata>,
-    pub credential_validation: ClaudeCredentialValidation,
+    pub auth_operation: ClaudeAuthOperation,
 }
 
 impl Default for ClaudeState {
     fn default() -> Self {
         Self {
             availability: ClaudeAvailability::default(),
-            auth: ClaudeAuthStatus::Missing,
+            auth: ClaudeAuthStatus::SignedOut,
             conversation: ClaudeConversationState::None,
             resolved_model: None,
-            credential_validation: ClaudeCredentialValidation::Idle,
+            auth_operation: ClaudeAuthOperation::Idle,
         }
     }
 }

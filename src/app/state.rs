@@ -217,7 +217,14 @@ impl AppState {
             ProviderId::OpenRouter => {
                 self.openrouter.auth == crate::openrouter::OpenRouterAuthStatus::Valid
             }
-            ProviderId::Claude => self.claude.auth == ClaudeAuthStatus::Valid,
+            ProviderId::Claude => self.claude.auth == ClaudeAuthStatus::Subscription,
+        }
+    }
+
+    pub fn pending_claude_auth_request(&self) -> Option<&ClaudeAuthRequest> {
+        match &self.claude.auth_operation {
+            ClaudeAuthOperation::AwaitingTerminal { request } => Some(request),
+            ClaudeAuthOperation::Idle | ClaudeAuthOperation::Checking { .. } => None,
         }
     }
 }

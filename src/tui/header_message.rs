@@ -158,15 +158,21 @@ pub(in crate::tui) fn status_text(state: &AppState) -> String {
 
 fn claude_status_text(state: &AppState) -> String {
     let provider_status = match &state.claude.availability {
-        crate::app::ClaudeAvailability::Ready => match state.claude.auth {
-            crate::claude::ClaudeAuthStatus::Missing => "signed out",
-            crate::claude::ClaudeAuthStatus::Unverified => "key unverified",
-            crate::claude::ClaudeAuthStatus::Valid => "configured",
-            crate::claude::ClaudeAuthStatus::Invalid => "invalid key",
-            crate::claude::ClaudeAuthStatus::CredentialUnavailable => "credential unavailable",
-            crate::claude::ClaudeAuthStatus::CliUnavailable => "CLI unavailable",
-        }
-        .to_owned(),
+        crate::app::ClaudeAvailability::Ready => match &state.claude.auth_operation {
+            crate::app::ClaudeAuthOperation::Checking { .. } => "checking auth".to_owned(),
+            crate::app::ClaudeAuthOperation::AwaitingTerminal { request } => match request.action {
+                crate::claude::ClaudeAuthAction::Login => "signing in".to_owned(),
+                crate::claude::ClaudeAuthAction::Logout => "signing out".to_owned(),
+            },
+            crate::app::ClaudeAuthOperation::Idle => match state.claude.auth {
+                crate::claude::ClaudeAuthStatus::SignedOut => "signed out",
+                crate::claude::ClaudeAuthStatus::Subscription => "subscription",
+                crate::claude::ClaudeAuthStatus::Unsupported => "unsupported auth",
+                crate::claude::ClaudeAuthStatus::Unverified => "auth unverified",
+                crate::claude::ClaudeAuthStatus::CliUnavailable => "CLI unavailable",
+            }
+            .to_owned(),
+        },
         crate::app::ClaudeAvailability::Unavailable(message) => {
             format!("CLI unavailable: {message}")
         }

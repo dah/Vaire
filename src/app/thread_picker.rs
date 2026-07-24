@@ -138,11 +138,11 @@ impl AppState {
 
         if selected.provider == ProviderId::Claude {
             if !matches!(self.claude.availability, ClaudeAvailability::Ready)
-                || self.claude.auth != ClaudeAuthStatus::Valid
+                || self.claude.auth != ClaudeAuthStatus::Subscription
             {
                 if let Some(picker) = self.conversation_popup_mut() {
                     picker.message = Some(
-                        "Claude Code must be available and authenticated before resuming"
+                        "Claude Code must be available and signed in to a subscription before resuming"
                             .to_owned(),
                     );
                 }

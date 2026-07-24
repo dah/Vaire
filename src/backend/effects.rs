@@ -50,6 +50,7 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                 Effect::RefreshOpenRouter => self.refresh_openrouter_effect(),
                 Effect::LogoutOpenRouter => self.logout_openrouter_effect().await,
                 Effect::InterruptOpenRouterTurn => self.interrupt_openrouter_turn_effect(),
+                Effect::LoginClaude => self.login_claude_effect(),
                 Effect::RefreshClaude => self.refresh_claude_effect().await,
                 Effect::LogoutClaude => self.logout_claude_effect().await,
                 Effect::StartNewClaudeSession => self.start_new_claude_session_effect().await,

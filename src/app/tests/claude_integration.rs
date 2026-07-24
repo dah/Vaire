@@ -15,7 +15,7 @@ fn ready_claude_state(alias: ClaudeModelAlias) -> AppState {
         active_provider: ProviderId::Claude,
         claude: ClaudeState {
             availability: ClaudeAvailability::Ready,
-            auth: ClaudeAuthStatus::Valid,
+            auth: ClaudeAuthStatus::Subscription,
             ..ClaudeState::default()
         },
         selected_model: Some(ModelKey::claude(alias.as_str()).unwrap()),
@@ -378,21 +378,26 @@ fn claude_operation_failure_settles_only_an_active_claude_send() {
         session_id: session_id("00000000-0000-4000-8000-000000000001"),
         turn_id: turn.clone(),
     };
-    state.claude.credential_validation = ClaudeCredentialValidation::Refreshing { operation_id: 1 };
+    state.claude.auth_operation = ClaudeAuthOperation::Checking { operation_id: 1 };
     state.reduce(Action::Event(DomainEvent::ClaudeOperationFailed(
         ClaudeError::new(
-            crate::claude::ClaudeFailureStage::Credential,
+            crate::claude::ClaudeFailureStage::Auth,
             crate::claude::ClaudeFailureCategory::Unavailable,
         ),
     )));
     assert!(matches!(state.turn, TurnState::ClaudeStreaming { .. }));
+    assert_eq!(state.claude.auth_operation, ClaudeAuthOperation::Idle);
+    assert!(state
+        .notice
+        .as_deref()
+        .is_some_and(|notice| notice.contains("subscription status check failed")));
 
     state.turn = TurnState::Completed {
         turn_id: "settled".to_owned(),
     };
     state.reduce(Action::Event(DomainEvent::ClaudeOperationFailed(
         ClaudeError::new(
-            crate::claude::ClaudeFailureStage::Credential,
+            crate::claude::ClaudeFailureStage::Auth,
             crate::claude::ClaudeFailureCategory::Unavailable,
         ),
     )));
@@ -405,19 +410,71 @@ fn claude_operation_failure_settles_only_an_active_claude_send() {
 }
 
 #[test]
-fn accepted_claude_candidate_closes_the_secret_editor() {
+fn claude_login_uses_native_auth_and_correlates_its_terminal_status() {
     let mut state = ready_claude_state(ClaudeModelAlias::Sonnet);
-    state.popup = Some(PopupState::ProviderSecret {
-        provider: ProviderId::Claude,
+    state.popup = Some(PopupState::Auth {
+        mode: AuthPopupMode::Login,
+        selected: ProviderId::Claude,
     });
-    state.reduce(Action::Event(DomainEvent::ClaudeAuthChanged(
-        ClaudeAuthStatus::Valid,
-    )));
+    let effects = state.reduce(Action::Intent(Intent::PopupSelect));
+    assert_eq!(effects, vec![Effect::LoginClaude]);
     assert!(state.popup.is_none());
+
+    let request = ClaudeAuthRequest {
+        operation_id: 7,
+        action: crate::claude::ClaudeAuthAction::Login,
+    };
+    state.reduce(Action::Event(DomainEvent::ClaudeAuthRequested(request)));
+    assert_eq!(state.pending_claude_auth_request(), Some(&request));
+    assert_eq!(state.claude.auth, ClaudeAuthStatus::Unverified);
+    assert!(state
+        .notice
+        .as_deref()
+        .is_some_and(|notice| notice.contains("browser")));
+    assert!(state
+        .reduce(Action::Intent(Intent::SendMessage("queued".to_owned())))
+        .is_empty());
+    assert!(state
+        .notice
+        .as_deref()
+        .is_some_and(|notice| notice.contains("authentication operation")));
+
+    state.reduce(Action::Event(DomainEvent::ClaudeAuthChanged(
+        ClaudeAuthStatus::Subscription,
+    )));
+    assert_eq!(state.pending_claude_auth_request(), None);
+    assert_eq!(state.claude.auth_operation, ClaudeAuthOperation::Idle);
     assert_eq!(
         state.notice.as_deref(),
-        Some("Claude credential saved and verified")
+        Some("Claude subscription is connected")
     );
+}
+
+#[test]
+fn claude_auth_terminal_states_clear_control_work_and_use_subscription_wording() {
+    let mut state = ready_claude_state(ClaudeModelAlias::Sonnet);
+    state.claude.auth_operation = ClaudeAuthOperation::Checking { operation_id: 3 };
+    state.reduce(Action::Event(DomainEvent::ClaudeAuthChanged(
+        ClaudeAuthStatus::Unsupported,
+    )));
+    assert_eq!(state.claude.auth_operation, ClaudeAuthOperation::Idle);
+    assert!(state.notice.as_deref().is_some_and(|notice| notice
+        .contains("unsupported authentication source")
+        && notice.contains("subscription")));
+
+    state.claude.auth_operation = ClaudeAuthOperation::AwaitingTerminal {
+        request: ClaudeAuthRequest {
+            operation_id: 4,
+            action: crate::claude::ClaudeAuthAction::Logout,
+        },
+    };
+    state.pending_new_claude_session = true;
+    state.reduce(Action::Event(DomainEvent::ClaudeAuthChanged(
+        ClaudeAuthStatus::SignedOut,
+    )));
+    assert_eq!(state.claude.auth_operation, ClaudeAuthOperation::Idle);
+    assert!(!state.pending_new_claude_session);
+    assert_eq!(state.notice.as_deref(), Some("Claude is signed out"));
 }
 
 #[test]

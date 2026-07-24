@@ -47,6 +47,7 @@ pub enum Effect {
     },
     InterruptOpenRouterTurn,
     RefreshClaude,
+    LoginClaude,
     LogoutClaude,
     StartNewClaudeSession,
     SwitchClaudeSession {
@@ -138,9 +139,9 @@ pub enum DomainEvent {
         availability: ClaudeAvailability,
         auth: ClaudeAuthStatus,
     },
+    ClaudeAuthRequested(ClaudeAuthRequest),
     ClaudeAuthChanged(ClaudeAuthStatus),
     ClaudeOperationFailed(ClaudeError),
-    ClaudeCandidateRejected(ClaudeError),
     ClaudeSessionStarted {
         session_id: ClaudeSessionId,
     },

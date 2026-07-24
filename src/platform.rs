@@ -19,9 +19,6 @@ pub struct AppPaths {
     pub openrouter_credential_file: PathBuf,
     pub claude_cli_home_dir: PathBuf,
     pub claude_conversation_dir: PathBuf,
-    pub claude_probe_dir: PathBuf,
-    pub anthropic_credential_home_dir: PathBuf,
-    pub anthropic_credential_file: PathBuf,
     pub claude_store_dir: PathBuf,
     pub diagnostics_dir: PathBuf,
     pub(crate) historical_conversation_dir: Option<PathBuf>,
@@ -53,7 +50,6 @@ impl AppPaths {
 
         let runtime_dir = support_dir.join("runtime");
         let openrouter_home_dir = runtime_dir.join("openrouter-home");
-        let anthropic_credential_home_dir = runtime_dir.join("anthropic-home");
         Self {
             preferences_file: support_dir.join("preferences.json"),
             runtime_dir: runtime_dir.clone(),
@@ -62,9 +58,6 @@ impl AppPaths {
             openrouter_home_dir,
             claude_cli_home_dir: runtime_dir.join("claude-home"),
             claude_conversation_dir: runtime_dir.join("claude-conversation"),
-            claude_probe_dir: runtime_dir.join("claude-probes"),
-            anthropic_credential_file: anthropic_credential_home_dir.join("api-key"),
-            anthropic_credential_home_dir,
             claude_store_dir: support_dir.join("claude"),
             diagnostics_dir: support_dir.join("diagnostics"),
             historical_conversation_dir,
@@ -156,18 +149,6 @@ mod tests {
         assert_eq!(
             paths.claude_conversation_dir,
             paths.runtime_dir.join("claude-conversation")
-        );
-        assert_eq!(
-            paths.claude_probe_dir,
-            paths.runtime_dir.join("claude-probes")
-        );
-        assert_eq!(
-            paths.anthropic_credential_home_dir,
-            paths.runtime_dir.join("anthropic-home")
-        );
-        assert_eq!(
-            paths.anthropic_credential_file,
-            paths.anthropic_credential_home_dir.join("api-key")
         );
         assert_eq!(paths.claude_store_dir, paths.support_dir.join("claude"));
         #[cfg(target_os = "macos")]

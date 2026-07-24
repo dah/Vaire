@@ -8,7 +8,7 @@ impl AppState {
             DomainEvent::ClaudeStartup { availability, auth } => {
                 self.claude.availability = availability;
                 self.claude.auth = auth;
-                self.claude.credential_validation = ClaudeCredentialValidation::Idle;
+                self.claude.auth_operation = ClaudeAuthOperation::Idle;
                 if self.active_provider == ProviderId::Claude {
                     self.selected_reasoning = None;
                     if self.selected_model.is_none() {
@@ -22,57 +22,70 @@ impl AppState {
                     self.sync_active_selection_preferences();
                 }
             }
+            DomainEvent::ClaudeAuthRequested(request) => {
+                // Native login/logout may have changed Keychain state before the child settles.
+                // Drop stale authority immediately and restore it only after a correlated probe.
+                self.claude.auth = ClaudeAuthStatus::Unverified;
+                self.claude.auth_operation = ClaudeAuthOperation::AwaitingTerminal { request };
+                self.popup = None;
+                self.notice = Some(match request.action {
+                    crate::claude::ClaudeAuthAction::Login => {
+                        "Complete Claude subscription sign-in in your browser…".to_owned()
+                    }
+                    crate::claude::ClaudeAuthAction::Logout => {
+                        "Signing out of the system Claude Code login…".to_owned()
+                    }
+                });
+            }
             DomainEvent::ClaudeAuthChanged(auth) => {
                 self.claude.auth = auth;
-                self.claude.credential_validation = ClaudeCredentialValidation::Idle;
-                let candidate_editor_was_open = matches!(
-                    self.popup,
-                    Some(PopupState::ProviderSecret {
-                        provider: ProviderId::Claude
-                    })
-                );
-                if auth == ClaudeAuthStatus::Missing
-                    || (auth == ClaudeAuthStatus::Valid && candidate_editor_was_open)
-                {
-                    self.popup = None;
-                }
-                if auth == ClaudeAuthStatus::Missing {
+                self.claude.auth_operation = ClaudeAuthOperation::Idle;
+                if auth == ClaudeAuthStatus::SignedOut {
                     self.pending_new_claude_session = false;
                 }
-                self.notice = Some(
-                    if auth == ClaudeAuthStatus::Valid && candidate_editor_was_open {
-                        "Claude credential saved and verified".to_owned()
-                    } else {
-                        match auth {
-                            ClaudeAuthStatus::Valid => "Claude credential is valid".to_owned(),
-                            ClaudeAuthStatus::Missing => "Claude is signed out".to_owned(),
-                            ClaudeAuthStatus::Invalid => {
-                                "Claude credential is invalid; replace it with /login".to_owned()
-                            }
-                            ClaudeAuthStatus::Unverified => {
-                                "Claude credential could not be verified".to_owned()
-                            }
-                            ClaudeAuthStatus::CredentialUnavailable => {
-                                "Claude credential storage is unavailable".to_owned()
-                            }
-                            ClaudeAuthStatus::CliUnavailable => {
-                                "Claude Code CLI is unavailable".to_owned()
-                            }
-                        }
-                    },
-                );
+                self.notice = Some(match auth {
+                    ClaudeAuthStatus::Subscription => {
+                        "Claude subscription is connected".to_owned()
+                    }
+                    ClaudeAuthStatus::SignedOut => "Claude is signed out".to_owned(),
+                    ClaudeAuthStatus::Unsupported => {
+                        "Claude is using an unsupported authentication source; sign in with a Claude subscription using /login"
+                            .to_owned()
+                    }
+                    ClaudeAuthStatus::Unverified => {
+                        "Claude subscription authentication could not be verified".to_owned()
+                    }
+                    ClaudeAuthStatus::CliUnavailable => {
+                        "Claude Code CLI is unavailable".to_owned()
+                    }
+                });
             }
             DomainEvent::ClaudeOperationFailed(error) => {
-                let control_operation_active = !matches!(
-                    self.claude.credential_validation,
-                    ClaudeCredentialValidation::Idle
-                );
-                self.claude.credential_validation = ClaudeCredentialValidation::Idle;
+                let control_operation = self.claude.auth_operation;
+                let control_operation_active =
+                    !matches!(control_operation, ClaudeAuthOperation::Idle);
+                self.claude.auth_operation = ClaudeAuthOperation::Idle;
                 self.pending_new_claude_session = false;
-                let message = format!(
-                    "Claude operation failed ({:?}/{:?})",
-                    error.stage, error.category
-                );
+                let message = match control_operation {
+                    ClaudeAuthOperation::Checking { .. } => format!(
+                        "Claude subscription status check failed ({:?}/{:?})",
+                        error.stage, error.category
+                    ),
+                    ClaudeAuthOperation::AwaitingTerminal { request } => match request.action {
+                        crate::claude::ClaudeAuthAction::Login => format!(
+                            "Claude subscription sign-in failed ({:?}/{:?})",
+                            error.stage, error.category
+                        ),
+                        crate::claude::ClaudeAuthAction::Logout => format!(
+                            "System Claude Code sign-out failed ({:?}/{:?})",
+                            error.stage, error.category
+                        ),
+                    },
+                    ClaudeAuthOperation::Idle => format!(
+                        "Claude operation failed ({:?}/{:?})",
+                        error.stage, error.category
+                    ),
+                };
                 if control_operation_active {
                     self.notice = Some(message);
                     return Vec::new();
@@ -90,13 +103,6 @@ impl AppState {
                     message: message.clone(),
                 };
                 self.notice = Some(message);
-            }
-            DomainEvent::ClaudeCandidateRejected(error) => {
-                self.claude.credential_validation = ClaudeCredentialValidation::Idle;
-                self.notice = Some(format!(
-                    "Claude credential was not replaced ({:?}/{:?}); the existing credential was preserved",
-                    error.stage, error.category
-                ));
             }
             DomainEvent::ClaudeSessionStarted { session_id } => {
                 if self.active_provider != ProviderId::Claude

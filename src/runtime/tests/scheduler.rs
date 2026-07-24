@@ -44,6 +44,33 @@ async fn ready_intents_and_events_follow_rotating_priority() {
 }
 
 #[tokio::test]
+async fn native_claude_auth_completion_keeps_its_request_correlation() {
+    let (_shutdown_tx, mut shutdowns) = tokio::sync::mpsc::channel(1);
+    let (command_tx, mut commands) = tokio::sync::mpsc::channel(1);
+    let request = crate::app::ClaudeAuthRequest {
+        operation_id: 17,
+        action: crate::claude::ClaudeAuthAction::Login,
+    };
+    command_tx
+        .send(RuntimeCommand::ClaudeAuthFinished {
+            request,
+            result: Ok(()),
+        })
+        .await
+        .unwrap();
+
+    let work = next_open_work(&mut shutdowns, &mut commands, std::future::pending(), false).await;
+
+    assert!(matches!(
+        work,
+        RuntimeWork::Command(Some(RuntimeCommand::ClaudeAuthFinished {
+            request: delivered,
+            result: Ok(()),
+        })) if delivered == request
+    ));
+}
+
+#[tokio::test]
 async fn queued_intent_cannot_cancel_processing_of_an_already_received_event() {
     let (_shutdown_tx, mut shutdowns) = tokio::sync::mpsc::channel(1);
     let (intent_tx, mut intents) = tokio::sync::mpsc::channel(1);

@@ -130,7 +130,18 @@ impl AppState {
             }
             Intent::PopupRefresh => {
                 return match self.popup.as_ref().and_then(PopupState::selected_provider) {
-                    Some(ProviderId::Claude) => vec![Effect::RefreshClaude],
+                    Some(ProviderId::Claude)
+                        if matches!(self.claude.auth_operation, ClaudeAuthOperation::Idle) =>
+                    {
+                        vec![Effect::RefreshClaude]
+                    }
+                    Some(ProviderId::Claude) => {
+                        self.notice = Some(
+                            "wait for the current Claude authentication operation to finish"
+                                .to_owned(),
+                        );
+                        Vec::new()
+                    }
                     _ => vec![Effect::RefreshOpenRouter],
                 };
             }
@@ -241,9 +252,30 @@ impl AppState {
             }
             Intent::RefreshOpenRouter => return vec![Effect::RefreshOpenRouter],
             Intent::LogoutOpenRouter => return vec![Effect::LogoutOpenRouter],
-            Intent::RefreshClaude => return vec![Effect::RefreshClaude],
-            Intent::LogoutClaude => return vec![Effect::LogoutClaude],
+            Intent::RefreshClaude => {
+                if matches!(self.claude.auth_operation, ClaudeAuthOperation::Idle) {
+                    return vec![Effect::RefreshClaude];
+                }
+                self.notice = Some(
+                    "wait for the current Claude authentication operation to finish".to_owned(),
+                );
+            }
+            Intent::LogoutClaude => {
+                if matches!(self.claude.auth_operation, ClaudeAuthOperation::Idle) {
+                    return vec![Effect::LogoutClaude];
+                }
+                self.notice = Some(
+                    "wait for the current Claude authentication operation to finish".to_owned(),
+                );
+            }
             Intent::SelectReasoning(effort) => {
+                if self.active_provider != ProviderId::Codex {
+                    self.notice = Some(format!(
+                        "{} reasoning effort is unsupported",
+                        self.active_provider
+                    ));
+                    return Vec::new();
+                }
                 let Some(model) = self.current_model() else {
                     self.notice = Some("select a model first".to_owned());
                     return Vec::new();
@@ -274,9 +306,14 @@ impl AppState {
                 if self.active_provider == ProviderId::Claude {
                     let reason = if !matches!(self.claude.availability, ClaudeAvailability::Ready) {
                         Some("Claude Code runtime is not available".to_owned())
-                    } else if self.claude.auth != ClaudeAuthStatus::Valid {
+                    } else if !matches!(self.claude.auth_operation, ClaudeAuthOperation::Idle) {
                         Some(
-                            "configure Claude Code with /login before starting a conversation"
+                            "wait for the current Claude authentication operation to finish"
+                                .to_owned(),
+                        )
+                    } else if self.claude.auth != ClaudeAuthStatus::Subscription {
+                        Some(
+                            "sign in to a Claude subscription with /login before starting a conversation"
                                 .to_owned(),
                         )
                     } else if self.selected_model.as_ref().is_none_or(|key| {

@@ -87,12 +87,23 @@ impl AppState {
                     self.popup = None;
                     self.reduce_intent(Intent::Login)
                 }
-                (
-                    AuthPopupMode::Login,
-                    provider @ (ProviderId::OpenRouter | ProviderId::Claude),
-                ) => {
-                    self.popup = Some(PopupState::ProviderSecret { provider });
+                (AuthPopupMode::Login, ProviderId::OpenRouter) => {
+                    self.popup = Some(PopupState::ProviderSecret {
+                        provider: ProviderId::OpenRouter,
+                    });
                     Vec::new()
+                }
+                (AuthPopupMode::Login, ProviderId::Claude) => {
+                    self.popup = None;
+                    if matches!(self.claude.auth_operation, ClaudeAuthOperation::Idle) {
+                        vec![Effect::LoginClaude]
+                    } else {
+                        self.notice = Some(
+                            "wait for the current Claude authentication operation to finish"
+                                .to_owned(),
+                        );
+                        Vec::new()
+                    }
                 }
                 (AuthPopupMode::Logout, ProviderId::Codex) => {
                     self.popup = None;
@@ -104,7 +115,15 @@ impl AppState {
                 }
                 (AuthPopupMode::Logout, ProviderId::Claude) => {
                     self.popup = None;
-                    vec![Effect::LogoutClaude]
+                    if matches!(self.claude.auth_operation, ClaudeAuthOperation::Idle) {
+                        vec![Effect::LogoutClaude]
+                    } else {
+                        self.notice = Some(
+                            "wait for the current Claude authentication operation to finish"
+                                .to_owned(),
+                        );
+                        Vec::new()
+                    }
                 }
             },
             PopupState::Model {

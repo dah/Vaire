@@ -19,7 +19,6 @@ use crate::codex::session::{
     SessionService,
 };
 use crate::codex::transport::TransportError;
-use crate::credentials::{CredentialAccount, CredentialStore};
 use crate::openrouter::{
     OpenRouterAuthStatus, OpenRouterConversationV2, OpenRouterFailureCategory, OpenRouterService,
     OpenRouterServiceEvent, OpenRouterTurnOutcome,

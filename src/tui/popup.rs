@@ -62,9 +62,11 @@ pub(in crate::tui) fn render_popup(
             );
             let footer = match mode {
                 AuthPopupMode::Login => {
-                    "Enter choose • d Codex device • c OpenRouter models • r refresh • Esc close"
+                    "Enter choose • Claude opens native browser login • d Codex device • c OpenRouter models • r refresh • Esc close"
                 }
-                AuthPopupMode::Logout => "Enter sign out selected provider • Esc close",
+                AuthPopupMode::Logout => {
+                    "Enter sign out selected provider • Claude also signs out system Claude Code • Esc close"
+                }
             };
             frame.render_widget(
                 Paragraph::new(format!("{codex}\n{openrouter}\n{claude}\n\n{footer}"))
@@ -74,34 +76,30 @@ pub(in crate::tui) fn render_popup(
             );
         }
         PopupState::ProviderSecret { provider } => {
-            let validating = match provider {
-                crate::provider::ProviderId::OpenRouter => !matches!(
+            let openrouter_editor = *provider == crate::provider::ProviderId::OpenRouter;
+            let validating = openrouter_editor
+                && !matches!(
                     state.openrouter.credential_validation,
                     OpenRouterCredentialValidation::Idle
-                ),
-                crate::provider::ProviderId::Claude => !matches!(
-                    state.claude.credential_validation,
-                    crate::app::ClaudeCredentialValidation::Idle
-                ),
-                crate::provider::ProviderId::Codex => false,
-            };
-            let (title, key_label, provider_name) = match provider {
-                crate::provider::ProviderId::OpenRouter => {
-                    (" OpenRouter credential ", "API key", "OpenRouter")
-                }
-                crate::provider::ProviderId::Claude => (
-                    " Anthropic Console credential ",
-                    "Console API key",
-                    "Anthropic Console",
-                ),
-                crate::provider::ProviderId::Codex => unreachable!("Codex has no key editor"),
-            };
-            let body = if validating {
-                format!("Validating {provider_name} credential…")
+                );
+            let (title, body) = if !openrouter_editor {
+                (
+                    " Credential unavailable ",
+                    "Only OpenRouter accepts a key in Vairë. Close this popup and use the provider login flow."
+                        .to_owned(),
+                )
+            } else if validating {
+                (
+                    " OpenRouter credential ",
+                    "Validating OpenRouter credential…".to_owned(),
+                )
             } else {
-                format!(
-                    "{key_label}: {}\n\nEnter validate and save • Ctrl-U clear • Esc cancel",
-                    secret_mask.unwrap_or("••••••••")
+                (
+                    " OpenRouter credential ",
+                    format!(
+                        "API key: {}\n\nEnter validate and save • Ctrl-U clear • Esc cancel",
+                        secret_mask.unwrap_or("••••••••")
+                    ),
                 )
             };
             frame.render_widget(
@@ -218,13 +216,19 @@ fn claude_auth_label(state: &AppState) -> &'static str {
     ) {
         return "CLI unavailable";
     }
-    match state.claude.auth {
-        crate::claude::ClaudeAuthStatus::Missing => "signed out",
-        crate::claude::ClaudeAuthStatus::Unverified => "unverified key",
-        crate::claude::ClaudeAuthStatus::Valid => "Console key configured",
-        crate::claude::ClaudeAuthStatus::Invalid => "invalid key",
-        crate::claude::ClaudeAuthStatus::CredentialUnavailable => "credential unavailable",
-        crate::claude::ClaudeAuthStatus::CliUnavailable => "CLI unavailable",
+    match &state.claude.auth_operation {
+        crate::app::ClaudeAuthOperation::Checking { .. } => "checking status",
+        crate::app::ClaudeAuthOperation::AwaitingTerminal { request } => match request.action {
+            crate::claude::ClaudeAuthAction::Login => "signing in via browser",
+            crate::claude::ClaudeAuthAction::Logout => "signing out",
+        },
+        crate::app::ClaudeAuthOperation::Idle => match state.claude.auth {
+            crate::claude::ClaudeAuthStatus::SignedOut => "signed out",
+            crate::claude::ClaudeAuthStatus::Subscription => "subscription connected",
+            crate::claude::ClaudeAuthStatus::Unsupported => "unsupported auth",
+            crate::claude::ClaudeAuthStatus::Unverified => "auth unverified",
+            crate::claude::ClaudeAuthStatus::CliUnavailable => "CLI unavailable",
+        },
     }
 }
 

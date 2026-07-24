@@ -1,177 +1,163 @@
 use super::*;
 use crate::backend::claude_runtime::{
-    claude_error, claude_store_error, now_ms, selected_claude_alias, validate_claude_key,
+    auth_operation_error, claude_error, claude_store_error, inspect_runtime_auth, now_ms,
+    selected_claude_alias,
 };
 
 impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
     pub(super) async fn refresh_claude_effect(&mut self) -> Vec<Effect> {
+        if !matches!(
+            self.state.claude.auth_operation,
+            crate::app::ClaudeAuthOperation::Idle
+        ) {
+            self.state.notice =
+                Some("a Claude authentication operation is already active".to_owned());
+            return Vec::new();
+        }
         let Some(runtime) = &mut self.claude else {
             self.record_claude_unavailable("Claude Code runtime is unavailable");
             return Vec::new();
         };
         let operation_id = runtime.operation_id();
-        self.state.claude.credential_validation =
-            crate::app::ClaudeCredentialValidation::Refreshing { operation_id };
-        let credentials = runtime.credentials.clone();
-        let key = match tokio::task::spawn_blocking(move || {
-            credentials.load(CredentialAccount::AnthropicConsoleApiKey)
-        })
-        .await
-        {
-            Ok(Ok(Some(key))) => key,
-            Ok(Ok(None)) => {
-                return self
-                    .state
-                    .reduce(Action::Event(DomainEvent::ClaudeAuthChanged(
-                        ClaudeAuthStatus::Missing,
-                    )))
-            }
-            Ok(Err(_)) | Err(_) => {
-                return self
-                    .state
-                    .reduce(Action::Event(DomainEvent::ClaudeOperationFailed(
-                        claude_error(
-                            ClaudeFailureStage::Credential,
-                            ClaudeFailureCategory::Unavailable,
-                        ),
-                    )))
-            }
-        };
-        let result = validate_claude_key(runtime, &key).await;
-        match result {
-            Ok(()) => {
+        self.state.claude.auth = ClaudeAuthStatus::Unverified;
+        self.state.claude.auth_operation =
+            crate::app::ClaudeAuthOperation::Checking { operation_id };
+        match inspect_runtime_auth(runtime).await {
+            Ok(auth) => {
                 let mut effects = self
                     .state
-                    .reduce(Action::Event(DomainEvent::ClaudeAuthChanged(
-                        ClaudeAuthStatus::Valid,
-                    )));
-                effects.extend(self.restore_saved_claude_after_auth().await);
+                    .reduce(Action::Event(DomainEvent::ClaudeAuthChanged(auth)));
+                if auth == ClaudeAuthStatus::Subscription {
+                    effects.extend(self.block_unscoped_saved_claude_after_auth());
+                }
                 effects
             }
-            Err(error) if error.category == ClaudeFailureCategory::InvalidCredential => self
-                .state
-                .reduce(Action::Event(DomainEvent::ClaudeAuthChanged(
-                    ClaudeAuthStatus::Invalid,
-                ))),
             Err(error) => self
                 .state
                 .reduce(Action::Event(DomainEvent::ClaudeOperationFailed(error))),
         }
     }
 
-    pub async fn accept_claude_credential(
-        &mut self,
-        value: crate::credentials::SecretValue,
-    ) -> Result<(), crate::credentials::SecretValue> {
-        if matches!(
-            self.state.turn,
-            crate::app::TurnState::ClaudeStreaming { .. }
-        ) || (self.state.active_provider == ProviderId::Claude
-            && self.state.turn == crate::app::TurnState::Starting)
-        {
+    pub(super) fn login_claude_effect(&mut self) -> Vec<Effect> {
+        if !matches!(
+            self.state.claude.auth_operation,
+            crate::app::ClaudeAuthOperation::Idle
+        ) {
+            self.state.notice =
+                Some("a Claude authentication operation is already active".to_owned());
+            return Vec::new();
+        }
+        if self.state.claude.auth == ClaudeAuthStatus::Subscription {
+            self.state.notice = Some("Claude is already signed in with a subscription".to_owned());
+            return Vec::new();
+        }
+        if self.state.turn.is_active() {
             self.state.notice = Some(
-                "wait for or interrupt the active Claude turn before replacing its credential"
-                    .to_owned(),
+                "wait for or interrupt the active turn before signing in to Claude".to_owned(),
             );
-            return Err(value);
+            return Vec::new();
         }
         let Some(runtime) = &mut self.claude else {
-            self.state.notice = Some("Claude Code runtime is unavailable".to_owned());
-            return Err(value);
+            self.record_claude_unavailable("Claude Code runtime is unavailable");
+            return Vec::new();
         };
-        let operation_id = runtime.operation_id();
-        self.state.claude.credential_validation =
-            crate::app::ClaudeCredentialValidation::Validating {
-                operation_id,
-                candidate_saved: false,
-            };
-        if let Err(error) = validate_claude_key(runtime, &value).await {
-            self.state
-                .reduce(Action::Event(DomainEvent::ClaudeCandidateRejected(error)));
-            return Err(value);
+        let request = crate::app::ClaudeAuthRequest {
+            operation_id: runtime.operation_id(),
+            action: crate::claude::ClaudeAuthAction::Login,
+        };
+        self.state
+            .reduce(Action::Event(DomainEvent::ClaudeAuthRequested(request)))
+    }
+
+    pub async fn complete_claude_auth(
+        &mut self,
+        request: crate::app::ClaudeAuthRequest,
+        result: Result<(), crate::claude::ClaudeRuntimeError>,
+    ) -> Vec<Effect> {
+        if self.state.pending_claude_auth_request() != Some(&request) {
+            return Vec::new();
         }
-        let credentials = runtime.credentials.clone();
-        match tokio::task::spawn_blocking(move || {
-            credentials.replace_with_commit(CredentialAccount::AnthropicConsoleApiKey, value)
-        })
-        .await
-        {
-            Ok(Ok(crate::storage::CommitStatus::Verified)) => {
+        self.state.claude.auth_operation = crate::app::ClaudeAuthOperation::Checking {
+            operation_id: request.operation_id,
+        };
+        if let Err(error) = result {
+            return self
+                .state
+                .reduce(Action::Event(DomainEvent::ClaudeOperationFailed(
+                    auth_operation_error(error),
+                )));
+        }
+        let Some(runtime) = &self.claude else {
+            return self
+                .state
+                .reduce(Action::Event(DomainEvent::ClaudeOperationFailed(
+                    claude_error(ClaudeFailureStage::Auth, ClaudeFailureCategory::Unavailable),
+                )));
+        };
+        match inspect_runtime_auth(runtime).await {
+            Ok(auth) => {
                 let mut effects = self
                     .state
-                    .reduce(Action::Event(DomainEvent::ClaudeAuthChanged(
-                        ClaudeAuthStatus::Valid,
-                    )));
-                effects.extend(self.restore_saved_claude_after_auth().await);
-                if let Err(error) = self.execute_effects(effects).await {
-                    self.record_error(error.to_string());
+                    .reduce(Action::Event(DomainEvent::ClaudeAuthChanged(auth)));
+                match request.action {
+                    crate::claude::ClaudeAuthAction::Login
+                        if auth == ClaudeAuthStatus::Subscription =>
+                    {
+                        effects.extend(self.block_unscoped_saved_claude_after_auth());
+                    }
+                    crate::claude::ClaudeAuthAction::Login => {
+                        self.state.notice = Some(
+                            "Claude Code did not finish a Claude subscription sign-in; retry /login"
+                                .to_owned(),
+                        );
+                    }
+                    crate::claude::ClaudeAuthAction::Logout
+                        if auth != ClaudeAuthStatus::SignedOut =>
+                    {
+                        self.state.notice = Some(
+                            "Claude Code still reports an authenticated account after logout"
+                                .to_owned(),
+                        );
+                    }
+                    crate::claude::ClaudeAuthAction::Logout => {}
                 }
-                Ok(())
+                effects
             }
-            Ok(Ok(crate::storage::CommitStatus::CommittedUnverified)) => {
-                self.state
-                    .reduce(Action::Event(DomainEvent::ClaudeAuthChanged(
-                        ClaudeAuthStatus::CredentialUnavailable,
-                    )));
-                self.state.notice = Some(
-                    "Claude credential storage changed, but directory durability could not be verified; refresh or replace the credential before using Claude"
-                        .to_owned(),
-                );
-                Ok(())
-            }
-            Ok(Err(_)) | Err(_) => {
-                self.state
-                    .reduce(Action::Event(DomainEvent::ClaudeCandidateRejected(
-                        claude_error(
-                            ClaudeFailureStage::Credential,
-                            ClaudeFailureCategory::Unavailable,
-                        ),
-                    )));
-                // Ownership was consumed by the atomic credential-store attempt. The previous
-                // durable credential remains intact on failure.
-                Ok(())
-            }
+            Err(error) => self
+                .state
+                .reduce(Action::Event(DomainEvent::ClaudeOperationFailed(error))),
         }
     }
 
     pub(super) async fn logout_claude_effect(&mut self) -> Vec<Effect> {
+        if !matches!(
+            self.state.claude.auth_operation,
+            crate::app::ClaudeAuthOperation::Idle
+        ) {
+            self.state.notice =
+                Some("a Claude authentication operation is already active".to_owned());
+            return Vec::new();
+        }
         let Some(runtime) = &mut self.claude else {
             self.record_claude_unavailable("Claude Code runtime is unavailable");
             return Vec::new();
         };
         let drained = runtime.service.interrupt_and_drain().await;
-        let credentials = runtime.credentials.clone();
         let mut produced = Vec::new();
         for event in drained {
             produced.extend(self.reduce_claude_service_event(event));
         }
-        match tokio::task::spawn_blocking(move || {
-            credentials.delete_with_commit(CredentialAccount::AnthropicConsoleApiKey)
-        })
-        .await
-        {
-            Ok(Ok(crate::storage::CommitStatus::Verified)) => produced.extend(self.state.reduce(
-                Action::Event(DomainEvent::ClaudeAuthChanged(ClaudeAuthStatus::Missing)),
-            )),
-            Ok(Ok(crate::storage::CommitStatus::CommittedUnverified)) => {
-                produced.extend(
-                    self.state
-                        .reduce(Action::Event(DomainEvent::ClaudeAuthChanged(
-                            ClaudeAuthStatus::CredentialUnavailable,
-                        ))),
-                );
-                self.state.notice = Some(
-                    "Claude credential removal was committed, but directory durability could not be verified; sign-out status is uncertain"
-                        .to_owned(),
-                );
-            }
-            Ok(Err(_)) | Err(_) => produced.extend(self.state.reduce(Action::Event(
-                DomainEvent::ClaudeOperationFailed(claude_error(
-                    ClaudeFailureStage::Credential,
-                    ClaudeFailureCategory::Unavailable,
-                )),
-            ))),
-        }
+        let Some(runtime) = &mut self.claude else {
+            return produced;
+        };
+        let request = crate::app::ClaudeAuthRequest {
+            operation_id: runtime.operation_id(),
+            action: crate::claude::ClaudeAuthAction::Logout,
+        };
+        produced.extend(
+            self.state
+                .reduce(Action::Event(DomainEvent::ClaudeAuthRequested(request))),
+        );
         produced
     }
 
@@ -262,6 +248,41 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
     }
 
     pub(super) async fn send_claude_message_effect(&mut self, text: String) -> Vec<Effect> {
+        let auth = match &self.claude {
+            Some(runtime) => inspect_runtime_auth(runtime).await,
+            None => Err(claude_error(
+                ClaudeFailureStage::Auth,
+                ClaudeFailureCategory::Unavailable,
+            )),
+        };
+        match auth {
+            Ok(ClaudeAuthStatus::Subscription) => {}
+            Ok(auth) => {
+                let mut effects = self
+                    .state
+                    .reduce(Action::Event(DomainEvent::ClaudeAuthChanged(auth)));
+                effects.extend(self.state.reduce(Action::Event(
+                    DomainEvent::ClaudeOperationFailed(claude_error(
+                        ClaudeFailureStage::Auth,
+                        ClaudeFailureCategory::Unavailable,
+                    )),
+                )));
+                return effects;
+            }
+            Err(error) => {
+                let mut effects = self
+                    .state
+                    .reduce(Action::Event(DomainEvent::ClaudeAuthChanged(
+                        ClaudeAuthStatus::Unverified,
+                    )));
+                effects.extend(
+                    self.state
+                        .reduce(Action::Event(DomainEvent::ClaudeOperationFailed(error))),
+                );
+                return effects;
+            }
+        }
+
         let session_id = match &self.state.claude.conversation {
             crate::app::ClaudeConversationState::Ready { id } => id.clone(),
             crate::app::ClaudeConversationState::None => {
@@ -413,35 +434,18 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
         self.persist_preferences(&preferences)
     }
 
-    async fn restore_saved_claude_after_auth(&mut self) -> Vec<Effect> {
+    fn block_unscoped_saved_claude_after_auth(&mut self) -> Vec<Effect> {
         if self.state.active_provider != ProviderId::Claude {
             return Vec::new();
         }
         let Some(session_id) = self.state.preferences.claude.auto_resume_session_id.clone() else {
             return Vec::new();
         };
-        if matches!(
-            &self.state.claude.conversation,
-            crate::app::ClaudeConversationState::Ready { id } if id == &session_id
-        ) {
-            return Vec::new();
-        }
-        let Some(runtime) = &self.claude else {
-            return Vec::new();
-        };
-        match runtime.service.load_session(session_id.clone()).await {
-            Ok(session) => self
-                .state
-                .reduce(Action::Event(DomainEvent::ClaudeSessionRestored {
-                    session,
-                    automatic: true,
-                })),
-            Err(error) => self
-                .state
-                .reduce(Action::Event(DomainEvent::ClaudeResumeFailed {
-                    session_id,
-                    message: error.to_string(),
-                })),
-        }
+        self.state
+            .reduce(Action::Event(DomainEvent::ClaudeResumeFailed {
+                session_id,
+                message: "Claude Code does not expose a stable account identity through its supported auth status; use /resume to deliberately restore this local session or /new to start blank"
+                    .to_owned(),
+            }))
     }
 }

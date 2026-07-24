@@ -19,9 +19,9 @@ impl AppState {
             | DomainEvent::LoggedOut
             | DomainEvent::CatalogLoaded(_)) => self.reduce_account_event(event),
             event @ (DomainEvent::ClaudeStartup { .. }
+            | DomainEvent::ClaudeAuthRequested(_)
             | DomainEvent::ClaudeAuthChanged(_)
             | DomainEvent::ClaudeOperationFailed(_)
-            | DomainEvent::ClaudeCandidateRejected(_)
             | DomainEvent::ClaudeSessionStarted { .. }
             | DomainEvent::ClaudeNewSessionFailed(_)
             | DomainEvent::ClaudeSessionCreationUncertain { .. }

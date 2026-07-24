@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use super::*;
-use crate::claude::{verify_claude_credential_source, ClaudeRuntimeError};
+use crate::claude::{inspect_claude_auth, ClaudeCliAuthState, ClaudeRuntimeError};
 
 const CLAUDE_AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -12,30 +12,26 @@ pub(in crate::backend) fn claude_error(
     ClaudeError::new(stage, category)
 }
 
-pub(in crate::backend) fn credential_probe_error(error: ClaudeRuntimeError) -> ClaudeError {
-    let category = match error {
-        ClaudeRuntimeError::UnsupportedCredentialSource => ClaudeFailureCategory::InvalidCredential,
-        ClaudeRuntimeError::NotFound
-        | ClaudeRuntimeError::VersionCheck
-        | ClaudeRuntimeError::UnsupportedVersion
-        | ClaudeRuntimeError::CredentialProbe => ClaudeFailureCategory::Unavailable,
-    };
-    claude_error(ClaudeFailureStage::Credential, category)
+pub(in crate::backend) fn auth_operation_error(_error: ClaudeRuntimeError) -> ClaudeError {
+    claude_error(ClaudeFailureStage::Auth, ClaudeFailureCategory::Unavailable)
 }
 
-pub(in crate::backend) async fn validate_claude_key(
+pub(in crate::backend) async fn inspect_runtime_auth(
     runtime: &ClaudeBackendRuntime,
-    key: &crate::credentials::SecretValue,
-) -> Result<(), ClaudeError> {
-    verify_claude_credential_source(
+) -> Result<ClaudeAuthStatus, ClaudeError> {
+    let status = inspect_claude_auth(
         runtime.policy.executable(),
         runtime.policy.home(),
         runtime.policy.cwd(),
-        key,
         CLAUDE_AUTH_TIMEOUT,
     )
     .await
-    .map_err(credential_probe_error)
+    .map_err(auth_operation_error)?;
+    Ok(match status {
+        ClaudeCliAuthState::SignedOut => ClaudeAuthStatus::SignedOut,
+        ClaudeCliAuthState::Subscription => ClaudeAuthStatus::Subscription,
+        ClaudeCliAuthState::Unsupported => ClaudeAuthStatus::Unsupported,
+    })
 }
 
 pub(in crate::backend) fn now_ms() -> u64 {

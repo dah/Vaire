@@ -10,12 +10,13 @@ mod service;
 mod store;
 mod types;
 
+pub(crate) use config::verify_claude_version_cancellable;
 pub use config::{
-    claude_model_selector, resolve_claude, verify_claude_credential_source, verify_claude_version,
+    claude_model_selector, inspect_claude_auth, resolve_claude, verify_claude_version,
     ClaudeCliPolicy, ClaudeInvocation, ClaudeModelAlias, ClaudeRuntimeError, CLAUDE_MODEL_ALIASES,
     TESTED_CLAUDE_VERSION,
 };
-pub use process::{ClaudeChild, ClaudeProcessError};
+pub use process::{run_claude_auth_action, ClaudeChild, ClaudeProcessError};
 pub use protocol::{ClaudeProtocolError, ClaudeStreamEvent, ClaudeStreamParser};
 pub use service::{ClaudeService, PreparedClaudeTurn};
 pub use store::{

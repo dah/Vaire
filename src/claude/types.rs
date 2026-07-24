@@ -90,12 +90,24 @@ pub struct ClaudeSessionSummary {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClaudeAuthAction {
+    Login,
+    Logout,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClaudeCliAuthState {
+    SignedOut,
+    Subscription,
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClaudeAuthStatus {
-    Missing,
+    SignedOut,
+    Subscription,
+    Unsupported,
     Unverified,
-    Valid,
-    Invalid,
-    CredentialUnavailable,
     CliUnavailable,
 }
 
@@ -108,14 +120,13 @@ pub enum ClaudeFailureStage {
     Exit,
     Reap,
     Store,
-    Credential,
+    Auth,
     Shutdown,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClaudeFailureCategory {
     Unavailable,
-    InvalidCredential,
     Io,
     Protocol,
     ResourceLimit,

@@ -1,6 +1,5 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -11,16 +10,22 @@ use thiserror::Error;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time;
+use tokio_util::sync::CancellationToken;
 
-use crate::credentials::SecretValue;
 pub use crate::provider::ClaudeModelAlias;
 use crate::provider::ClaudeSessionId;
 
+use super::ClaudeCliAuthState;
+
 pub const TESTED_CLAUDE_VERSION: &str = "2.1.178";
 const MAX_VERSION_OUTPUT_BYTES: usize = 64 * 1024;
+const MAX_AUTH_STATUS_OUTPUT_BYTES: usize = 64 * 1024;
+pub(super) const SUBSCRIPTION_SETTINGS: &str = r#"{"forceLoginMethod":"claudeai"}"#;
+const EMPTY_MCP_CONFIG: &str = r#"{"mcpServers":{}}"#;
 
-pub const CLAUDE_MODEL_ALIASES: [ClaudeModelAlias; 4] = [
+pub const CLAUDE_MODEL_ALIASES: [ClaudeModelAlias; 5] = [
     ClaudeModelAlias::Default,
+    ClaudeModelAlias::Fable,
     ClaudeModelAlias::Opus,
     ClaudeModelAlias::Sonnet,
     ClaudeModelAlias::Haiku,
@@ -70,8 +75,8 @@ impl ClaudeCliPolicy {
         &self.cwd
     }
 
-    /// Constructs only documented CLI arguments. The prompt is written to stdin and the API key is
-    /// injected by the process boundary, so neither can appear here.
+    /// Constructs only documented CLI arguments. The prompt is written to stdin, so it cannot
+    /// appear here. Authentication remains entirely owned by the installed Claude CLI.
     pub fn args(&self, invocation: &ClaudeInvocation) -> Vec<OsString> {
         let mut args = vec![
             OsString::from("--print"),
@@ -79,15 +84,14 @@ impl ClaudeCliPolicy {
             OsString::from("stream-json"),
             OsString::from("--include-partial-messages"),
             OsString::from("--verbose"),
-            OsString::from("--bare"),
             OsString::from("--safe-mode"),
             OsString::from("--no-chrome"),
             OsString::from("--disable-slash-commands"),
             OsString::from("--strict-mcp-config"),
             OsString::from("--mcp-config"),
-            OsString::from("{}"),
+            OsString::from(EMPTY_MCP_CONFIG),
             OsString::from("--settings"),
-            OsString::from("{}"),
+            OsString::from(SUBSCRIPTION_SETTINGS),
             OsString::from("--setting-sources"),
             OsString::from(""),
             OsString::from("--prompt-suggestions"),
@@ -135,10 +139,12 @@ pub enum ClaudeRuntimeError {
     VersionCheck,
     #[error("Claude CLI version is unsupported")]
     UnsupportedVersion,
-    #[error("Claude credential-source probe failed")]
-    CredentialProbe,
-    #[error("Claude did not select the Vairë Console API key")]
-    UnsupportedCredentialSource,
+    #[error("Claude authentication status check failed")]
+    AuthStatus,
+    #[error("Claude authentication action failed")]
+    AuthAction,
+    #[error("Claude authentication action was cancelled")]
+    AuthCancelled,
 }
 
 pub fn resolve_claude(override_name: Option<&OsStr>) -> Result<PathBuf, ClaudeRuntimeError> {
@@ -166,20 +172,55 @@ pub async fn verify_claude_version(
     home: &Path,
     timeout: Duration,
 ) -> Result<(), ClaudeRuntimeError> {
+    let cancellation = CancellationToken::new();
+    verify_claude_version_cancellable(executable, home, timeout, &cancellation).await
+}
+
+pub(crate) async fn verify_claude_version_cancellable(
+    executable: &Path,
+    home: &Path,
+    timeout: Duration,
+    cancellation: &CancellationToken,
+) -> Result<(), ClaudeRuntimeError> {
+    if cancellation.is_cancelled() {
+        return Err(ClaudeRuntimeError::AuthCancelled);
+    }
     let mut command = Command::new(executable);
-    apply_claude_environment(&mut command, home, None);
+    apply_claude_environment(&mut command, home);
     command
         .kill_on_drop(true)
         .arg("--version")
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    // SAFETY: this closure performs only async-signal-safe setpgid before exec and owns no
+    // borrowed child-side memory.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
     let mut child = command
         .spawn()
         .map_err(|_| ClaudeRuntimeError::VersionCheck)?;
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or(ClaudeRuntimeError::VersionCheck)?;
+    let Some(process_group) = child
+        .id()
+        .and_then(|id| i32::try_from(id).ok())
+        .filter(|id| *id > 0)
+    else {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        return Err(ClaudeRuntimeError::VersionCheck);
+    };
+    let Some(mut stdout) = child.stdout.take() else {
+        terminate_probe(&mut child, process_group).await;
+        return Err(ClaudeRuntimeError::VersionCheck);
+    };
+    let mut reaped = false;
     let probe = async {
         let mut bytes = Vec::new();
         (&mut stdout)
@@ -194,6 +235,7 @@ pub async fn verify_claude_version(
             .wait()
             .await
             .map_err(|_| ClaudeRuntimeError::VersionCheck)?;
+        reaped = true;
         if !status.success() {
             return Err(ClaudeRuntimeError::VersionCheck);
         }
@@ -207,17 +249,30 @@ pub async fn verify_claude_version(
             .then_some(())
             .ok_or(ClaudeRuntimeError::UnsupportedVersion)
     };
-    match time::timeout(timeout, probe).await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(error)) => {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+    let outcome = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => None,
+        result = time::timeout(timeout, probe) => Some(result),
+    };
+    match outcome {
+        Some(Ok(Ok(()))) => Ok(()),
+        Some(Ok(Err(error))) => {
+            if !reaped {
+                terminate_probe(&mut child, process_group).await;
+            }
             Err(error)
         }
-        Err(_) => {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+        Some(Err(_)) => {
+            if !reaped {
+                terminate_probe(&mut child, process_group).await;
+            }
             Err(ClaudeRuntimeError::VersionCheck)
+        }
+        None => {
+            if !reaped {
+                terminate_probe(&mut child, process_group).await;
+            }
+            Err(ClaudeRuntimeError::AuthCancelled)
         }
     }
 }
@@ -226,95 +281,132 @@ pub async fn verify_claude_version(
 #[serde(rename_all = "camelCase")]
 struct ClaudeAuthStatusPayload {
     logged_in: bool,
-    auth_method: String,
-    api_provider: String,
-    api_key_source: String,
+    #[serde(default)]
+    auth_method: Option<String>,
+    #[serde(default)]
+    api_provider: Option<String>,
 }
 
-pub async fn verify_claude_credential_source(
+pub async fn inspect_claude_auth(
     executable: &Path,
     config_dir: &Path,
     cwd: &Path,
-    key: &SecretValue,
     timeout: Duration,
-) -> Result<(), ClaudeRuntimeError> {
+) -> Result<ClaudeCliAuthState, ClaudeRuntimeError> {
     let mut command = Command::new(executable);
-    apply_claude_environment(&mut command, config_dir, Some(key));
+    apply_claude_environment(&mut command, config_dir);
     command
         .kill_on_drop(true)
         .current_dir(cwd)
-        .args(["--bare", "--safe-mode", "auth", "status", "--json"])
+        .args([
+            "--safe-mode",
+            "--settings",
+            SUBSCRIPTION_SETTINGS,
+            "--setting-sources",
+            "",
+            "auth",
+            "status",
+            "--json",
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    // SAFETY: this closure performs only async-signal-safe setpgid before exec and owns no
+    // borrowed child-side memory.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
     let mut child = command
         .spawn()
-        .map_err(|_| ClaudeRuntimeError::CredentialProbe)?;
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or(ClaudeRuntimeError::CredentialProbe)?;
+        .map_err(|_| ClaudeRuntimeError::AuthStatus)?;
+    let Some(process_group) = child
+        .id()
+        .and_then(|id| i32::try_from(id).ok())
+        .filter(|id| *id > 0)
+    else {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        return Err(ClaudeRuntimeError::AuthStatus);
+    };
+    let Some(mut stdout) = child.stdout.take() else {
+        terminate_probe(&mut child, process_group).await;
+        return Err(ClaudeRuntimeError::AuthStatus);
+    };
+    let mut reaped = false;
     let probe = async {
         let mut bytes = Vec::new();
         (&mut stdout)
-            .take((MAX_VERSION_OUTPUT_BYTES + 1) as u64)
+            .take((MAX_AUTH_STATUS_OUTPUT_BYTES + 1) as u64)
             .read_to_end(&mut bytes)
             .await
-            .map_err(|_| ClaudeRuntimeError::CredentialProbe)?;
-        if bytes.len() > MAX_VERSION_OUTPUT_BYTES {
-            return Err(ClaudeRuntimeError::CredentialProbe);
+            .map_err(|_| ClaudeRuntimeError::AuthStatus)?;
+        if bytes.len() > MAX_AUTH_STATUS_OUTPUT_BYTES {
+            return Err(ClaudeRuntimeError::AuthStatus);
         }
+        let payload: ClaudeAuthStatusPayload =
+            serde_json::from_slice(&bytes).map_err(|_| ClaudeRuntimeError::AuthStatus)?;
         let status = child
             .wait()
             .await
-            .map_err(|_| ClaudeRuntimeError::CredentialProbe)?;
-        if !status.success() {
-            return Err(ClaudeRuntimeError::CredentialProbe);
+            .map_err(|_| ClaudeRuntimeError::AuthStatus)?;
+        reaped = true;
+        if status.code() == Some(1) && !payload.logged_in {
+            return Ok(ClaudeCliAuthState::SignedOut);
         }
-        let payload: ClaudeAuthStatusPayload =
-            serde_json::from_slice(&bytes).map_err(|_| ClaudeRuntimeError::CredentialProbe)?;
-        if payload.logged_in
-            && payload.auth_method == "api_key"
-            && payload.api_provider == "firstParty"
-            && payload.api_key_source == "ANTHROPIC_API_KEY"
+        if !status.success() {
+            return Err(ClaudeRuntimeError::AuthStatus);
+        }
+        if !payload.logged_in {
+            Ok(ClaudeCliAuthState::SignedOut)
+        } else if payload.auth_method.as_deref() == Some("claude.ai")
+            && payload.api_provider.as_deref() == Some("firstParty")
         {
-            Ok(())
+            Ok(ClaudeCliAuthState::Subscription)
         } else {
-            Err(ClaudeRuntimeError::UnsupportedCredentialSource)
+            Ok(ClaudeCliAuthState::Unsupported)
         }
     };
     match time::timeout(timeout, probe).await {
-        Ok(Ok(())) => Ok(()),
+        Ok(Ok(state)) => Ok(state),
         Ok(Err(error)) => {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+            if !reaped {
+                terminate_probe(&mut child, process_group).await;
+            }
             Err(error)
         }
         Err(_) => {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            Err(ClaudeRuntimeError::CredentialProbe)
+            if !reaped {
+                terminate_probe(&mut child, process_group).await;
+            }
+            Err(ClaudeRuntimeError::AuthStatus)
         }
     }
 }
 
-pub(super) fn apply_claude_environment(
-    command: &mut Command,
-    config_dir: &Path,
-    key: Option<&SecretValue>,
-) {
+async fn terminate_probe(child: &mut tokio::process::Child, process_group: i32) {
+    // SAFETY: kill accepts a negative process-group identifier and retains no pointer.
+    if unsafe { libc::kill(-process_group, libc::SIGKILL) } != 0 {
+        let _ = child.start_kill();
+    }
+    let _ = child.wait().await;
+}
+
+pub(super) fn apply_claude_environment(command: &mut Command, config_dir: &Path) {
     for (name, _) in std::env::vars_os() {
         let name_text = name.to_string_lossy();
-        if name_text.starts_with("ANTHROPIC_") || name_text.starts_with("CLAUDE_") {
+        if name_text.starts_with("ANTHROPIC_") || name_text.starts_with("CLAUDE") {
             command.env_remove(name);
         }
     }
     command
         .env("CLAUDE_CONFIG_DIR", config_dir)
         .env("NO_COLOR", "1");
-    if let Some(key) = key {
-        command.env("ANTHROPIC_API_KEY", OsStr::from_bytes(key.expose_bytes()));
-    }
 }
 
 fn parse_version(value: &str) -> Option<(u64, u64, u64)> {

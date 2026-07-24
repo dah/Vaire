@@ -239,70 +239,42 @@ fn fake_claude_policy(
     crate::claude::ClaudeCliPolicy::new(executable, root.join("claude-home"), root.to_owned())
 }
 
-fn fake_claude_auth_executable(root: &std::path::Path) -> std::path::PathBuf {
+fn fake_claude_auth_executable(
+    root: &std::path::Path,
+    name: &str,
+    payload: &str,
+) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
-    let executable = root.join("fake-claude-auth");
+    let executable = root.join(name);
     std::fs::write(
         &executable,
-        "#!/bin/sh\nprintf \"%s\\n\" '{\"loggedIn\":true,\"authMethod\":\"api_key\",\"apiProvider\":\"firstParty\",\"apiKeySource\":\"ANTHROPIC_API_KEY\"}'\n",
+        format!("#!/bin/sh\nprintf '%s\\n' '{payload}'\n"),
     )
     .unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
     executable
 }
 
-#[derive(Debug)]
-struct UnverifiedClaudeCredentialStore {
-    inner: Arc<crate::credentials::FakeCredentialStore>,
-}
+fn fake_claude_subscription_then_fail(root: &std::path::Path, name: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
 
-impl UnverifiedClaudeCredentialStore {
-    fn new(inner: Arc<crate::credentials::FakeCredentialStore>) -> Self {
-        Self { inner }
-    }
-}
-
-impl crate::credentials::CredentialStore for UnverifiedClaudeCredentialStore {
-    fn load(
-        &self,
-        account: crate::credentials::CredentialAccount,
-    ) -> Result<Option<crate::credentials::SecretValue>, crate::credentials::CredentialStoreError>
-    {
-        self.inner.load(account)
-    }
-
-    fn replace(
-        &self,
-        account: crate::credentials::CredentialAccount,
-        value: crate::credentials::SecretValue,
-    ) -> Result<(), crate::credentials::CredentialStoreError> {
-        self.inner.replace(account, value)
-    }
-
-    fn replace_with_commit(
-        &self,
-        account: crate::credentials::CredentialAccount,
-        value: crate::credentials::SecretValue,
-    ) -> Result<crate::storage::CommitStatus, crate::credentials::CredentialStoreError> {
-        self.inner.replace(account, value)?;
-        Ok(crate::storage::CommitStatus::CommittedUnverified)
-    }
-
-    fn delete(
-        &self,
-        account: crate::credentials::CredentialAccount,
-    ) -> Result<(), crate::credentials::CredentialStoreError> {
-        self.inner.delete(account)
-    }
-
-    fn delete_with_commit(
-        &self,
-        account: crate::credentials::CredentialAccount,
-    ) -> Result<crate::storage::CommitStatus, crate::credentials::CredentialStoreError> {
-        self.inner.delete(account)?;
-        Ok(crate::storage::CommitStatus::CommittedUnverified)
-    }
+    let executable = root.join(name);
+    std::fs::write(
+        &executable,
+        r#"#!/bin/sh
+case " $* " in
+  *" auth status --json "*)
+    printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}'
+    exit 0
+    ;;
+esac
+exit 1
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    executable
 }
 
 #[tokio::test]
@@ -311,31 +283,26 @@ async fn lazy_claude_send_persists_uuid_before_launch_and_abandons_failed_prepar
     use crate::claude::{
         ClaudeService, ClaudeSessionStore, ClaudeTurnOutcome, FileClaudeSessionStore,
     };
-    use crate::credentials::{CredentialStore, FakeCredentialStore};
     use crate::provider::{ClaudeModelAlias, ProviderId};
 
     let temp = tempfile::tempdir().unwrap();
-    let credentials: Arc<dyn CredentialStore> = Arc::new(FakeCredentialStore::new());
     let file_store = Arc::new(FileClaudeSessionStore::new(temp.path().join("sessions")).unwrap());
     let store: Arc<dyn ClaudeSessionStore> = file_store.clone();
-    let policy = fake_claude_policy(temp.path(), std::path::PathBuf::from("/usr/bin/false"));
-    let service = ClaudeService::new(policy.clone(), credentials.clone(), store);
+    let executable = fake_claude_subscription_then_fail(temp.path(), "subscription-then-fail");
+    let policy = fake_claude_policy(temp.path(), executable);
+    let service = ClaudeService::new(policy.clone(), store);
     let mut backend = BackendCoordinator::without_codex(
         FilePreferences::new(temp.path().join("preferences.json")),
         NoopBrowser,
         "Codex unavailable".to_owned(),
     )
-    .with_claude(crate::backend::ClaudeBackendRuntime::new(
-        service,
-        credentials,
-        policy,
-    ));
+    .with_claude(crate::backend::ClaudeBackendRuntime::new(service, policy));
     backend.may_persist = true;
     backend.state.active_provider = ProviderId::Claude;
     backend.state.preferences.active_provider = ProviderId::Claude;
     backend.state.preferences.claude.selected_model_alias = Some(ClaudeModelAlias::Default);
     backend.state.claude.availability = ClaudeAvailability::Ready;
-    backend.state.claude.auth = crate::claude::ClaudeAuthStatus::Valid;
+    backend.state.claude.auth = crate::claude::ClaudeAuthStatus::Subscription;
     backend.state.claude.conversation = ClaudeConversationState::None;
     backend.state.turn = TurnState::Starting;
 
@@ -365,7 +332,7 @@ async fn lazy_claude_send_persists_uuid_before_launch_and_abandons_failed_prepar
     assert_eq!(session.turns.len(), 1);
     assert_eq!(
         session.lifecycle,
-        crate::claude::ClaudeSessionLifecycle::Fresh
+        crate::claude::ClaudeSessionLifecycle::CreationUncertain
     );
     assert_eq!(session.turns[0].outcome, ClaudeTurnOutcome::Interrupted);
     assert!(!matches!(
@@ -387,31 +354,27 @@ async fn lazy_claude_send_persists_uuid_before_launch_and_abandons_failed_prepar
 async fn unverified_claude_pointer_commit_blocks_first_child_launch() {
     use crate::app::{ClaudeAvailability, ClaudeConversationState, TurnState};
     use crate::claude::{ClaudeService, ClaudeSessionStore, FileClaudeSessionStore};
-    use crate::credentials::{CredentialStore, FakeCredentialStore};
     use crate::provider::{ClaudeModelAlias, ProviderId};
 
     let temp = tempfile::tempdir().unwrap();
-    let credentials: Arc<dyn CredentialStore> = Arc::new(FakeCredentialStore::new());
     let file_store = Arc::new(FileClaudeSessionStore::new(temp.path().join("sessions")).unwrap());
     let store: Arc<dyn ClaudeSessionStore> = file_store.clone();
-    let policy = fake_claude_policy(temp.path(), std::path::PathBuf::from("/usr/bin/false"));
-    let service = ClaudeService::new(policy.clone(), credentials.clone(), store);
+    let executable =
+        fake_claude_subscription_then_fail(temp.path(), "subscription-unverified-pointer");
+    let policy = fake_claude_policy(temp.path(), executable);
+    let service = ClaudeService::new(policy.clone(), store);
     let mut backend = BackendCoordinator::without_codex(
         UnverifiedPreferences::new(),
         NoopBrowser,
         "Codex unavailable".to_owned(),
     )
-    .with_claude(crate::backend::ClaudeBackendRuntime::new(
-        service,
-        credentials,
-        policy,
-    ));
+    .with_claude(crate::backend::ClaudeBackendRuntime::new(service, policy));
     backend.may_persist = true;
     backend.state.active_provider = ProviderId::Claude;
     backend.state.preferences.active_provider = ProviderId::Claude;
     backend.state.preferences.claude.selected_model_alias = Some(ClaudeModelAlias::Default);
     backend.state.claude.availability = ClaudeAvailability::Ready;
-    backend.state.claude.auth = crate::claude::ClaudeAuthStatus::Valid;
+    backend.state.claude.auth = crate::claude::ClaudeAuthStatus::Subscription;
     backend.state.claude.conversation = ClaudeConversationState::None;
     backend.state.turn = TurnState::Starting;
 
@@ -440,26 +403,20 @@ async fn explicit_new_with_unverified_pointer_commit_tracks_the_new_uuid_as_unce
         TranscriptEntryStatus, TranscriptRole, TurnState,
     };
     use crate::claude::{ClaudeService, ClaudeSessionStore, FileClaudeSessionStore};
-    use crate::credentials::{CredentialStore, FakeCredentialStore};
     use crate::provider::{ClaudeModelAlias, ModelKey, ProviderId};
 
     let temp = tempfile::tempdir().unwrap();
     let preferences = UnverifiedPreferences::new();
-    let credentials: Arc<dyn CredentialStore> = Arc::new(FakeCredentialStore::new());
     let file_store = Arc::new(FileClaudeSessionStore::new(temp.path().join("sessions")).unwrap());
     let store: Arc<dyn ClaudeSessionStore> = file_store.clone();
     let policy = fake_claude_policy(temp.path(), std::path::PathBuf::from("/usr/bin/false"));
-    let service = ClaudeService::new(policy.clone(), credentials.clone(), store);
+    let service = ClaudeService::new(policy.clone(), store);
     let mut backend = BackendCoordinator::without_codex(
         preferences.clone(),
         NoopBrowser,
         "Codex unavailable".to_owned(),
     )
-    .with_claude(crate::backend::ClaudeBackendRuntime::new(
-        service,
-        credentials,
-        policy,
-    ));
+    .with_claude(crate::backend::ClaudeBackendRuntime::new(service, policy));
     let old_session: crate::provider::ClaudeSessionId =
         "00000000-0000-4000-8000-000000000001".parse().unwrap();
     backend.may_persist = true;
@@ -470,7 +427,7 @@ async fn explicit_new_with_unverified_pointer_commit_tracks_the_new_uuid_as_unce
     backend.state.selected_model =
         Some(ModelKey::claude(ClaudeModelAlias::Default.as_str()).unwrap());
     backend.state.claude.availability = ClaudeAvailability::Ready;
-    backend.state.claude.auth = crate::claude::ClaudeAuthStatus::Valid;
+    backend.state.claude.auth = crate::claude::ClaudeAuthStatus::Subscription;
     backend.state.claude.conversation = ClaudeConversationState::Ready { id: old_session };
     backend.state.turn = TurnState::Idle;
     backend.state.transcript.push(TranscriptEntry {
@@ -521,156 +478,380 @@ async fn explicit_new_with_unverified_pointer_commit_tracks_the_new_uuid_as_unce
 }
 
 #[tokio::test]
-async fn failed_claude_candidate_save_preserves_the_previous_durable_key() {
-    use crate::claude::{ClaudeService, FileClaudeSessionStore};
-    use crate::credentials::{
-        CredentialAccount, CredentialFailureCategory, CredentialStore, FakeCredentialStore,
-        SecretValue,
-    };
-    use std::os::unix::fs::PermissionsExt;
+async fn claude_startup_uses_native_cli_subscription_state_without_a_credential_store() {
+    use crate::claude::{ClaudeAuthStatus, ClaudeService, FileClaudeSessionStore};
 
     let temp = tempfile::tempdir().unwrap();
-    let executable = temp.path().join("fake-claude");
-    std::fs::write(
-        &executable,
-        "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"api_key\",\"apiProvider\":\"firstParty\",\"apiKeySource\":\"ANTHROPIC_API_KEY\"}'\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let credentials = Arc::new(FakeCredentialStore::new());
-    credentials
-        .replace(
-            CredentialAccount::AnthropicConsoleApiKey,
-            SecretValue::from_input("old-console-key").unwrap(),
-        )
-        .unwrap();
-    credentials.fail_next(CredentialFailureCategory::Write);
-    let credential_port: Arc<dyn CredentialStore> = credentials.clone();
+    let executable = fake_claude_auth_executable(
+        temp.path(),
+        "fake-claude-subscription",
+        r#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}"#,
+    );
     let store = Arc::new(FileClaudeSessionStore::new(temp.path().join("store")).unwrap());
     let policy = fake_claude_policy(temp.path(), executable);
-    let service = ClaudeService::new(policy.clone(), credential_port.clone(), store);
+    let service = ClaudeService::new(policy.clone(), store);
     let mut backend = BackendCoordinator::without_codex(
         FilePreferences::new(temp.path().join("preferences.json")),
         NoopBrowser,
         "Codex unavailable".to_owned(),
     )
-    .with_claude(crate::backend::ClaudeBackendRuntime::new(
-        service,
-        credential_port,
-        policy,
-    ));
+    .with_claude(crate::backend::ClaudeBackendRuntime::new(service, policy));
 
-    backend
-        .accept_claude_credential(SecretValue::from_input("candidate-console-key").unwrap())
-        .await
-        .unwrap();
+    backend.startup().await.unwrap();
 
-    let retained = credentials
-        .load(CredentialAccount::AnthropicConsoleApiKey)
-        .unwrap()
-        .unwrap();
-    assert_eq!(retained.expose_bytes(), b"old-console-key");
+    assert_eq!(backend.state.claude.auth, ClaudeAuthStatus::Subscription);
+    assert_eq!(
+        backend.state.claude.auth_operation,
+        crate::app::ClaudeAuthOperation::Idle
+    );
 }
 
 #[tokio::test]
-async fn unverified_claude_credential_replace_never_reports_valid() {
-    use crate::app::ClaudeCredentialValidation;
+async fn claude_startup_requires_explicit_resume_when_account_scope_is_unavailable() {
+    use crate::app::ClaudeConversationState;
     use crate::claude::{ClaudeAuthStatus, ClaudeService, FileClaudeSessionStore};
-    use crate::credentials::{
-        CredentialAccount, CredentialStore, FakeCredentialStore, SecretValue,
-    };
+    use crate::provider::{ClaudeModelAlias, ClaudeSessionId, ProviderId};
 
     let temp = tempfile::tempdir().unwrap();
-    let backing = Arc::new(FakeCredentialStore::new());
-    let credential_port: Arc<dyn CredentialStore> =
-        Arc::new(UnverifiedClaudeCredentialStore::new(backing.clone()));
+    let executable = fake_claude_auth_executable(
+        temp.path(),
+        "fake-claude-unscoped-subscription",
+        r#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}"#,
+    );
+    let session_id: ClaudeSessionId = "00000000-0000-4000-8000-000000000077".parse().unwrap();
+    let preferences_path = temp.path().join("preferences.json");
+    let preferences = FilePreferences::new(&preferences_path);
+    let mut saved = PreferencesV3 {
+        active_provider: ProviderId::Claude,
+        ..PreferencesV3::default()
+    };
+    saved.claude.selected_model_alias = Some(ClaudeModelAlias::Default);
+    saved.claude.auto_resume_session_id = Some(session_id.clone());
+    preferences.save(&saved).unwrap();
     let store = Arc::new(FileClaudeSessionStore::new(temp.path().join("store")).unwrap());
-    let policy = fake_claude_policy(temp.path(), fake_claude_auth_executable(temp.path()));
-    let service = ClaudeService::new(policy.clone(), credential_port.clone(), store);
+    let policy = fake_claude_policy(temp.path(), executable);
+    let service = ClaudeService::new(policy.clone(), store);
+    let mut backend = BackendCoordinator::without_codex(
+        FilePreferences::new(preferences_path),
+        NoopBrowser,
+        "Codex unavailable".to_owned(),
+    )
+    .with_claude(crate::backend::ClaudeBackendRuntime::new(service, policy));
+
+    backend.startup().await.unwrap();
+
+    assert_eq!(backend.state.claude.auth, ClaudeAuthStatus::Subscription);
+    assert!(matches!(
+        &backend.state.claude.conversation,
+        ClaudeConversationState::ResumeFailed { id, message }
+            if id == &session_id
+                && message.contains("stable account identity")
+                && message.contains("/resume")
+                && message.contains("/new")
+    ));
+    assert_eq!(
+        backend
+            .state
+            .preferences
+            .claude
+            .auto_resume_session_id
+            .as_ref(),
+        Some(&session_id)
+    );
+}
+
+#[tokio::test]
+async fn claude_refresh_demotes_a_ready_unscoped_session_after_auth_may_have_changed() {
+    use crate::app::{ClaudeAvailability, ClaudeConversationState};
+    use crate::claude::{ClaudeAuthStatus, ClaudeService, FileClaudeSessionStore};
+    use crate::provider::{ClaudeModelAlias, ClaudeSessionId, ProviderId};
+
+    let temp = tempfile::tempdir().unwrap();
+    let executable = fake_claude_auth_executable(
+        temp.path(),
+        "fake-claude-refreshed-subscription",
+        r#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}"#,
+    );
+    let store = Arc::new(FileClaudeSessionStore::new(temp.path().join("store")).unwrap());
+    let policy = fake_claude_policy(temp.path(), executable);
+    let service = ClaudeService::new(policy.clone(), store);
     let mut backend = BackendCoordinator::without_codex(
         FilePreferences::new(temp.path().join("preferences.json")),
         NoopBrowser,
         "Codex unavailable".to_owned(),
     )
-    .with_claude(crate::backend::ClaudeBackendRuntime::new(
-        service,
-        credential_port,
-        policy,
-    ));
-    backend.state.claude.auth = ClaudeAuthStatus::Missing;
+    .with_claude(crate::backend::ClaudeBackendRuntime::new(service, policy));
+    let session_id: ClaudeSessionId = "00000000-0000-4000-8000-000000000078".parse().unwrap();
+    backend.state.active_provider = ProviderId::Claude;
+    backend.state.preferences.active_provider = ProviderId::Claude;
+    backend.state.preferences.claude.selected_model_alias = Some(ClaudeModelAlias::Default);
+    backend.state.preferences.claude.auto_resume_session_id = Some(session_id.clone());
+    backend.state.claude.availability = ClaudeAvailability::Ready;
+    backend.state.claude.auth = ClaudeAuthStatus::Subscription;
+    backend.state.claude.conversation = ClaudeConversationState::Ready {
+        id: session_id.clone(),
+    };
 
     backend
-        .accept_claude_credential(SecretValue::from_input("candidate-console-key").unwrap())
+        .execute_pending(vec![Effect::RefreshClaude])
         .await
         .unwrap();
 
-    assert_eq!(
-        backend.state.claude.auth,
-        ClaudeAuthStatus::CredentialUnavailable
+    assert_eq!(backend.state.claude.auth, ClaudeAuthStatus::Subscription);
+    assert!(matches!(
+        &backend.state.claude.conversation,
+        ClaudeConversationState::ResumeFailed { id, message }
+            if id == &session_id
+                && message.contains("stable account identity")
+                && message.contains("/resume")
+    ));
+}
+
+#[tokio::test]
+async fn claude_startup_rejects_a_native_cli_api_key_session_as_unsupported() {
+    use crate::claude::{ClaudeAuthStatus, ClaudeService, FileClaudeSessionStore};
+
+    let temp = tempfile::tempdir().unwrap();
+    let executable = fake_claude_auth_executable(
+        temp.path(),
+        "fake-claude-api-key",
+        r#"{"loggedIn":true,"authMethod":"api_key","apiProvider":"firstParty"}"#,
     );
-    assert_eq!(
-        backend.state.claude.credential_validation,
-        ClaudeCredentialValidation::Idle
+    let store = Arc::new(FileClaudeSessionStore::new(temp.path().join("store")).unwrap());
+    let policy = fake_claude_policy(temp.path(), executable);
+    let service = ClaudeService::new(policy.clone(), store);
+    let mut backend = BackendCoordinator::without_codex(
+        FilePreferences::new(temp.path().join("preferences.json")),
+        NoopBrowser,
+        "Codex unavailable".to_owned(),
+    )
+    .with_claude(crate::backend::ClaudeBackendRuntime::new(service, policy));
+
+    backend.startup().await.unwrap();
+
+    assert_eq!(backend.state.claude.auth, ClaudeAuthStatus::Unsupported);
+}
+
+#[tokio::test]
+async fn claude_login_is_pending_until_terminal_completion_and_subscription_recheck() {
+    use crate::app::ClaudeAuthOperation;
+    use crate::claude::{
+        ClaudeAuthAction, ClaudeAuthStatus, ClaudeService, FileClaudeSessionStore,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let executable = fake_claude_auth_executable(
+        temp.path(),
+        "fake-claude-login",
+        r#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"pro"}"#,
     );
-    assert!(backend
+    let store = Arc::new(FileClaudeSessionStore::new(temp.path().join("store")).unwrap());
+    let policy = fake_claude_policy(temp.path(), executable);
+    let service = ClaudeService::new(policy.clone(), store);
+    let mut backend = BackendCoordinator::without_codex(
+        FilePreferences::new(temp.path().join("preferences.json")),
+        NoopBrowser,
+        "Codex unavailable".to_owned(),
+    )
+    .with_claude(crate::backend::ClaudeBackendRuntime::new(service, policy));
+    backend.state.claude.auth = ClaudeAuthStatus::SignedOut;
+
+    backend
+        .execute_pending(vec![Effect::LoginClaude])
+        .await
+        .unwrap();
+    let request = backend
         .state
-        .notice
-        .as_deref()
-        .is_some_and(|notice| notice.contains("directory durability could not be verified")));
-    let stored = backing
-        .load(CredentialAccount::AnthropicConsoleApiKey)
-        .unwrap()
-        .unwrap();
-    assert_eq!(stored.expose_bytes(), b"candidate-console-key");
+        .pending_claude_auth_request()
+        .copied()
+        .expect("login is handed to the foreground terminal owner");
+    assert_eq!(request.action, ClaudeAuthAction::Login);
+    assert!(matches!(
+        backend.state.claude.auth_operation,
+        ClaudeAuthOperation::AwaitingTerminal { request: pending } if pending == request
+    ));
+    assert_eq!(backend.state.claude.auth, ClaudeAuthStatus::Unverified);
+
+    let effects = backend.complete_claude_auth(request, Ok(())).await;
+
+    assert!(effects.is_empty());
+    assert_eq!(backend.state.claude.auth, ClaudeAuthStatus::Subscription);
+    assert_eq!(
+        backend.state.claude.auth_operation,
+        ClaudeAuthOperation::Idle
+    );
 }
 
 #[tokio::test]
-async fn unverified_claude_credential_delete_never_reports_signed_out() {
-    use crate::claude::{ClaudeAuthStatus, ClaudeService, FileClaudeSessionStore};
-    use crate::credentials::{
-        CredentialAccount, CredentialStore, FakeCredentialStore, SecretValue,
+async fn claude_logout_is_pending_until_terminal_completion_and_signed_out_recheck() {
+    use crate::app::ClaudeAuthOperation;
+    use crate::claude::{
+        ClaudeAuthAction, ClaudeAuthStatus, ClaudeService, FileClaudeSessionStore,
     };
 
     let temp = tempfile::tempdir().unwrap();
-    let backing = Arc::new(FakeCredentialStore::new());
-    backing
-        .replace(
-            CredentialAccount::AnthropicConsoleApiKey,
-            SecretValue::from_input("existing-console-key").unwrap(),
-        )
-        .unwrap();
-    let credential_port: Arc<dyn CredentialStore> =
-        Arc::new(UnverifiedClaudeCredentialStore::new(backing.clone()));
+    let executable = fake_claude_auth_executable(
+        temp.path(),
+        "fake-claude-logout",
+        r#"{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}"#,
+    );
     let store = Arc::new(FileClaudeSessionStore::new(temp.path().join("store")).unwrap());
-    let policy = fake_claude_policy(temp.path(), std::path::PathBuf::from("/usr/bin/false"));
-    let service = ClaudeService::new(policy.clone(), credential_port.clone(), store);
+    let policy = fake_claude_policy(temp.path(), executable);
+    let service = ClaudeService::new(policy.clone(), store);
     let mut backend = BackendCoordinator::without_codex(
         FilePreferences::new(temp.path().join("preferences.json")),
         NoopBrowser,
         "Codex unavailable".to_owned(),
     )
-    .with_claude(crate::backend::ClaudeBackendRuntime::new(
-        service,
-        credential_port,
-        policy,
-    ));
-    backend.state.claude.auth = ClaudeAuthStatus::Valid;
+    .with_claude(crate::backend::ClaudeBackendRuntime::new(service, policy));
+    backend.state.claude.auth = ClaudeAuthStatus::Subscription;
 
     backend
         .execute_pending(vec![Effect::LogoutClaude])
         .await
         .unwrap();
+    let request = backend
+        .state
+        .pending_claude_auth_request()
+        .copied()
+        .expect("logout is handed to the foreground terminal owner");
+    assert_eq!(request.action, ClaudeAuthAction::Logout);
+    assert_eq!(backend.state.claude.auth, ClaudeAuthStatus::Unverified);
 
+    let effects = backend.complete_claude_auth(request, Ok(())).await;
+
+    assert!(effects.is_empty());
+    assert_eq!(backend.state.claude.auth, ClaudeAuthStatus::SignedOut);
     assert_eq!(
-        backend.state.claude.auth,
-        ClaudeAuthStatus::CredentialUnavailable
+        backend.state.claude.auth_operation,
+        ClaudeAuthOperation::Idle
+    );
+}
+
+#[tokio::test]
+async fn claude_logout_status_failure_keeps_auth_unverified() {
+    use crate::app::ClaudeAuthOperation;
+    use crate::claude::{ClaudeAuthStatus, ClaudeService, FileClaudeSessionStore};
+
+    let temp = tempfile::tempdir().unwrap();
+    let executable =
+        fake_claude_auth_executable(temp.path(), "fake-claude-uncertain-logout", "not-json");
+    let store = Arc::new(FileClaudeSessionStore::new(temp.path().join("store")).unwrap());
+    let policy = fake_claude_policy(temp.path(), executable);
+    let service = ClaudeService::new(policy.clone(), store);
+    let mut backend = BackendCoordinator::without_codex(
+        FilePreferences::new(temp.path().join("preferences.json")),
+        NoopBrowser,
+        "Codex unavailable".to_owned(),
+    )
+    .with_claude(crate::backend::ClaudeBackendRuntime::new(service, policy));
+    backend.state.claude.auth = ClaudeAuthStatus::Subscription;
+
+    backend
+        .execute_pending(vec![Effect::LogoutClaude])
+        .await
+        .unwrap();
+    let request = backend
+        .state
+        .pending_claude_auth_request()
+        .copied()
+        .expect("logout is handed to the foreground terminal owner");
+
+    let effects = backend.complete_claude_auth(request, Ok(())).await;
+
+    assert!(effects.is_empty());
+    assert_eq!(backend.state.claude.auth, ClaudeAuthStatus::Unverified);
+    assert_eq!(
+        backend.state.claude.auth_operation,
+        ClaudeAuthOperation::Idle
     );
     assert!(backend
         .state
         .notice
         .as_deref()
-        .is_some_and(|notice| notice.contains("sign-out status is uncertain")));
-    assert!(!backing.is_configured(CredentialAccount::AnthropicConsoleApiKey));
+        .is_some_and(|notice| notice.contains("status check failed")));
+}
+
+#[tokio::test]
+async fn failed_claude_refresh_invalidates_stale_subscription_authority() {
+    use crate::app::ClaudeAuthOperation;
+    use crate::claude::{ClaudeAuthStatus, ClaudeService, FileClaudeSessionStore};
+
+    let temp = tempfile::tempdir().unwrap();
+    let executable =
+        fake_claude_auth_executable(temp.path(), "fake-claude-failed-refresh", "not-json");
+    let store = Arc::new(FileClaudeSessionStore::new(temp.path().join("store")).unwrap());
+    let policy = fake_claude_policy(temp.path(), executable);
+    let service = ClaudeService::new(policy.clone(), store);
+    let mut backend = BackendCoordinator::without_codex(
+        FilePreferences::new(temp.path().join("preferences.json")),
+        NoopBrowser,
+        "Codex unavailable".to_owned(),
+    )
+    .with_claude(crate::backend::ClaudeBackendRuntime::new(service, policy));
+    backend.state.claude.auth = ClaudeAuthStatus::Subscription;
+
+    backend
+        .execute_pending(vec![Effect::RefreshClaude])
+        .await
+        .unwrap();
+
+    assert_eq!(backend.state.claude.auth, ClaudeAuthStatus::Unverified);
+    assert_eq!(
+        backend.state.claude.auth_operation,
+        ClaudeAuthOperation::Idle
+    );
+    assert!(backend
+        .state
+        .notice
+        .as_deref()
+        .is_some_and(|notice| notice.contains("status check failed")));
+}
+
+#[tokio::test]
+async fn claude_send_revalidates_system_subscription_before_launch() {
+    use crate::app::{ClaudeAvailability, ClaudeConversationState, TurnState};
+    use crate::claude::{ClaudeAuthStatus, ClaudeService, FileClaudeSessionStore};
+    use crate::provider::{ClaudeModelAlias, ProviderId};
+
+    let temp = tempfile::tempdir().unwrap();
+    let executable = fake_claude_auth_executable(
+        temp.path(),
+        "fake-claude-externally-signed-out",
+        r#"{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}"#,
+    );
+    let store = Arc::new(FileClaudeSessionStore::new(temp.path().join("store")).unwrap());
+    let policy = fake_claude_policy(temp.path(), executable);
+    let service = ClaudeService::new(policy.clone(), store);
+    let mut backend = BackendCoordinator::without_codex(
+        FilePreferences::new(temp.path().join("preferences.json")),
+        NoopBrowser,
+        "Codex unavailable".to_owned(),
+    )
+    .with_claude(crate::backend::ClaudeBackendRuntime::new(service, policy));
+    let session_id = "00000000-0000-4000-8000-000000000088".parse().unwrap();
+    backend.state.active_provider = ProviderId::Claude;
+    backend.state.preferences.active_provider = ProviderId::Claude;
+    backend.state.preferences.claude.selected_model_alias = Some(ClaudeModelAlias::Default);
+    backend.state.claude.availability = ClaudeAvailability::Ready;
+    backend.state.claude.auth = ClaudeAuthStatus::Subscription;
+    backend.state.claude.conversation = ClaudeConversationState::Ready { id: session_id };
+    backend.state.turn = TurnState::Starting;
+
+    backend
+        .execute_pending(vec![Effect::SendClaudeMessage {
+            text: "must not launch".to_owned(),
+        }])
+        .await
+        .unwrap();
+
+    assert_eq!(backend.state.claude.auth, ClaudeAuthStatus::SignedOut);
+    assert!(matches!(backend.state.turn, TurnState::Failed { .. }));
+    assert!(backend
+        .state
+        .notice
+        .as_deref()
+        .is_some_and(|notice| notice.contains("Auth") || notice.contains("auth")));
 }
 
 #[test]

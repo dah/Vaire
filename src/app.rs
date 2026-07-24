@@ -29,7 +29,7 @@ mod turn;
 
 pub use actions::{Action, DomainEvent, Effect, TurnOutcome};
 pub use domain::{
-    AuthState, ClaudeAvailability, ClaudeConversationState, ClaudeCredentialValidation,
+    AuthState, ClaudeAuthOperation, ClaudeAuthRequest, ClaudeAvailability, ClaudeConversationState,
     ClaudeState, ConnectionState, Intent, ModelChoice, OpenRouterConversationState,
     OpenRouterCredentialValidation, OpenRouterState, ThreadState, TranscriptEntry,
     TranscriptEntryStatus, TranscriptRole, TranscriptTruncation, TurnState,

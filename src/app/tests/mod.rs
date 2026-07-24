@@ -165,6 +165,7 @@ mod context_activity;
 mod deletion;
 mod openrouter_integration;
 mod picker;
+mod reasoning;
 mod resume;
 mod selection_new_thread;
 mod shutdown_safety;

@@ -71,11 +71,12 @@ where
 
 pub(in crate::runtime) async fn run_backend(
     config: RuntimeConfig,
+    claude_resolution: Option<Result<PathBuf, ClaudeRuntimeError>>,
     mut intents: mpsc::Receiver<RuntimeCommand>,
     mut shutdowns: mpsc::Receiver<()>,
     states: watch::Sender<AppState>,
 ) {
-    let mut backend = match build_backend(config).await {
+    let mut backend = match build_backend_with_claude_resolution(config, claude_resolution).await {
         Ok(backend) => backend,
         Err(error) => {
             run_failed_backend(&mut intents, &mut shutdowns, &states, error.to_string()).await;
@@ -155,11 +156,11 @@ pub(in crate::runtime) async fn run_backend(
                 let _ = backend.accept_openrouter_credential(value);
                 publish(&states, backend.state());
             }
-            RuntimeWork::Command(Some(RuntimeCommand::ClaudeCredential(value))) => {
+            RuntimeWork::Command(Some(RuntimeCommand::ClaudeAuthFinished { request, result })) => {
                 prefer_event = true;
                 let (_, shutdown_latched) = finish_work_and_latch_shutdown(
                     &mut shutdowns,
-                    backend.accept_claude_credential(value),
+                    backend.complete_claude_auth(request, result),
                 )
                 .await;
                 publish(&states, backend.state());

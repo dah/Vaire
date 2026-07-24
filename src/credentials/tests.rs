@@ -57,68 +57,6 @@ fn fake_store_is_deterministic_and_records_no_secret_content() {
 }
 
 #[test]
-fn file_stores_are_bound_to_one_account_and_keep_provider_files_isolated() {
-    let temp = tempdir().unwrap();
-    let runtime = temp.path().join("runtime");
-    let openrouter_home = runtime.join("openrouter-home");
-    let openrouter_file = openrouter_home.join("api-key");
-    let anthropic_home = runtime.join("anthropic-home");
-    let anthropic_file = anthropic_home.join("api-key");
-    let openrouter = FileCredentialStore::new(
-        CredentialAccount::OpenRouterApiKey,
-        &openrouter_home,
-        &openrouter_file,
-    )
-    .unwrap();
-    let anthropic = FileCredentialStore::new(
-        CredentialAccount::AnthropicConsoleApiKey,
-        &anthropic_home,
-        &anthropic_file,
-    )
-    .unwrap();
-
-    openrouter
-        .replace(
-            CredentialAccount::OpenRouterApiKey,
-            secret("openrouter-test"),
-        )
-        .unwrap();
-    anthropic
-        .replace(
-            CredentialAccount::AnthropicConsoleApiKey,
-            secret("anthropic-test"),
-        )
-        .unwrap();
-
-    for error in [
-        openrouter
-            .load(CredentialAccount::AnthropicConsoleApiKey)
-            .unwrap_err(),
-        openrouter
-            .replace(
-                CredentialAccount::AnthropicConsoleApiKey,
-                secret("must-not-write"),
-            )
-            .unwrap_err(),
-        anthropic
-            .delete(CredentialAccount::OpenRouterApiKey)
-            .unwrap_err(),
-    ] {
-        assert_eq!(error.category(), CredentialFailureCategory::Permissions);
-    }
-    assert_eq!(fs::read(&openrouter_file).unwrap(), b"openrouter-test");
-    assert_eq!(fs::read(&anthropic_file).unwrap(), b"anthropic-test");
-    assert_eq!(
-        fs::metadata(&anthropic_home).unwrap().permissions().mode() & 0o7777,
-        0o700
-    );
-    assert_eq!(
-        fs::metadata(&anthropic_file).unwrap().permissions().mode() & 0o7777,
-        0o600
-    );
-}
-
-#[test]
 fn file_store_creates_exact_owner_only_layout_and_round_trips_without_newline() {
     let (_temp, home, credential) = paths();
     let store =

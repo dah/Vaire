@@ -87,20 +87,14 @@ pub enum BackendRuntimeEvent {
 
 pub struct ClaudeBackendRuntime {
     pub(in crate::backend) service: ClaudeService,
-    pub(in crate::backend) credentials: std::sync::Arc<dyn CredentialStore>,
     pub(in crate::backend) policy: ClaudeCliPolicy,
     pub(in crate::backend) next_operation_id: u64,
 }
 
 impl ClaudeBackendRuntime {
-    pub fn new(
-        service: ClaudeService,
-        credentials: std::sync::Arc<dyn CredentialStore>,
-        policy: ClaudeCliPolicy,
-    ) -> Self {
+    pub fn new(service: ClaudeService, policy: ClaudeCliPolicy) -> Self {
         Self {
             service,
-            credentials,
             policy,
             next_operation_id: 1,
         }

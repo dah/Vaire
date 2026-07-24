@@ -23,8 +23,17 @@ pub(in crate::tui) fn render_transcript(
                 }
             }
             crate::provider::ProviderId::Claude => match (&state.claude.auth, &state.claude.conversation) {
-                (crate::claude::ClaudeAuthStatus::Missing, _) => {
-                    "Claude is signed out. Use /login to enter an Anthropic Console API key."
+                (crate::claude::ClaudeAuthStatus::SignedOut, _) => {
+                    "Claude is signed out. Use /login to connect your Claude subscription."
+                }
+                (crate::claude::ClaudeAuthStatus::Unsupported, _) => {
+                    "Claude is using unsupported authentication. Use /login to connect a Claude subscription."
+                }
+                (crate::claude::ClaudeAuthStatus::Unverified, _) => {
+                    "Claude subscription status could not be verified. Use /login or refresh the provider status."
+                }
+                (crate::claude::ClaudeAuthStatus::CliUnavailable, _) => {
+                    "Claude Code is unavailable. Install or repair the supported CLI, then restart Vairë."
                 }
                 (_, crate::app::ClaudeConversationState::ResumeFailed { .. }) => {
                     "The saved Claude session could not be resumed. Use /resume or /new; it was not replaced."

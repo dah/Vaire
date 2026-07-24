@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 
-use crate::credentials::{CredentialAccount, CredentialStore, FakeCredentialStore, SecretValue};
 use crate::provider::{ClaudeSessionId, ClaudeTurnId};
 
 use super::process::argv_strings;
@@ -20,6 +19,27 @@ fn session_id(value: &str) -> ClaudeSessionId {
 
 fn turn_id(value: &str) -> ClaudeTurnId {
     value.parse().unwrap()
+}
+
+async fn wait_for_test_pid_gone(pid: i32) -> bool {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            // SAFETY: signal zero only probes the exact descendant PID written by a fake CLI.
+            if unsafe { libc::kill(pid, 0) } == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+fn kill_test_pid(pid: i32) {
+    // SAFETY: test-only fallback targets the exact PID written by the fake CLI.
+    let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
 }
 
 fn policy(executable: impl Into<std::path::PathBuf>, root: &Path) -> ClaudeCliPolicy {
@@ -93,7 +113,7 @@ impl ClaudeSessionStore for ScriptedCommitStore {
 }
 
 #[test]
-fn fixed_aliases_and_argv_keep_prompt_and_key_out_of_arguments() {
+fn fixed_aliases_and_argv_keep_prompt_and_authentication_out_of_arguments() {
     let root = TempDir::new().unwrap();
     let policy = policy("/bin/false", root.path());
     let id = session_id("00000000-0000-4000-8000-000000000001");
@@ -101,49 +121,344 @@ fn fixed_aliases_and_argv_keep_prompt_and_key_out_of_arguments() {
         &policy,
         &ClaudeInvocation::NewSession {
             session_id: id,
-            model: ClaudeModelAlias::Sonnet,
+            model: ClaudeModelAlias::Fable,
         },
     );
     assert!(user.contains(&"--safe-mode".to_owned()));
+    assert!(!user.contains(&"--bare".to_owned()));
     assert!(user.contains(&"--verbose".to_owned()));
     assert!(user.contains(&"--dangerously-skip-permissions".to_owned()));
-    assert!(user.windows(2).any(|pair| pair == ["--model", "sonnet"]));
+    assert!(user.windows(2).any(|pair| pair == ["--model", "fable"]));
+    assert_eq!(
+        user.iter()
+            .filter(|argument| argument.as_str() == "--strict-mcp-config")
+            .count(),
+        1
+    );
+    assert_eq!(
+        user.windows(2)
+            .filter(|pair| pair == &["--mcp-config", r#"{"mcpServers":{}}"#])
+            .count(),
+        1
+    );
+    assert!(user
+        .windows(2)
+        .any(|pair| { pair == ["--settings", r#"{"forceLoginMethod":"claudeai"}"#] }));
     let joined = user.join(" ");
     assert!(!joined.contains("user prompt"));
-    assert!(!joined.contains("test-console-key"));
     assert_eq!(
         CLAUDE_MODEL_ALIASES.map(claude_model_selector),
-        ["default", "opus", "sonnet", "haiku"]
+        ["default", "fable", "opus", "sonnet", "haiku"]
     );
 }
 
 #[tokio::test]
-async fn credential_probe_requires_the_injected_console_key_source() {
+async fn auth_status_accepts_only_native_first_party_subscription() {
     let root = TempDir::new().unwrap();
     let home = root.path().join("home");
     let cwd = root.path().join("cwd");
     fs::create_dir(&home).unwrap();
     fs::create_dir(&cwd).unwrap();
-    let script = root.path().join("fake-claude");
+    let write_status_cli = |name: &str, result: &str| {
+        let script = root.path().join(name);
+        fs::write(
+            &script,
+            format!(
+                r#"#!/bin/sh
+[ "$1" = "--safe-mode" ] || exit 2
+[ "$2" = "--settings" ] || exit 3
+[ "$3" = '{{"forceLoginMethod":"claudeai"}}' ] || exit 4
+[ "$4" = "--setting-sources" ] || exit 5
+[ -z "$5" ] || exit 6
+[ "$6" = "auth" ] || exit 7
+[ "$7" = "status" ] || exit 8
+[ "$8" = "--json" ] || exit 9
+[ -z "$ANTHROPIC_VAIRE_TEST_SHOULD_SCRUB" ] || exit 10
+[ -z "$CLAUDE_VAIRE_TEST_SHOULD_SCRUB" ] || exit 11
+[ "$VAIRE_CLAUDE_TEST_UNRELATED" = "must-inherit" ] || exit 12
+case "$CLAUDE_CONFIG_DIR" in */home) ;; *) exit 13 ;; esac
+{result}
+"#
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+        script
+    };
+    let subscription = write_status_cli(
+        "subscription",
+        r#"printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}'"#,
+    );
+    let signed_out = write_status_cli(
+        "signed-out",
+        r#"printf '%s\n' '{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}'; exit 1"#,
+    );
+    let failed = write_status_cli(
+        "failed",
+        r#"printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}'; exit 1"#,
+    );
+    let unsupported = write_status_cli(
+        "unsupported",
+        r#"printf '%s\n' '{"loggedIn":true,"authMethod":"oauth_token","apiProvider":"firstParty","subscriptionType":"max"}'"#,
+    );
+    std::env::set_var("ANTHROPIC_VAIRE_TEST_SHOULD_SCRUB", "must-not-inherit");
+    std::env::set_var("CLAUDE_VAIRE_TEST_SHOULD_SCRUB", "must-not-inherit");
+    std::env::set_var("VAIRE_CLAUDE_TEST_UNRELATED", "must-inherit");
+    assert_eq!(
+        inspect_claude_auth(&subscription, &home, &cwd, Duration::from_secs(2))
+            .await
+            .unwrap(),
+        ClaudeCliAuthState::Subscription
+    );
+    assert_eq!(
+        inspect_claude_auth(&signed_out, &home, &cwd, Duration::from_secs(2))
+            .await
+            .unwrap(),
+        ClaudeCliAuthState::SignedOut
+    );
+    assert_eq!(
+        inspect_claude_auth(&unsupported, &home, &cwd, Duration::from_secs(2))
+            .await
+            .unwrap(),
+        ClaudeCliAuthState::Unsupported
+    );
+    assert_eq!(
+        inspect_claude_auth(&failed, &home, &cwd, Duration::from_secs(2)).await,
+        Err(ClaudeRuntimeError::AuthStatus)
+    );
+    std::env::remove_var("ANTHROPIC_VAIRE_TEST_SHOULD_SCRUB");
+    std::env::remove_var("CLAUDE_VAIRE_TEST_SHOULD_SCRUB");
+    std::env::remove_var("VAIRE_CLAUDE_TEST_UNRELATED");
+}
+
+#[tokio::test]
+async fn auth_status_output_and_runtime_are_bounded() {
+    let root = TempDir::new().unwrap();
+    let home = root.path().join("home");
+    let cwd = root.path().join("cwd");
+    fs::create_dir(&home).unwrap();
+    fs::create_dir(&cwd).unwrap();
+
+    let oversized = root.path().join("oversized-auth-status");
+    fs::write(
+        &oversized,
+        "#!/bin/sh\ndd if=/dev/zero bs=65537 count=1 2>/dev/null\n",
+    )
+    .unwrap();
+    fs::set_permissions(&oversized, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        inspect_claude_auth(&oversized, &home, &cwd, Duration::from_secs(2)).await,
+        Err(ClaudeRuntimeError::AuthStatus)
+    );
+
+    let blocked = root.path().join("blocked-auth-status");
+    fs::write(
+        &blocked,
+        "#!/bin/sh\nsleep 30 &\nprintf '%s\\n' \"$!\" > \"$0.descendant-pid\"\nwait\n",
+    )
+    .unwrap();
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(3),
+        inspect_claude_auth(&blocked, &home, &cwd, Duration::from_secs(1)),
+    )
+    .await
+    .expect("status timeout cleanup must be bounded");
+    assert_eq!(result, Err(ClaudeRuntimeError::AuthStatus));
+    let descendant_pid: i32 =
+        fs::read_to_string(root.path().join("blocked-auth-status.descendant-pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+    let descendant_gone = wait_for_test_pid_gone(descendant_pid).await;
+    if !descendant_gone {
+        kill_test_pid(descendant_pid);
+    }
+    assert!(descendant_gone, "status timeout must kill CLI descendants");
+}
+
+#[tokio::test]
+async fn version_probe_cancellation_is_bounded_and_kills_descendants() {
+    let root = TempDir::new().unwrap();
+    let home = root.path().join("home");
+    fs::create_dir(&home).unwrap();
+    let script = root.path().join("blocked-version-claude");
+    fs::write(
+        &script,
+        "#!/bin/sh\nsleep 30 &\nprintf '%s\\n' \"$!\" > \"$0.descendant-pid\"\n: > \"$0.started\"\nwait\n",
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    let started = root.path().join("blocked-version-claude.started");
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let driver_cancellation = cancellation.clone();
+    let driver = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !started.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("version child must start before cancellation");
+        driver_cancellation.cancel();
+    });
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(3),
+        verify_claude_version_cancellable(&script, &home, Duration::from_secs(30), &cancellation),
+    )
+    .await
+    .expect("version cancellation and reap must be bounded");
+    driver.await.unwrap();
+
+    assert_eq!(result, Err(ClaudeRuntimeError::AuthCancelled));
+    let descendant_pid: i32 =
+        fs::read_to_string(root.path().join("blocked-version-claude.descendant-pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+    let descendant_gone = wait_for_test_pid_gone(descendant_pid).await;
+    if !descendant_gone {
+        kill_test_pid(descendant_pid);
+    }
+    assert!(
+        descendant_gone,
+        "version cancellation must kill descendants"
+    );
+}
+
+#[tokio::test]
+async fn auth_actions_use_fixed_arguments_and_cli_owned_environment() {
+    let root = TempDir::new().unwrap();
+    let home = root.path().join("home");
+    let cwd = root.path().join("cwd");
+    fs::create_dir(&home).unwrap();
+    fs::create_dir(&cwd).unwrap();
+    let script = root.path().join("fake-auth-claude");
     fs::write(
         &script,
         r#"#!/bin/sh
-[ "$1" = "--bare" ] || exit 2
-[ "$2" = "--safe-mode" ] || exit 3
-[ "$3" = "auth" ] || exit 4
-[ "$4" = "status" ] || exit 5
-[ "$5" = "--json" ] || exit 6
-[ "$ANTHROPIC_API_KEY" = "test-console-key" ] || exit 7
-[ -n "$CLAUDE_CONFIG_DIR" ] || exit 8
-printf '%s\n' '{"loggedIn":true,"authMethod":"api_key","apiProvider":"firstParty","apiKeySource":"ANTHROPIC_API_KEY"}'
+[ -z "$ANTHROPIC_VAIRE_AUTH_ACTION_TEST" ] || exit 2
+[ -z "$CLAUDE_VAIRE_AUTH_ACTION_TEST" ] || exit 3
+[ "$VAIRE_AUTH_ACTION_TEST_UNRELATED" = "must-inherit" ] || exit 4
+case "$CLAUDE_CONFIG_DIR" in */home) ;; *) exit 5 ;; esac
+printf '<%s>\n' "$@" > "$0.args"
+ps -o pgid= -p $$ > "$0.pgid"
 "#,
     )
     .unwrap();
     fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
-    let key = SecretValue::from_input("test-console-key").unwrap();
-    verify_claude_credential_source(&script, &home, &cwd, &key, Duration::from_secs(2))
-        .await
+    std::env::set_var("ANTHROPIC_VAIRE_AUTH_ACTION_TEST", "must-not-inherit");
+    std::env::set_var("CLAUDE_VAIRE_AUTH_ACTION_TEST", "must-not-inherit");
+    std::env::set_var("VAIRE_AUTH_ACTION_TEST_UNRELATED", "must-inherit");
+
+    run_claude_auth_action(
+        &script,
+        &home,
+        &cwd,
+        ClaudeAuthAction::Login,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(root.path().join("fake-auth-claude.args")).unwrap(),
+        concat!(
+            "<--safe-mode>\n",
+            "<--settings>\n",
+            "<{\"forceLoginMethod\":\"claudeai\"}>\n",
+            "<--setting-sources>\n",
+            "<>\n",
+            "<auth>\n",
+            "<login>\n",
+            "<--claudeai>\n",
+        )
+    );
+    let child_process_group: i32 = fs::read_to_string(root.path().join("fake-auth-claude.pgid"))
+        .unwrap()
+        .trim()
+        .parse()
         .unwrap();
+    // SAFETY: getpgrp has no preconditions and retains no pointers.
+    assert_eq!(child_process_group, unsafe { libc::getpgrp() });
+
+    run_claude_auth_action(
+        &script,
+        &home,
+        &cwd,
+        ClaudeAuthAction::Logout,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(root.path().join("fake-auth-claude.args")).unwrap(),
+        concat!(
+            "<--safe-mode>\n",
+            "<--settings>\n",
+            "<{\"forceLoginMethod\":\"claudeai\"}>\n",
+            "<--setting-sources>\n",
+            "<>\n",
+            "<auth>\n",
+            "<logout>\n",
+        )
+    );
+    std::env::remove_var("ANTHROPIC_VAIRE_AUTH_ACTION_TEST");
+    std::env::remove_var("CLAUDE_VAIRE_AUTH_ACTION_TEST");
+    std::env::remove_var("VAIRE_AUTH_ACTION_TEST_UNRELATED");
+}
+
+#[tokio::test]
+async fn auth_action_cancellation_is_bounded_and_reaps_the_child() {
+    let root = TempDir::new().unwrap();
+    let home = root.path().join("home");
+    let cwd = root.path().join("cwd");
+    fs::create_dir(&home).unwrap();
+    fs::create_dir(&cwd).unwrap();
+    let script = root.path().join("blocked-auth-claude");
+    fs::write(
+        &script,
+        "#!/bin/sh\nsleep 30 &\nprintf '%s\\n' \"$!\" > \"$0.descendant-pid\"\n: > \"$0.started\"\nwait\n",
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    let started = root.path().join("blocked-auth-claude.started");
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let driver_cancellation = cancellation.clone();
+    let driver = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !started.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("auth child must start before cancellation");
+        driver_cancellation.cancel();
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(3),
+        run_claude_auth_action(&script, &home, &cwd, ClaudeAuthAction::Login, cancellation),
+    )
+    .await
+    .expect("auth cancellation and reap must be bounded");
+    driver.await.unwrap();
+    assert_eq!(result, Err(ClaudeRuntimeError::AuthCancelled));
+    let descendant_pid: i32 =
+        fs::read_to_string(root.path().join("blocked-auth-claude.descendant-pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+    let descendant_gone = wait_for_test_pid_gone(descendant_pid).await;
+    if !descendant_gone {
+        kill_test_pid(descendant_pid);
+    }
+    assert!(
+        descendant_gone,
+        "auth cancellation must kill CLI descendants"
+    );
 }
 
 #[test]
@@ -377,21 +692,22 @@ async fn fake_process_streams_and_reaps_with_sanitized_inherited_environment() {
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\nread prompt\n[ -n \"$ANTHROPIC_API_KEY\" ] || exit 8\n[ \"$UNRELATED_SECRET\" = \"must-inherit\" ] || exit 9\n[ -z \"$ANTHROPIC_BASE_URL\" ] || exit 10\ncase \"$CLAUDE_CONFIG_DIR\" in */home) ;; *) exit 11 ;; esac\nprintf '%s\\n' '{init}' '{delta}' '{result}'\n"
+            "#!/bin/sh\nread prompt\n[ -z \"$ANTHROPIC_TEST_SHOULD_SCRUB\" ] || exit 8\n[ \"$UNRELATED_SECRET\" = \"must-inherit\" ] || exit 9\n[ -z \"$ANTHROPIC_BASE_URL\" ] || exit 10\n[ -z \"$CLAUDE_TEST_SHOULD_SCRUB\" ] || exit 11\ncase \"$CLAUDE_CONFIG_DIR\" in */home) ;; *) exit 12 ;; esac\nprintf '%s\\n' '{init}' '{delta}' '{result}'\n"
         ),
     )
     .unwrap();
     fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
     std::env::set_var("UNRELATED_SECRET", "must-inherit");
+    std::env::set_var("ANTHROPIC_TEST_SHOULD_SCRUB", "must-not-leak");
     std::env::set_var("ANTHROPIC_BASE_URL", "must-not-leak");
-    let key = SecretValue::from_input("test-console-key").unwrap();
+    std::env::set_var("CLAUDE_TEST_SHOULD_SCRUB", "must-not-leak");
     let policy = policy(&script, root.path());
     let invocation = ClaudeInvocation::NewSession {
         session_id: id.clone(),
         model: ClaudeModelAlias::Haiku,
     };
     let cancellation = tokio_util::sync::CancellationToken::new();
-    let mut child = ClaudeChild::spawn(&policy, &invocation, id, "hello", key, &cancellation)
+    let mut child = ClaudeChild::spawn(&policy, &invocation, id, "hello", &cancellation)
         .await
         .unwrap();
     let mut events = Vec::new();
@@ -400,7 +716,9 @@ async fn fake_process_streams_and_reaps_with_sanitized_inherited_environment() {
     }
     child.finish(&cancellation).await.unwrap();
     std::env::remove_var("UNRELATED_SECRET");
+    std::env::remove_var("ANTHROPIC_TEST_SHOULD_SCRUB");
     std::env::remove_var("ANTHROPIC_BASE_URL");
+    std::env::remove_var("CLAUDE_TEST_SHOULD_SCRUB");
     assert_eq!(events.len(), 3);
 }
 
@@ -416,8 +734,24 @@ async fn service_completes_and_persists_only_successful_assistant_text() {
         r#"{{"type":"system","subtype":"init","session_id":"{}","model":"fake"}}"#,
         id_text
     );
+    let status = format!(
+        r#"{{"type":"system","subtype":"status","session_id":"{}"}}"#,
+        id_text
+    );
+    let rate_limit = format!(
+        r#"{{"type":"rate_limit_event","session_id":"{}"}}"#,
+        id_text
+    );
     let delta = format!(
         r#"{{"type":"stream_event","session_id":"{}","event":{{"type":"content_block_delta","delta":{{"type":"text_delta","text":"done"}}}}}}"#,
+        id_text
+    );
+    let assistant = format!(
+        r#"{{"type":"assistant","session_id":"{}","message":{{}}}}"#,
+        id_text
+    );
+    let stop = format!(
+        r#"{{"type":"stream_event","session_id":"{}","event":{{"type":"message_stop"}}}}"#,
         id_text
     );
     let result = format!(
@@ -426,7 +760,9 @@ async fn service_completes_and_persists_only_successful_assistant_text() {
     );
     fs::write(
         &script,
-        format!("#!/bin/sh\nread prompt\nprintf '%s\\n' '{init}' '{delta}' '{result}'\n"),
+        format!(
+            "#!/bin/sh\nmcp_config=\nstrict_mcp_count=0\nwhile [ \"$#\" -gt 0 ]; do\n  case \"$1\" in\n    --strict-mcp-config)\n      strict_mcp_count=$((strict_mcp_count + 1))\n      ;;\n    --mcp-config)\n      shift\n      [ \"$#\" -gt 0 ] || exit 31\n      mcp_config=$1\n      ;;\n  esac\n  shift\ndone\n[ \"$strict_mcp_count\" -eq 1 ] || exit 32\n[ \"$mcp_config\" = '{{\"mcpServers\":{{}}}}' ] || exit 33\nread prompt\nprintf '%s\\n' '{init}' '{status}' '{rate_limit}' '{delta}' '{assistant}' '{stop}' '{result}'\n"
+        ),
     )
     .unwrap();
     fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
@@ -443,38 +779,24 @@ async fn service_completes_and_persists_only_successful_assistant_text() {
             "title",
         ))
         .unwrap();
-    let credentials = Arc::new(FakeCredentialStore::new());
-    credentials
-        .replace(
-            CredentialAccount::AnthropicConsoleApiKey,
-            SecretValue::from_input("test-console-key").unwrap(),
-        )
-        .unwrap();
-    let mut service = ClaudeService::new(
-        policy(&script, root.path()),
-        credentials,
-        Arc::clone(&store),
-    );
+    let mut service = ClaudeService::new(policy(&script, root.path()), Arc::clone(&store));
     let prepared = service
         .prepare_turn(id.clone(), ClaudeModelAlias::Sonnet, "hello".to_owned(), 2)
         .await
         .unwrap();
     service.launch_prepared_turn(prepared, 3).await.unwrap();
 
-    let mut finished = false;
-    while let Some(event) = service.next_event().await {
-        if matches!(
-            event,
-            ClaudeServiceEvent::TurnFinished {
-                outcome: ClaudeTurnOutcome::Completed,
-                ..
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(event) = service.next_event().await {
+            if let ClaudeServiceEvent::TurnFinished { outcome, .. } = event {
+                assert_eq!(outcome, ClaudeTurnOutcome::Completed);
+                return;
             }
-        ) {
-            finished = true;
-            break;
         }
-    }
-    assert!(finished);
+        panic!("service event stream ended before turn completion");
+    })
+    .await
+    .expect("fake Claude turn must finish promptly");
     let stored = store.load_session(&id).unwrap();
     assert_eq!(stored.turns[0].assistant_text.as_deref(), Some("done"));
     assert_eq!(stored.lifecycle, ClaudeSessionLifecycle::Established);
@@ -498,16 +820,8 @@ async fn service_correlates_spawn_failure_and_restores_fresh_lifecycle() {
             "spawn failure",
         ))
         .unwrap();
-    let credentials = Arc::new(FakeCredentialStore::new());
-    credentials
-        .replace(
-            CredentialAccount::AnthropicConsoleApiKey,
-            SecretValue::from_input("test-console-key").unwrap(),
-        )
-        .unwrap();
     let mut service = ClaudeService::new(
         policy(root.path().join("missing-claude"), root.path()),
-        credentials,
         Arc::clone(&store),
     );
     let prepared = service
@@ -575,18 +889,7 @@ async fn shutdown_drains_a_saturated_event_queue_before_awaiting_the_turn() {
             "queue flood",
         ))
         .unwrap();
-    let credentials = Arc::new(FakeCredentialStore::new());
-    credentials
-        .replace(
-            CredentialAccount::AnthropicConsoleApiKey,
-            SecretValue::from_input("test-console-key").unwrap(),
-        )
-        .unwrap();
-    let mut service = ClaudeService::new(
-        policy(&script, root.path()),
-        credentials,
-        Arc::clone(&store),
-    );
+    let mut service = ClaudeService::new(policy(&script, root.path()), Arc::clone(&store));
     let prepared = service
         .prepare_turn(id.clone(), ClaudeModelAlias::Sonnet, "hello".to_owned(), 2)
         .await
@@ -649,18 +952,7 @@ async fn final_store_failure_never_emits_a_completed_authoritative_answer() {
             "store failure",
         ))
         .unwrap();
-    let credentials = Arc::new(FakeCredentialStore::new());
-    credentials
-        .replace(
-            CredentialAccount::AnthropicConsoleApiKey,
-            SecretValue::from_input("test-console-key").unwrap(),
-        )
-        .unwrap();
-    let mut service = ClaudeService::new(
-        policy(&script, root.path()),
-        credentials,
-        Arc::clone(&store),
-    );
+    let mut service = ClaudeService::new(policy(&script, root.path()), Arc::clone(&store));
     let prepared = service
         .prepare_turn(id.clone(), ClaudeModelAlias::Sonnet, "hello".to_owned(), 2)
         .await
@@ -743,18 +1035,7 @@ async fn interrupt_cancels_the_final_wait_after_terminal_stdout_closes() {
             "final wait",
         ))
         .unwrap();
-    let credentials = Arc::new(FakeCredentialStore::new());
-    credentials
-        .replace(
-            CredentialAccount::AnthropicConsoleApiKey,
-            SecretValue::from_input("test-console-key").unwrap(),
-        )
-        .unwrap();
-    let mut service = ClaudeService::new(
-        policy(&script, root.path()),
-        credentials,
-        Arc::clone(&store),
-    );
+    let mut service = ClaudeService::new(policy(&script, root.path()), Arc::clone(&store));
     let prepared = service
         .prepare_turn(id.clone(), ClaudeModelAlias::Sonnet, "hello".to_owned(), 2)
         .await
@@ -786,12 +1067,7 @@ async fn unverified_session_and_prepared_turn_commits_never_reach_process_launch
         None,
         CommitStatus::CommittedUnverified,
     ));
-    let credentials = Arc::new(FakeCredentialStore::new());
-    let mut service = ClaudeService::new(
-        policy("/bin/false", root.path()),
-        credentials.clone(),
-        unverified.clone(),
-    );
+    let mut service = ClaudeService::new(policy("/bin/false", root.path()), unverified.clone());
     let (unverified_id, commit) = service
         .create_session(ClaudeModelAlias::Sonnet, 1)
         .await
@@ -815,11 +1091,7 @@ async fn unverified_session_and_prepared_turn_commits_never_reach_process_launch
         )),
         CommitStatus::CommittedUnverified,
     ));
-    service = ClaudeService::new(
-        policy("/bin/false", root.path()),
-        credentials,
-        seeded.clone(),
-    );
+    service = ClaudeService::new(policy("/bin/false", root.path()), seeded.clone());
     assert!(service
         .prepare_turn(id.clone(), ClaudeModelAlias::Sonnet, "hello".to_owned(), 2)
         .await
@@ -840,11 +1112,7 @@ async fn unverified_session_and_prepared_turn_commits_never_reach_process_launch
         Some(uncertain_session),
         CommitStatus::CommittedUnverified,
     ));
-    service = ClaudeService::new(
-        policy("/bin/false", root.path()),
-        Arc::new(FakeCredentialStore::new()),
-        uncertain_store.clone(),
-    );
+    service = ClaudeService::new(policy("/bin/false", root.path()), uncertain_store.clone());
     let prepared = service
         .prepare_turn(
             uncertain_id.clone(),
@@ -893,16 +1161,8 @@ async fn uncertain_resume_abandonment_and_preinit_failure_stay_uncertain() {
         ClaudeSessionV1::new(id.clone(), ClaudeModelAlias::Sonnet, 1, "uncertain resume");
     session.lifecycle = ClaudeSessionLifecycle::CreationUncertain;
     store.save_session(&session).unwrap();
-    let credentials = Arc::new(FakeCredentialStore::new());
-    credentials
-        .replace(
-            CredentialAccount::AnthropicConsoleApiKey,
-            SecretValue::from_input("test-console-key").unwrap(),
-        )
-        .unwrap();
     let mut service = ClaudeService::new(
         policy(root.path().join("missing-claude"), root.path()),
-        credentials,
         Arc::clone(&store),
     );
 
@@ -947,7 +1207,7 @@ async fn uncertain_resume_abandonment_and_preinit_failure_stay_uncertain() {
 }
 
 #[tokio::test]
-async fn uncertain_resume_credential_failure_is_correlated_and_reblocks() {
+async fn uncertain_resume_spawn_failure_is_correlated_and_reblocks() {
     let root = TempDir::new().unwrap();
     for directory in [root.path().join("home"), root.path().join("cwd")] {
         fs::create_dir(&directory).unwrap();
@@ -955,17 +1215,12 @@ async fn uncertain_resume_credential_failure_is_correlated_and_reblocks() {
     let id = session_id("00000000-0000-4000-8000-000000000026");
     let store: Arc<dyn ClaudeSessionStore> =
         Arc::new(FileClaudeSessionStore::new(root.path().join("store")).unwrap());
-    let mut session = ClaudeSessionV1::new(
-        id.clone(),
-        ClaudeModelAlias::Sonnet,
-        1,
-        "uncertain credential",
-    );
+    let mut session =
+        ClaudeSessionV1::new(id.clone(), ClaudeModelAlias::Sonnet, 1, "uncertain spawn");
     session.lifecycle = ClaudeSessionLifecycle::CreationUncertain;
     store.save_session(&session).unwrap();
     let mut service = ClaudeService::new(
-        policy("/bin/false", root.path()),
-        Arc::new(FakeCredentialStore::new()),
+        policy(root.path().join("missing-claude"), root.path()),
         Arc::clone(&store),
     );
 
@@ -984,15 +1239,15 @@ async fn uncertain_resume_credential_failure_is_correlated_and_reblocks() {
             outcome: ClaudeTurnOutcome::Failed,
             creation_uncertain: true,
             failure: Some(ClaudeError {
-                stage: ClaudeFailureStage::Credential,
-                category: ClaudeFailureCategory::InvalidCredential,
+                stage: ClaudeFailureStage::Spawn,
+                category: ClaudeFailureCategory::Unavailable,
             }),
             ..
         })
     ));
     let stored = store.load_session(&id).unwrap();
     assert_eq!(stored.lifecycle, ClaudeSessionLifecycle::CreationUncertain);
-    assert_eq!(stored.turns[0].outcome, ClaudeTurnOutcome::Interrupted);
+    assert_eq!(stored.turns[0].outcome, ClaudeTurnOutcome::Failed);
 }
 
 #[tokio::test]
@@ -1007,15 +1262,7 @@ async fn post_spawn_stdin_cancellation_marks_new_session_creation_uncertain() {
     let started = root.path().join("fake-claude-blocked-stdin.started");
     let store: Arc<dyn ClaudeSessionStore> =
         Arc::new(FileClaudeSessionStore::new(root.path().join("store")).unwrap());
-    let credentials = Arc::new(FakeCredentialStore::new());
-    credentials
-        .replace(
-            CredentialAccount::AnthropicConsoleApiKey,
-            SecretValue::from_input("test-console-key").unwrap(),
-        )
-        .unwrap();
-    let mut service =
-        ClaudeService::new(policy(script, root.path()), credentials, Arc::clone(&store));
+    let mut service = ClaudeService::new(policy(script, root.path()), Arc::clone(&store));
     let (id, commit) = service
         .create_session(ClaudeModelAlias::Sonnet, 1)
         .await

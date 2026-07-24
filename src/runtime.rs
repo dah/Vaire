@@ -18,8 +18,8 @@ use tokio::time;
 use crate::app::{Action, AppState, AuthState, ConnectionState, Intent};
 use crate::backend::{BackendCoordinator, ClaudeBackendRuntime};
 use crate::claude::{
-    resolve_claude, verify_claude_version, ClaudeCliPolicy, ClaudeService, ClaudeSessionStore,
-    FileClaudeSessionStore,
+    resolve_claude, verify_claude_version, verify_claude_version_cancellable, ClaudeCliPolicy,
+    ClaudeRuntimeError, ClaudeService, ClaudeSessionStore, FileClaudeSessionStore,
 };
 use crate::codex::safety::{FullAccessPolicy, IsolationPaths};
 use crate::codex::session::SessionService;
@@ -39,7 +39,9 @@ mod scheduler;
 mod types;
 mod version;
 
-pub(in crate::runtime) use build::{build_backend, publish};
+#[cfg(test)]
+pub(in crate::runtime) use build::build_backend;
+pub(in crate::runtime) use build::{build_backend_with_claude_resolution, publish};
 pub(in crate::runtime) use scheduler::*;
 pub use types::{RuntimeCommand, RuntimeConfig, RuntimeError, RuntimeHandle};
 pub(in crate::runtime) use version::verify_codex_version;

@@ -4,7 +4,6 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::credentials::{CredentialAccount, CredentialStore};
 use crate::provider::{ClaudeSessionId, ClaudeTurnId};
 use crate::storage::CommitStatus;
 
@@ -34,7 +33,6 @@ struct ActiveTurn {
 
 pub struct ClaudeService {
     policy: ClaudeCliPolicy,
-    credentials: Arc<dyn CredentialStore>,
     store: Arc<dyn ClaudeSessionStore>,
     events_tx: mpsc::Sender<ClaudeServiceEvent>,
     events_rx: mpsc::Receiver<ClaudeServiceEvent>,
@@ -43,15 +41,10 @@ pub struct ClaudeService {
 }
 
 impl ClaudeService {
-    pub fn new(
-        policy: ClaudeCliPolicy,
-        credentials: Arc<dyn CredentialStore>,
-        store: Arc<dyn ClaudeSessionStore>,
-    ) -> Self {
+    pub fn new(policy: ClaudeCliPolicy, store: Arc<dyn ClaudeSessionStore>) -> Self {
         let (events_tx, events_rx) = mpsc::channel(EVENT_QUEUE_CAPACITY);
         Self {
             policy,
-            credentials,
             store,
             events_tx,
             events_rx,
@@ -227,44 +220,13 @@ impl ClaudeService {
                 .await;
             return Ok(());
         }
-        let key = match self
-            .credentials
-            .load(CredentialAccount::AnthropicConsoleApiKey)
-        {
-            Ok(Some(key)) => key,
-            result => {
-                let failure = if result.is_err() {
-                    ClaudeError::new(
-                        ClaudeFailureStage::Credential,
-                        ClaudeFailureCategory::Unavailable,
-                    )
-                } else {
-                    ClaudeError::new(
-                        ClaudeFailureStage::Credential,
-                        ClaudeFailureCategory::InvalidCredential,
-                    )
-                };
-                self.finish_prepared_before_launch(prepared, now_ms, failure)
-                    .await;
-                return Ok(());
-            }
-        };
         let cancellation = CancellationToken::new();
         let task_cancellation = cancellation.clone();
         let policy = self.policy.clone();
         let store = Arc::clone(&self.store);
         let events = self.events_tx.clone();
         let task = tokio::spawn(async move {
-            run_turn(
-                policy,
-                store,
-                events,
-                prepared,
-                key,
-                task_cancellation,
-                now_ms,
-            )
-            .await;
+            run_turn(policy, store, events, prepared, task_cancellation, now_ms).await;
         });
         self.active = Some(ActiveTurn { cancellation, task });
         Ok(())
@@ -382,7 +344,6 @@ async fn run_turn(
     store: Arc<dyn ClaudeSessionStore>,
     events: mpsc::Sender<ClaudeServiceEvent>,
     prepared: PreparedClaudeTurn,
-    key: crate::credentials::SecretValue,
     cancellation: CancellationToken,
     now_ms: u64,
 ) {
@@ -419,7 +380,6 @@ async fn run_turn(
         &prepared.invocation,
         session_id.clone(),
         &prepared.prompt,
-        key,
         &cancellation,
     )
     .await

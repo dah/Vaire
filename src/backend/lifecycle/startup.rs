@@ -157,23 +157,9 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
             }
             return;
         };
-        let credentials = runtime.credentials.clone();
-        let key = tokio::task::spawn_blocking(move || {
-            credentials.load(CredentialAccount::AnthropicConsoleApiKey)
-        })
-        .await;
-        let auth = match key {
-            Ok(Ok(None)) => ClaudeAuthStatus::Missing,
-            Ok(Err(_)) | Err(_) => ClaudeAuthStatus::CredentialUnavailable,
-            Ok(Ok(Some(key))) => {
-                match crate::backend::claude_runtime::validate_claude_key(runtime, &key).await {
-                    Ok(()) => ClaudeAuthStatus::Valid,
-                    Err(error) if error.category == ClaudeFailureCategory::InvalidCredential => {
-                        ClaudeAuthStatus::Invalid
-                    }
-                    Err(_) => ClaudeAuthStatus::Unverified,
-                }
-            }
+        let auth = match crate::backend::claude_runtime::inspect_runtime_auth(runtime).await {
+            Ok(auth) => auth,
+            Err(_) => ClaudeAuthStatus::Unverified,
         };
         self.state.reduce(Action::Event(DomainEvent::ClaudeStartup {
             availability: crate::app::ClaudeAvailability::Ready,
@@ -182,29 +168,22 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
         let Some(session_id) = saved_session else {
             return;
         };
-        if auth != ClaudeAuthStatus::Valid {
+        if auth != ClaudeAuthStatus::Subscription {
             self.state.reduce(Action::Event(DomainEvent::ClaudeResumeFailed {
                 session_id,
-                message: "the saved Claude session could not be restored until its Console API key is valid"
+                message: "the saved Claude session could not be restored until Claude Code is signed in with a subscription"
                     .to_owned(),
             }));
             return;
         }
-        match runtime.service.load_session(session_id.clone()).await {
-            Ok(session) => {
-                self.state
-                    .reduce(Action::Event(DomainEvent::ClaudeSessionRestored {
-                        session,
-                        automatic: true,
-                    }));
-            }
-            Err(error) => {
-                self.state
-                    .reduce(Action::Event(DomainEvent::ClaudeResumeFailed {
-                        session_id,
-                        message: error.to_string(),
-                    }));
-            }
-        }
+        // The supported auth-status surface classifies subscription auth but exposes no stable
+        // account identifier. Never silently attach a saved local session to whichever system
+        // Claude account happens to be active; make that restoration an explicit /resume choice.
+        self.state
+            .reduce(Action::Event(DomainEvent::ClaudeResumeFailed {
+                session_id,
+                message: "Claude Code does not expose a stable account identity through its supported auth status; use /resume to deliberately restore this local session or /new to start blank"
+                    .to_owned(),
+            }));
     }
 }
