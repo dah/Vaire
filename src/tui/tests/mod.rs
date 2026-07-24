@@ -74,6 +74,7 @@ fn waiting() -> AppState {
     state
 }
 
+mod claude_ui;
 mod conversation;
 mod display;
 mod input_activity;

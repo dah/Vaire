@@ -1,11 +1,12 @@
 # Vairë
 
-Vairë is a small macOS-first terminal chat client with one active conversation across two
-providers: Codex through the installed app-server and OpenRouter text chat. Codex uses its owned
-ChatGPT subscription login flow; OpenRouter uses a user-supplied API key. There is no approval UI,
-and Codex's built-in command-line and file tools are enabled.
+Vairë is a small macOS-first terminal chat client with one active conversation across three
+providers: Codex through the installed app-server, OpenRouter text chat, and Claude Code through
+the installed non-interactive CLI. Codex uses its owned ChatGPT subscription login flow.
+OpenRouter and Claude use user-supplied API keys. There is no approval UI; Codex and Claude
+command/file tools run with unrestricted same-user access.
 
-The TUI can create and revisit provider-labelled histories, search models from both providers,
+The TUI can create and revisit provider-labelled histories, search models from all providers,
 show Codex-emitted reasoning in a Reasoning side panel, animate the wait for reply text, and report
 remaining model context when the active provider supplies usable token data.
 
@@ -14,26 +15,37 @@ remaining model context when the active provider supplies usable token data.
 Requirements:
 
 - macOS and stable Rust
-- codex-cli 0.144.6 or newer available as codex on PATH
+- codex-cli 0.144.6 or newer available as `codex` on `PATH`
+- Claude Code 2.1.178 or newer available as `claude` on `PATH` to use the Claude provider
 
-    cargo run --bin vaire
+```bash
+cargo run --bin vaire
+```
 
-**Warning:** Vairë runs Codex with `danger-full-access` and `approval_policy="never"`.
-Commands execute without confirmation and can run local programs, use the network, invoke already
-authenticated tools, and read, create, modify, or delete anything your macOS account can access.
-This is not a sandbox; use it only with prompts and content you trust.
+**Warning:** Vairë runs Codex with `danger-full-access` and
+`approval_policy="never"`, and Claude with its documented dangerous permission bypass.
+Supported commands execute without confirmation and can run local programs, use the network,
+invoke authenticated tools, and read, create, modify, or delete anything your macOS account can
+access. This is not a sandbox; use it only with prompts and content you trust.
 
-Set `VAIRE_CODEX_BIN=/absolute/path/to/codex` only when `codex` is not on `PATH`.
-On first launch, enter **/login** to choose Codex or OpenRouter. For Codex, complete the HTTPS
-browser sign-in. If the callback-based OpenAI page fails, run **/logout** to cancel the pending
-attempt and use **/login device**; the app opens the device verification page and displays the
-one-time code in the TUI. For OpenRouter, enter an API key in the masked editor, validate it, then
-use **c** in the login popup to choose the enabled model subset. Vairë stores its non-secret
-preferences and dedicated Codex runtime under
-`~/Library/Application Support/vaire/`; Codex owns credentials in that dedicated home.
-Preferences may include the normalized ChatGPT email and a non-secret thread-to-account registry
-used to prevent cross-account thread listing or resume; the preferences file and its directory are
-owner-only. New non-ephemeral threads are explicitly created with `threadSource: "appServer"`.
+Set `VAIRE_CODEX_BIN=/absolute/path/to/codex` or
+`VAIRE_CLAUDE_BIN=/absolute/path/to/claude` only when that executable is not on `PATH`.
+
+On first launch, enter **/login** and choose a provider:
+
+- Codex opens the supported HTTPS ChatGPT sign-in. If the callback flow fails, run **/logout** to
+  cancel it and use **/login device**.
+- OpenRouter opens a masked API-key editor, validates the key, and lets you use **c** in the login
+  popup to choose the enabled model subset.
+- Claude opens a masked Anthropic Console API-key editor. Vairë does not discover, import, reuse,
+  or automate Claude.ai Free/Pro/Max subscription OAuth: Anthropic's policy requires third-party
+  products to use Console API keys or a supported cloud provider. The key is treated as configured
+  after a local CLI credential-source check and is remotely validated by the first real turn.
+
+Vairë stores non-secret preferences and dedicated provider runtime state under
+`~/Library/Application Support/vaire/`. Preferences may include the normalized ChatGPT email,
+provider model selections, registered conversation IDs, and a non-secret Codex
+thread-to-account registry. The preferences file and its directory are owner-only.
 
 On the first launch after upgrading from the legacy product name, Vairë migrates the complete
 `~/Library/Application Support/AgentHarness` root to
@@ -47,88 +59,105 @@ not merge or overwrite the roots. A failure to sync the parent after the verifie
 move is committed but its crash durability is unverified, so Vairë reports the failure and never
 attempts to reverse it automatically.
 
-For compatibility with existing Vairë threads created before that source was explicit,
+For compatibility with existing Codex threads created before the source was explicit,
 `/resume` discovers both `appServer` and legacy `vscode` sources, but exposes only thread IDs
 already registered to the signed-in account whose cwd exactly matches the dedicated conversation
 directory. It permanently searches both the current cwd and the historical pre-rename cwd so
-registered conversations remain visible after the product rename; those two searches share the
-same resource ceilings and never auto-register a discovered thread.
+registered conversations remain visible after the product rename; those searches share resource
+ceilings and never auto-register a discovered thread.
 
-Tool commands start in the dedicated `runtime/conversation` directory, and files created there are
-kept across launches. That directory and the dedicated Codex home are organizational boundaries,
-not security boundaries: commands can leave the starting directory and can reach other same-user
-paths, including Codex-owned authentication state.
+Codex tools start in persistent non-project `runtime/conversation`; Claude tools start in the separate persistent non-project `runtime/claude-conversation` directory.
+Files created there survive restarts. This directory and the dedicated provider homes are
+organizational boundaries only: full-access commands can leave them and reach arbitrary same-user
+paths, including provider authentication state and Vairë's plaintext API-key files.
 
-The OpenRouter key is stored as plaintext in the owner-only
-`runtime/openrouter-home/api-key` file (directory mode `0700`, file mode `0600`). This is
-organizational isolation, not encryption or secure storage: same-user processes, backups,
-snapshots, disk recovery, and full-access Codex commands may reach it, and logout deletion is not
-secure erasure. Migration to macOS Keychain through the injected credential-store port remains
-explicit technical debt; a future migration must save and verify the Keychain item before deleting
-the file and preserve the file on any failure. Local OpenRouter histories are also owner-only
-plaintext files. When an OpenRouter stream emits nonempty assistant text and then fails, schema V2
-retains that partial only for display. Startup and **/resume** restore it under the explicit
-**Agent (incomplete; turn failed):** label, but it is excluded from canonical history and every later
-model request. In-progress and interrupted output is not checkpointed. OpenRouter SSE
-events are bounded and validated through terminal completion. Provider error objects take
-precedence over malformed completion metadata; a valid numeric status controls classification even
-when symbolic metadata conflicts. Malformed optional usage is discarded without failing an
-otherwise valid answer, and a provider-resolved semantic model is checked for internal stream
-consistency without being compared to the requested alias. Parser failures add a closed static
-stream stage to the visible turn-failure message without persisting response payload or stage data.
+The OpenRouter key is stored in owner-only plaintext
+`runtime/openrouter-home/api-key`; the Anthropic Console key is stored in owner-only plaintext
+`runtime/anthropic-home/api-key`. Each directory is exact mode `0700` and each regular,
+current-user-owned key file is exact mode `0600`. This is not encryption, secure storage, a
+sandbox, or protection from same-user processes, backups, snapshots, disk recovery, process
+inspection, or full-access model-run commands. Logout deletion is not secure erasure. OpenRouter's
+migration to macOS Keychain through the injected credential-store port remains explicit technical
+debt: a future migration must save and verify the Keychain item before deleting the file and
+preserve the file on any failure.
 
-The app-server inherits the launching environment except that inherited `CODEX_*` values are
+OpenRouter histories and Vairë's Claude registrations/display histories are owner-only plaintext.
+If either stream emits nonempty assistant text and then fails, Vairë retains that partial only for
+display and restores it under **Agent (incomplete; turn failed):**. Failed partials are never model
+context; in-progress and interrupted output is not checkpointed.
+
+Claude remains the source of its model context. Vairë uses only documented print-mode stream JSON,
+explicit UUID creation/resume, safe mode, and direct process spawning. It never parses or
+enumerates Claude's private transcript/session files and never automates the interactive Claude
+TUI. `/resume` shows only Vairë-registered Claude sessions. Deleting an inactive Claude row
+forgets Vairë's registration and bounded display history; it does not claim to erase opaque
+Claude-owned session data.
+
+Claude runs with a dedicated `runtime/claude-home` configuration directory. Safe mode and direct
+flags disable inherited `CLAUDE.md`, user/project settings, hooks, plugins, skills, MCP, Chrome,
+WebFetch/WebSearch, interactive questions, subagents, and agent teams for this milestone. Vairë
+removes inherited `ANTHROPIC_*` and `CLAUDE_*` variables before injecting only the selected
+Console key into the Claude child environment. Environment cleanup is not a security boundary:
+other ambient authority such as `DATABASE_URL`, `SSH_AUTH_SOCK`, Keychain, credential/config
+files, and authenticated CLIs may remain available to model-run commands.
+
+The initial Claude model choices are Anthropic's documented selectors `default`, `opus`,
+`sonnet`, and `haiku`; they are aliases, not a fabricated account catalog. Stream initialization
+and terminal metadata establish the provider-reported model. Selecting a different Claude alias
+starts a fresh blank Claude conversation because resumed CLI sessions retain their original model.
+
+OpenRouter SSE and Claude stream-json events are bounded and terminally validated. Malformed
+required payloads, correlation mismatches, duplicate terminals, resource exhaustion, or EOF
+without a terminal result fail visibly. Optional usage/metadata never clears earlier valid data,
+and raw provider payloads are not persisted in diagnostics.
+
+The Codex app-server inherits the launcher environment except inherited `CODEX_*` values are
 removed and Vairë supplies its dedicated `CODEX_HOME`; tool shells request environment
 inheritance. Codex's default name-based filtering of variables containing `KEY`, `SECRET`, or
-`TOKEN` is incomplete. Ambient authority such as `DATABASE_URL`, `SSH_AUTH_SOCK`, macOS Keychain,
-credential/config files, and authenticated CLIs may remain available to model-run commands.
-Sanitized diagnostics are written to `diagnostics/vaire.log`. A migrated legacy diagnostics file,
-if present, remains untouched.
+`TOKEN` is incomplete. Sanitized diagnostics are written to `diagnostics/vaire.log`; a migrated
+legacy diagnostics file remains untouched.
 
-To stay responsive when app-server or local state is unexpectedly large, Vairë enforces
-explicit resource ceilings. Drafts are limited to 128 KiB; the UI retains only a recent bounded
-transcript slice (at most 1 MiB and 2,048 entries), while Codex remains the source of truth for
-complete thread history. Protocol frames, saved preferences, and each rotating diagnostics file
-are also capped at 1 MiB. A limit violation is reported instead of allocating without bound or
-silently replacing the active thread.
+Vairë enforces explicit resource ceilings. Drafts are limited to 128 KiB; the UI retains at most
+1 MiB and 2,048 recent transcript entries. Protocol frames, saved preferences, each local
+conversation record, and each rotating diagnostics file are bounded. A limit violation is
+reported instead of allocating without bound or silently replacing the active conversation.
 
 ## Commands and keys
 
 - **/login**, **/login browser**, **/login device**, **/logout**, **/new**, **/resume**,
   **/thinking**, **/help**, **/quit**
 - **/model** opens a searchable, provider-labelled picker. Switching providers immediately starts
-  a blank conversation; **/resume** is the only operation that restores cross-provider history.
-- **/reasoning [value]** uses Codex choices; OpenRouter reasoning effort is unsupported.
-- **/new** eagerly creates a fresh conversation for the active provider without deleting history
+  a blank conversation; selecting a different Claude alias does likewise. **/resume** is the only
+  operation that deliberately restores cross-provider history.
+- **/reasoning [value]** uses Codex choices. OpenRouter and Claude reasoning effort are unsupported
+  in this milestone.
+- **/new** eagerly creates a fresh conversation for the active provider without deleting history.
 - **/resume** opens the provider-labelled conversation picker; arrows or **j/k** navigate and
-  **Enter** resumes
-- In the conversation picker, **d** requests deletion of the selected inactive history and **D** requests
-  deletion of all inactive histories. Both actions show their exact scope and require a second
-  **Enter** confirmation; **Escape** cancels. The active saved thread is always protected.
-- **/thinking** toggles the right-side Reasoning panel. Vairë requests detailed reasoning
-  summaries for each turn and configures its dedicated runtime with
-  `show_raw_agent_reasoning=true` at process and thread start/resume boundaries. This is
-  best-effort configuration: for Codex the panel shows reasoning text only when the selected model
-  explicitly emits it, with summaries as the fallback. OpenRouter reasoning fields are not collected.
-  Hidden/private
-  chain-of-thought is unavailable; Vairë neither exposes nor infers it. `/thinking`
-  controls panel visibility; `/reasoning [value]` separately selects the reasoning effort level.
-- The header uses the authenticated account identity instead of a generic signed-in label and shows
-  right-aligned **Context N%** when usable usage data is available, or **Context --** when it is not.
-- A small animated squiggle appears while the active provider is working before the first
-  assistant text. It is display-only and disappears on the first nonempty text or any terminal
-  turn state.
-- **Enter** sends; **Alt-Enter** inserts a newline
-- **PageUp/PageDown**, arrow keys, **Home**, and **End** scroll the transcript
-- **Escape** closes local help/errors, or interrupts an active turn
-- **Ctrl-C** quits cleanly
+  **Enter** resumes.
+- In the conversation picker, **d** requests deletion of the selected inactive history and **D**
+  requests deletion of all inactive histories. Both require a second **Enter**; **Escape** cancels.
+  The active conversation is protected. Claude deletion is registration/display-history removal
+  only.
+- **/thinking** toggles the right-side Reasoning panel. For Codex it shows only reasoning summaries
+  or reasoning text explicitly emitted by app-server. OpenRouter and Claude reasoning fields are
+  not collected. Hidden/private chain-of-thought is unavailable; Vairë neither exposes nor infers
+  it.
+- The header shows provider-specific authentication/conversation/model state and right-aligned
+  **Context N%** when usable data exists, or **Context --** otherwise.
+- A display-only squiggle appears before the first assistant text and disappears on text or any
+  terminal turn state.
+- **Enter** sends; **Alt-Enter** inserts a newline.
+- **PageUp/PageDown**, arrow keys, **Home**, and **End** scroll the transcript.
+- **Escape** closes local help/errors or interrupts an active turn.
+- **Ctrl-C** quits cleanly.
 
 Default tests are offline:
 
-    cargo fmt --check
-    cargo clippy --all-targets --all-features -- -D warnings
-    cargo test --all-targets
+```bash
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets
+```
 
-The installed-CLI initialization smoke is explicit and does not require ChatGPT login:
-
-    cargo test --test installed_cli_smoke installed_cli_initializes_with_full_access_policy -- --ignored --nocapture
+Installed-CLI smoke tests are explicit, ignored, and do not require provider login or network
+access.

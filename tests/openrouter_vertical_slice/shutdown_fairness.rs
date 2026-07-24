@@ -54,9 +54,9 @@ async fn completion_queued_before_logout_remains_completed_with_final_text() {
     )
     .unwrap();
     let openrouter = OpenRouterService::new(client, credentials, store);
-    let mut preferences = PreferencesV2 {
+    let mut preferences = PreferencesV3 {
         active_provider: ProviderId::OpenRouter,
-        ..PreferencesV2::default()
+        ..PreferencesV3::default()
     };
     preferences.openrouter.selected_model_id = Some("vendor/model".to_owned());
     preferences.openrouter.enabled_model_ids = BTreeSet::from(["vendor/model".to_owned()]);
@@ -117,9 +117,9 @@ async fn codex_event_flood_does_not_starve_openrouter_or_deadlock_dual_provider_
     )
     .unwrap();
     let openrouter = OpenRouterService::new(client, credentials, store);
-    let mut preferences = PreferencesV2 {
+    let mut preferences = PreferencesV3 {
         active_provider: ProviderId::OpenRouter,
-        ..PreferencesV2::default()
+        ..PreferencesV3::default()
     };
     preferences.openrouter.selected_model_id = Some("vendor/model".to_owned());
     preferences.openrouter.enabled_model_ids = BTreeSet::from(["vendor/model".to_owned()]);

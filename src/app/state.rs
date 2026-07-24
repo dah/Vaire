@@ -6,6 +6,7 @@ pub struct AppState {
     pub connection: ConnectionState,
     pub auth: AuthState,
     pub openrouter: OpenRouterState,
+    pub claude: ClaudeState,
     pub thread: ThreadState,
     pub turn: TurnState,
     pub models: Vec<ModelChoice>,
@@ -17,12 +18,13 @@ pub struct AppState {
     pub transcript_dropped_prefix_bytes: BTreeMap<(String, String), TranscriptTruncation>,
     pub popup: Option<PopupState>,
     pub thinking: ThinkingState,
-    pub preferences: PreferencesV2,
+    pub preferences: PreferencesV3,
     pub notice: Option<String>,
     /// The account identity captured when an eager `/new` operation began.
     /// The outer option distinguishes no request from a request made while the
     /// server reported no stable account identity.
     pub pending_new_thread_scope: Option<Option<AccountScope>>,
+    pub pending_new_claude_session: bool,
     pub pending_thread_deletions: Option<BTreeSet<String>>,
     pub shutting_down: bool,
 }
@@ -34,6 +36,7 @@ impl Default for AppState {
             connection: ConnectionState::Disconnected,
             auth: AuthState::Unknown,
             openrouter: OpenRouterState::default(),
+            claude: ClaudeState::default(),
             thread: ThreadState::None,
             turn: TurnState::Idle,
             models: Vec::new(),
@@ -45,9 +48,10 @@ impl Default for AppState {
             transcript_dropped_prefix_bytes: BTreeMap::new(),
             popup: None,
             thinking: ThinkingState::default(),
-            preferences: PreferencesV2::default(),
+            preferences: PreferencesV3::default(),
             notice: None,
             pending_new_thread_scope: None,
+            pending_new_claude_session: false,
             pending_thread_deletions: None,
             shutting_down: false,
         }
@@ -93,6 +97,14 @@ impl AppState {
                 OpenRouterConversationState::None
                 | OpenRouterConversationState::ResumeFailed { .. } => None,
             },
+            ProviderId::Claude => match &self.claude.conversation {
+                ClaudeConversationState::Ready { id } => Some(ConversationRef::Claude {
+                    session_id: id.clone(),
+                }),
+                ClaudeConversationState::None
+                | ClaudeConversationState::ResumeFailed { .. }
+                | ClaudeConversationState::CreationUncertain { .. } => None,
+            },
         }
     }
 
@@ -109,6 +121,13 @@ impl AppState {
                 conversation_id: conversation_id.clone(),
                 turn_id: turn_id.clone(),
             }),
+            TurnState::ClaudeStreaming {
+                session_id,
+                turn_id,
+            } => Some(TurnRef::Claude {
+                session_id: session_id.clone(),
+                turn_id: turn_id.clone(),
+            }),
             _ => None,
         }
     }
@@ -121,15 +140,26 @@ impl AppState {
         let provider_ready = match self.active_provider {
             ProviderId::Codex => matches!(self.connection, ConnectionState::Ready { .. }),
             ProviderId::OpenRouter => true,
+            ProviderId::Claude => matches!(self.claude.availability, ClaudeAvailability::Ready),
         };
         if self.shutting_down || !provider_ready || !self.active_provider_is_authenticated() {
             return false;
         }
 
         match &self.turn {
-            TurnState::Starting => {
-                matches!(self.thread, ThreadState::None | ThreadState::Ready { .. })
-            }
+            TurnState::Starting => match self.active_provider {
+                ProviderId::Codex => {
+                    matches!(self.thread, ThreadState::None | ThreadState::Ready { .. })
+                }
+                ProviderId::OpenRouter => matches!(
+                    self.openrouter.conversation,
+                    OpenRouterConversationState::None | OpenRouterConversationState::Ready { .. }
+                ),
+                ProviderId::Claude => matches!(
+                    self.claude.conversation,
+                    ClaudeConversationState::None | ClaudeConversationState::Ready { .. }
+                ),
+            },
             TurnState::Streaming { thread_id, turn_id } => {
                 let active_thread_matches =
                     matches!(&self.thread, ThreadState::Ready { id } if id == thread_id);
@@ -158,6 +188,22 @@ impl AppState {
                             && !entry.text.is_empty()
                     })
             }
+            TurnState::ClaudeStreaming {
+                session_id,
+                turn_id,
+            } => {
+                let active_matches = matches!(
+                    &self.claude.conversation,
+                    ClaudeConversationState::Ready { id } if id == session_id
+                );
+                active_matches
+                    && !self.transcript.iter().rev().any(|entry| {
+                        entry.provider == ProviderId::Claude
+                            && entry.turn_id.as_deref() == Some(turn_id.as_str())
+                            && entry.role == TranscriptRole::Assistant
+                            && !entry.text.is_empty()
+                    })
+            }
             TurnState::Idle
             | TurnState::Completed { .. }
             | TurnState::Interrupted { .. }
@@ -171,6 +217,7 @@ impl AppState {
             ProviderId::OpenRouter => {
                 self.openrouter.auth == crate::openrouter::OpenRouterAuthStatus::Valid
             }
+            ProviderId::Claude => self.claude.auth == ClaudeAuthStatus::Valid,
         }
     }
 }

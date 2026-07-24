@@ -8,7 +8,7 @@ Vairë currently sends no custom base or developer instructions to runtime threa
 
 ## Mission
 
-Vairë is a small, dependable local terminal client with one active conversation across Codex app-server and OpenRouter text chat. Users can authenticate independently, select a provider-labelled model, manage provider-owned saved histories, stream replies, run Codex command/file tools, and safely restore the selected provider's working conversation after restart.
+Vairë is a small, dependable local terminal client with one active conversation across Codex app-server, OpenRouter text chat, and Claude Code CLI. Users can authenticate independently, select a provider-labelled model, manage provider-owned or Vairë-registered saved histories, stream replies, run Codex or Claude command/file tools, and safely restore the selected provider's working conversation after restart.
 
 Preserve this working vertical slice while evolving the product deliberately. Prefer small end-to-end increments over abstractions for hypothetical features, and make every expansion beyond the shipped baseline an explicit milestone decision.
 
@@ -19,9 +19,11 @@ The following behavior is implemented and is a regression contract unless an exp
 - Use stable Rust and Ratatui.
 - Support macOS only today. Keep operating-system seams small enough to add Linux later.
 - Do not add Windows support, Windows-specific code, or Windows CI.
-- Treat the Codex CLI as an installed runtime dependency.
+- Treat the Codex and Claude Code CLIs as installed runtime dependencies.
 - Require `codex-cli` 0.144.6 or newer and communicate with one long-lived `codex app-server` process over stdio.
-- Use the supported Codex ChatGPT sign-in flow so usage follows the user's ChatGPT subscription. API-key authentication is not supported.
+- Require Claude Code 2.1.178 or newer and use one directly spawned non-interactive stream-json child per Claude turn.
+- Use the supported Codex ChatGPT sign-in flow so usage follows the user's ChatGPT subscription. Codex API-key authentication is not supported.
+- Authenticate Claude only with a Vairë-entered Anthropic Console API key. Never discover, import, reuse, or automate Claude.ai Free/Pro/Max subscription OAuth; Anthropic does not permit third-party products to route through those credentials.
 - Query app-server for the available model catalog and supported reasoning levels. Do not hard-code model availability.
 - Keep exactly one active chat thread in the UI.
 - Persist the active Codex thread ID and automatically resume that same working thread on the next launch when authenticated account scope is available and matches.
@@ -29,16 +31,19 @@ The following behavior is implemented and is a regression contract unless an exp
 - Explicitly create every new non-ephemeral thread with `threadSource: "appServer"`. For compatibility, `/resume` discovers both `appServer` and legacy `vscode` sources across the exact current and historical pre-rename conversation cwd filters, then retains only IDs already registered to the authenticated account. Never auto-register discovery results.
 - Stream agent-message deltas into the transcript and show a clear terminal state when each turn completes or fails.
 - Request detailed reasoning summaries for every turn and show them with any reasoning text explicitly emitted by Codex in the optional Reasoning panel. Configure `show_raw_agent_reasoning=true` at dedicated app-server process and thread start/resume boundaries as best-effort provider/model-dependent behavior; summaries are the fallback. Hidden/private chain-of-thought is unavailable and must never be exposed or inferred.
-- Enable Codex command-line and file tools with unrestricted same-user access and no approval prompts. The TUI remains conversational and has no tool cards, approval controls, or rich command-progress workflow.
+- Enable Codex and Claude command-line and file tools with unrestricted same-user access and no approval prompts. The TUI remains conversational and has no tool cards, approval controls, or rich command-progress workflow.
 - Show the authenticated account identity and remaining context percentage in the header, and an ephemeral activity squiggle before the first assistant text.
 - Keep normal tests and CI offline; installed-CLI smoke tests remain explicit and ignored by default.
-- Support exactly two providers: Codex app-server and OpenRouter text chat. Providers beyond these remain out of scope.
+- Support exactly three providers: Codex app-server, OpenRouter text chat, and Claude Code CLI. Providers beyond these remain out of scope.
 - Keep one active provider, conversation, and turn. Provider-tag models, conversations, turns, transcript, reasoning, context, and histories.
 - Use the official OpenRouter `GET /api/v1/key`, authenticated `GET /api/v1/models/user`, and SSE `POST /api/v1/chat/completions` endpoints; OpenRouter tools and multimodal input are not supported.
-- Store the OpenRouter API key through the injected credential-store port in owner-only plaintext `runtime/openrouter-home/api-key` (`0700` directory, exact `0600` regular file). This is organizational isolation, not encryption, secure storage, a sandbox, or protection from same-user/full-access processes.
+- Store the OpenRouter API key through the injected credential-store port in owner-only plaintext `runtime/openrouter-home/api-key` (`0700` directory, exact `0600` regular file).
+- Store the Anthropic Console API key through the same injected port in the distinct owner-only plaintext `runtime/anthropic-home/api-key` (`0700` directory, exact `0600` regular file). Neither key path is encryption, secure storage, a sandbox, or protection from same-user/full-access processes.
+- Use only documented Claude CLI version/auth-status/print/stream-json/model/session/safe-mode/permission flags. Never parse or enumerate Claude private transcripts or automate the interactive TUI.
+- Keep Vairë-owned Claude registrations and bounded display history separate from Claude-owned model context. `/resume` lists only registered UUIDs; deleting an inactive Claude row forgets Vairë's registration/display record and does not claim to delete opaque provider data.
 - Treat macOS Keychain migration as mandatory technical debt for a later approved milestone. Save and verify the Keychain item before deleting the plaintext file, and preserve the file on any failure.
-- Cross-provider `/model` selection is a hard blank-conversation boundary with no continuity or history transfer. `/resume` is the only operation that restores cross-provider history; same-provider model changes may retain the conversation.
-- Use `Vairë` (NFC, precomposed `ë`) for human branding and `vaire` for the Cargo package, crate, executable, protocol client name, Application Support child, and environment prefix. The active diagnostics file is `diagnostics/vaire.log`, and `VAIRE_CODEX_BIN` is the only Codex executable override.
+- Cross-provider `/model` selection is a hard blank-conversation boundary with no continuity or history transfer. `/resume` is the only operation that restores cross-provider history. Codex/OpenRouter same-provider changes may retain a conversation; changing a Claude alias starts blank because resumed CLI sessions retain their original model.
+- Use `Vairë` (NFC, precomposed `ë`) for human branding and `vaire` for the Cargo package, crate, executable, protocol client name, Application Support child, and environment prefix. The active diagnostics file is `diagnostics/vaire.log`; `VAIRE_CODEX_BIN` and `VAIRE_CLAUDE_BIN` are the only Codex and Claude executable overrides, respectively.
 
 ## Current scope boundaries
 
@@ -46,7 +51,7 @@ The following capabilities are outside the shipped baseline. Do not introduce th
 
 - Multiple simultaneously active threads, forking, or branching.
 - Approval UI, per-command confirmation, tool cards, or a rich command-output workflow. Do not describe `approval_policy="never"` as automatic approval; supported command/file operations execute without requesting approval.
-- Additional model providers beyond Codex and OpenRouter, or credential mechanisms beyond the approved OpenRouter file-backed API-key flow.
+- Additional model providers beyond Codex, OpenRouter, and Claude Code, or credential mechanisms beyond the approved OpenRouter and Anthropic Console file-backed API-key flows.
 - Plugins, skills, MCP servers, orchestration, or multi-agent execution.
 - Elaborate theming or customization that gets ahead of functional work.
 
@@ -59,7 +64,7 @@ The completed milestone plans under `docs/plans/` are historical implementation 
 
 ## Completed milestone: OpenRouter chat provider
 
-The milestone documented in `docs/plans/openrouter-chat-provider-2026-07-22.md` is complete and part of the shipped regression baseline. The product remains a bounded two-provider design; providers beyond Codex and OpenRouter remain out of scope.
+The milestone documented in `docs/plans/openrouter-chat-provider-2026-07-22.md` is complete and part of the shipped regression baseline. Its contracts remain intact inside the bounded three-provider design.
 
 The approved durable contracts are:
 
@@ -78,6 +83,21 @@ The approved durable contracts are:
 - keep RepoPrompt CE optional, strictly read-only, and absent from runtime/build dependencies.
 
 Retain the plaintext-risk disclosure and Keychain-migration debt in future documentation changes.
+
+## Completed milestone: Claude Code provider
+
+The milestone documented in `docs/plans/claude-code-provider-2026-07-24.md` is complete and part of the shipped regression baseline. Its durable contracts are:
+
+- use only the installed supported Claude Code CLI, version 2.1.178 or newer, with direct no-shell process spawning and bounded stream-json parsing;
+- authenticate only with a masked Vairë-entered Anthropic Console API key, never Claude.ai Free/Pro/Max OAuth or inherited ambient Anthropic/Claude variables;
+- store that key through the injected credential-store port in owner-only plaintext `runtime/anthropic-home/api-key`, never in preferences, transcripts, diagnostics, arguments, snapshots, or user-visible errors;
+- run each turn from the persistent non-project conversation cwd with a dedicated owner-only Claude home, safe mode, disabled customizations/plugins/MCP/hooks/skills/Chrome/web tools/subagents, and the documented dangerous permission bypass;
+- treat this as unrestricted same-user execution rather than a sandbox or automatic approval, including the possibility that full-access commands reach other credentials or the plaintext key;
+- use explicit canonical UUIDs for new/resumed sessions, retain only Vairë-owned bounded display history, and never parse, enumerate, mutate, or delete Claude private transcript/session files;
+- expose only documented Claude aliases until authoritative stream metadata resolves the active model, start blank on every Claude alias change, and leave Claude reasoning effort/panel collection unsupported;
+- make Claude picker deletion registration/display-history removal only, with explicit confirmation wording and active-session protection;
+- preserve saved UUID and display history on resume failure, never silently create a replacement, and keep Codex/OpenRouter independently usable when Claude is absent or broken; and
+- keep normal tests offline with fake credentials, fake stores, fake CLI children, bounded malformed-stream fixtures, and explicit ignored installed-CLI smoke checks.
 
 ## Completed milestone: richer interactive runtime
 
@@ -111,20 +131,20 @@ The historical Codex conversation cwd is permanent discovery-only metadata. `/re
 The application opens directly into the chat TUI. On startup it must continue to:
 
 1. Restore non-secret local preferences.
-2. Start Codex and inspect OpenRouter credentials independently so one provider's failure does not disable the other.
-3. Detect each provider's authentication and catalog state.
+2. Start Codex and independently inspect OpenRouter and Claude runtime/credential state so one provider's failure does not disable the others.
+3. Detect each provider's authentication and model-selection state.
 4. Automatically resume only the active provider's saved conversation when its scope and local state are valid.
 5. Otherwise preserve any saved pointer, block silent replacement, and explain the next action such as `/login`, `/resume`, or `/new`.
 
 Normal text entered in the composer starts a turn in the active thread. Slash commands are the control surface for application actions. The current command vocabulary is:
 
-- `/login` — open the provider/status popup. Choose Codex browser login or masked OpenRouter API-key entry; `d` starts Codex device login, `c` edits the OpenRouter enabled-model draft, and `r` revalidates/refreshes OpenRouter.
+- `/login` — open the provider/status popup. Choose Codex browser login, masked OpenRouter API-key entry, or masked Anthropic Console API-key entry; `d` starts Codex device login, `c` edits the OpenRouter enabled-model draft, and `r` refreshes the selected key-backed provider when supported.
 - `/login browser` and `/login device` — direct Codex ChatGPT sign-in shortcuts.
 - `/logout` — open the provider popup and settle active work before signing out the selected provider.
 - `/model` — open the searchable, scrollable, provider-labelled model picker. Cross-provider selection immediately starts blank; use `/resume` for history.
-- `/reasoning` — inspect or select a Codex reasoning level; OpenRouter reasoning effort is unsupported.
+- `/reasoning` — inspect or select a Codex reasoning level; OpenRouter and Claude reasoning effort are unsupported.
 - `/new` — eagerly create and activate a fresh conversation for the active provider without deleting prior history.
-- `/resume` — open the unified provider-labelled Codex/OpenRouter conversation picker; this is the only explicit cross-provider history restoration path.
+- `/resume` — open the unified provider-labelled Codex/OpenRouter/Claude conversation picker; this is the only explicit cross-provider history restoration path.
 - `/thinking` — toggle the right-side Reasoning panel of reasoning summaries or reasoning text emitted by app-server. Distinct from `/reasoning`, which selects the reasoning effort level.
 - `/help` — show supported commands and essential keys.
 - `/quit` — shut down cleanly and exit.
@@ -139,9 +159,9 @@ The current key contract is:
 - `Escape` closes local help or errors, cancels a picker action, or interrupts the active turn.
 - `Ctrl-C` shuts down cleanly.
 
-The cyan header identifies the active provider and its provider-specific auth/conversation/model/reasoning state, plus right-aligned `Context N%`; it shows `Context --` when usable context-window data is unavailable. While a turn is active but no nonempty assistant text has arrived, a display-only animated squiggle appears in the conversation pane and disappears on the first text or terminal turn state. The Reasoning panel shows only emitted Codex reasoning; OpenRouter reasoning fields are not collected. Nonempty OpenRouter assistant text retained from a failed stream is restored through startup and `/resume` with explicit `FailedIncomplete` domain metadata and the visible label `Agent (incomplete; turn failed):`; it is display-only and never model context.
+The cyan header identifies the active provider and its provider-specific auth/conversation/model/reasoning state, plus right-aligned `Context N%`; it shows `Context --` when usable context-window data is unavailable. While a turn is active but no nonempty assistant text has arrived, a display-only animated squiggle appears in the conversation pane and disappears on the first text or terminal turn state. The Reasoning panel shows only emitted Codex reasoning; OpenRouter and Claude reasoning fields are not collected. Nonempty OpenRouter or Claude assistant text retained from a failed stream is restored through startup and `/resume` with explicit `FailedIncomplete` domain metadata and the visible label `Agent (incomplete; turn failed):`; it is display-only and never model context.
 
-Do not silently create a replacement conversation when resume fails. Preserve the saved ID and history, enter an explicit blocking resume-failed state, and let the user choose `/resume` or `/new`. Codex account scope remains the normalized ChatGPT email; if app-server does not expose it, do not auto-resume or manually resume a saved Codex thread. OpenRouter histories are validated local owner-only files. On a first run with no saved conversation, create the single working conversation when it is first needed.
+Do not silently create a replacement conversation when resume fails. Preserve the saved ID and history, enter an explicit blocking resume-failed state, and let the user choose `/resume` or `/new`. Codex account scope remains the normalized ChatGPT email; if app-server does not expose it, do not auto-resume or manually resume a saved Codex thread. OpenRouter histories and Vairë-owned Claude registrations/display histories are validated local owner-only files. Claude-owned session files remain opaque. On a first run with no saved conversation, create the single working conversation when it is first needed.
 
 ## Codex integration rules
 
@@ -171,13 +191,13 @@ The installed CLI schema wins when documentation, memory, examples, or the optio
 
 ### Full-access runtime boundary
 
-The current product intentionally enables Codex command-line and file tools without tool cards or an approval UI. This is an unrestricted same-user execution boundary, not a sandbox.
+The current product intentionally enables Codex and Claude command-line and file tools without tool cards or an approval UI. This is an unrestricted same-user execution boundary, not a sandbox.
 
-- Apply `sandbox_mode="danger-full-access"` / `dangerFullAccess` and `approval_policy="never"` at process, thread start/resume, and turn boundaries. Supported command/file operations execute directly without confirmation.
-- The app-server inherits the launcher environment except inherited `CODEX_*` variables are removed and Vairë supplies its dedicated `CODEX_HOME`. Tool shells use `shell_environment_policy.inherit="all"`.
+- Apply Codex `sandbox_mode="danger-full-access"` / `dangerFullAccess` and `approval_policy="never"` at process, thread start/resume, and turn boundaries. Apply Claude's documented dangerous permission bypass on every real turn. Supported command/file operations execute directly without confirmation.
+- The app-server inherits the launcher environment except inherited `CODEX_*` variables are removed and Vairë supplies its dedicated `CODEX_HOME`. Claude children remove inherited `ANTHROPIC_*` and `CLAUDE_*` variables, then receive only Vairë's selected Console key and dedicated `CLAUDE_CONFIG_DIR`. Tool shells otherwise retain same-user ambient authority.
 - Codex's default name-based filtering of variables containing `KEY`, `SECRET`, or `TOKEN` is incomplete and is not a security boundary. Values such as `DATABASE_URL` and `SSH_AUTH_SOCK` may remain available.
 - Full-access commands may use SSH agents, macOS Keychain, credential and configuration files, authenticated CLIs, and the network to act locally or remotely.
-- Use a dedicated Vairë Codex home and persistent non-project `runtime/conversation` starting directory to avoid automatic project inheritance. Commands can leave that directory or use absolute paths, its files survive restarts, and the dedicated Codex home—including Codex-owned authentication state—remains reachable to same-user full-access tools. These are organizational boundaries only.
+- Use dedicated Vairë Codex and Claude homes plus persistent non-project `runtime/conversation` (Codex) and `runtime/claude-conversation` (Claude) starting directories to avoid automatic project inheritance. Commands can leave that directory or use absolute paths, its files survive restarts, and the dedicated Codex home—including Codex-owned authentication state—remains reachable to same-user full-access tools. These are organizational boundaries only.
 - Keep optional apps, integrated web search, MCP, plugins, and multi-agent features disabled for this milestone. Command-line programs can still access the network.
 - Fail closed on every approval, permission, elicitation, attestation, or other server request that lacks an explicitly implemented and tested product workflow.
 - Keep exhaustive fake-server coverage proving that every unimplemented server request is denied and that tool-event volume cannot starve rendered conversation events or the fail-closed path. Add positive coverage for any request workflow that a future milestone explicitly supports.
@@ -192,7 +212,8 @@ Preserve these established concern boundaries:
 - **App-server transport:** child-process ownership, stdin and stdout framing, request IDs, pending requests, timeouts, notifications, stderr capture, and shutdown.
 - **Codex protocol:** narrow typed Serde envelopes for only the methods and events the current product uses. Tolerate unknown fields and notifications where safe.
 - **Codex session service:** initialization, auth, model catalog, thread start/list/resume/delete, turn start, and protocol-event reduction.
-- **Persistence:** versioned, non-secret preferences such as account scope, thread ID, model, and reasoning level.
+- **Claude process/protocol/service:** executable/version/auth-source checks, direct bounded stream-json children, Vairë registration/display store, UUID start/resume, turn reduction, process-group interruption, and shutdown; private Claude storage stays opaque.
+- **Persistence:** versioned, non-secret preferences such as account scope, provider conversation ID, model, and reasoning level.
 - **Platform integration:** browser launching, application-data directories, signals, and other macOS and Linux seams.
 
 The UI consumes domain events, never raw protocol JSON. Prefer explicit message passing between the async backend and the render loop. Never block Ratatui on login, model responses, disk I/O, or a running turn.
@@ -201,13 +222,13 @@ Use traits or equivalent injection seams around transport, persistence, browser 
 
 ## Persistence and lifecycle
 
-- Store only the minimum local state needed to restore the experience. Codex remains the source of truth for thread history.
+- Store only the minimum local state needed to restore the experience. Codex and Claude remain the sources of truth for their model context; Vairë stores only bounded Claude registration/display history.
 - Keep interactive and local-state memory bounded: 128 KiB composer drafts, 256 KiB reducer-level messages, 1 MiB / 2,048-entry transcript retention with explicit newline and display-width ceilings, 32 KiB / 128-entry emitted reasoning retention, 1 MiB preferences, and a rotating 1 MiB diagnostics file. Treat these values as tested compatibility contracts; change them deliberately with tests and user-facing documentation.
 - Put application state in the appropriate macOS application-support directory, not in the repository or current working directory.
 - Use a small versioned serialization format and atomic replace-on-write behavior.
 - Treat a missing or invalid state file as a clean first run, not a crash.
 - Save a thread ID only after successful creation or resumption. Do not discard a previously saved ID because a transient resume failed.
-- Restore available transcript history from app-server rather than duplicating the transcript in local state.
+- Restore Codex transcript history from app-server rather than duplicating it. Restore OpenRouter and Claude display history only from their bounded validated Vairë-owned stores; never use failed partials as model context.
 - Sanitize untrusted control characters before rendering model text in the terminal.
 - Restore terminal raw mode and alternate-screen state on every exit path, including errors, panics, and signals.
 - On shutdown, stop input, persist settled state, close or terminate app-server, reap the child process, and then restore the terminal.
@@ -225,14 +246,14 @@ Keep the core testable without launching a terminal or signing in. Maintain cove
 - Persistence round trips, version handling, any migrations introduced after v1, missing files, and corrupt files.
 - JSON-RPC framing, request correlation, timeouts, unknown messages, delta deduplication, and event reduction with fixtures.
 - Terminal rendering with Ratatui `TestBackend`, including unauthenticated, resumed, streaming, and error states.
-- Integration behavior against a fake app-server child for initialization, auth events, paginated model discovery, new and resumed threads, streaming, malformed JSON, unknown requests, EOF, timeout, and child cleanup.
+- Integration behavior against fake app-server and Claude CLI children for initialization, auth events, model metadata, new and resumed conversations, streaming, malformed JSON, unknown events/requests, EOF, timeout, interruption, process-group cleanup, and provider-independent failure.
 - Thread-picker listing, switching, confirmed single/bulk deletion, active-thread protection, partial failures, and stale result correlation.
 - Emitted-reasoning scoping, full-access policy and inherited-environment behavior, account/header sanitization, activity-animation lifecycle, context-usage scoping and arithmetic, and narrow/normal cross-feature Ratatui rendering.
 - Tool-heavy event floods and unexpected server requests, proving meaningful conversation events remain deliverable and every unimplemented request still fails closed.
 - Rendering above `u16::MAX` aggregate logical rows, proving transcript and reasoning pre-windowing reaches the true requested viewport without relying on a saturated Ratatui scroll offset.
 - If runtime-agent instructions are introduced, test new-thread and resumed-thread behavior, instruction precedence, and the invariant that this development `AGENTS.md` is never injected into a user conversation.
 
-Keep any future real authenticated Codex smoke test manual or ignored. Default tests and CI must not require ChatGPT login or network access.
+Keep any future real authenticated Codex or Claude smoke test manual or ignored. Default tests and CI must not require ChatGPT/Claude login, API keys, user configuration, or network access.
 
 The required handoff checks are:
 

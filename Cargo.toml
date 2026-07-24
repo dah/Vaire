@@ -2,7 +2,7 @@
 name = "vaire"
 version = "0.1.0"
 edition = "2021"
-description = "Vairë, a conversation-focused local terminal client for Codex and OpenRouter"
+description = "Vairë, a conversation-focused local terminal client for Codex, OpenRouter, and Claude Code"
 
 [dependencies]
 crossterm = "0.28"

@@ -51,38 +51,62 @@ pub(in crate::tui) fn render_popup(
                 },
                 state.openrouter.auth
             );
+            let claude = format!(
+                "{} Claude      {}",
+                if *selected == crate::provider::ProviderId::Claude {
+                    ">"
+                } else {
+                    " "
+                },
+                claude_auth_label(state)
+            );
             let footer = match mode {
                 AuthPopupMode::Login => {
-                    "Enter choose • d Codex device • c catalog • r refresh • Esc close"
+                    "Enter choose • d Codex device • c OpenRouter models • r refresh • Esc close"
                 }
                 AuthPopupMode::Logout => "Enter sign out selected provider • Esc close",
             };
             frame.render_widget(
-                Paragraph::new(format!("{codex}\n{openrouter}\n\n{footer}"))
+                Paragraph::new(format!("{codex}\n{openrouter}\n{claude}\n\n{footer}"))
                     .block(Block::default().title(title).borders(Borders::ALL))
                     .wrap(Wrap { trim: true }),
                 popup_area,
             );
         }
-        PopupState::OpenRouterSecret => {
-            let body = if !matches!(
-                state.openrouter.credential_validation,
-                OpenRouterCredentialValidation::Idle
-            ) {
-                "Validating OpenRouter credential…".to_owned()
+        PopupState::ProviderSecret { provider } => {
+            let validating = match provider {
+                crate::provider::ProviderId::OpenRouter => !matches!(
+                    state.openrouter.credential_validation,
+                    OpenRouterCredentialValidation::Idle
+                ),
+                crate::provider::ProviderId::Claude => !matches!(
+                    state.claude.credential_validation,
+                    crate::app::ClaudeCredentialValidation::Idle
+                ),
+                crate::provider::ProviderId::Codex => false,
+            };
+            let (title, key_label, provider_name) = match provider {
+                crate::provider::ProviderId::OpenRouter => {
+                    (" OpenRouter credential ", "API key", "OpenRouter")
+                }
+                crate::provider::ProviderId::Claude => (
+                    " Anthropic Console credential ",
+                    "Console API key",
+                    "Anthropic Console",
+                ),
+                crate::provider::ProviderId::Codex => unreachable!("Codex has no key editor"),
+            };
+            let body = if validating {
+                format!("Validating {provider_name} credential…")
             } else {
                 format!(
-                    "API key: {}\n\nEnter validate and save • Ctrl-U clear • Esc cancel",
+                    "{key_label}: {}\n\nEnter validate and save • Ctrl-U clear • Esc cancel",
                     secret_mask.unwrap_or("••••••••")
                 )
             };
             frame.render_widget(
                 Paragraph::new(body)
-                    .block(
-                        Block::default()
-                            .title(" OpenRouter credential ")
-                            .borders(Borders::ALL),
-                    )
+                    .block(Block::default().title(title).borders(Borders::ALL))
                     .wrap(Wrap { trim: true }),
                 popup_area,
             );
@@ -109,7 +133,7 @@ pub(in crate::tui) fn render_popup(
                     format!(
                         "{} [{}] {}",
                         if index == *selected { ">" } else { " " },
-                        key.provider,
+                        provider_label(key.provider),
                         key.id
                     )
                 })
@@ -117,7 +141,7 @@ pub(in crate::tui) fn render_popup(
                 .join("\n");
             frame.render_widget(
                 Paragraph::new(format!(
-                    "Search: {search}\n{rows}\n\nSwitching provider starts a new conversation; use /resume for history."
+                    "Search: {search}\n{rows}\n\nSwitching provider or changing a Claude alias starts a new conversation; use /resume for history."
                 ))
                 .block(Block::default().title(" Models ").borders(Borders::ALL))
                 .wrap(Wrap { trim: false }),
@@ -177,6 +201,31 @@ fn centered_start(count: usize, selected: usize, visible_rows: usize) -> usize {
     selected
         .saturating_sub(visible_rows / 2)
         .min(count.saturating_sub(visible_rows))
+}
+
+fn provider_label(provider: crate::provider::ProviderId) -> &'static str {
+    match provider {
+        crate::provider::ProviderId::Codex => "Codex",
+        crate::provider::ProviderId::OpenRouter => "OpenRouter",
+        crate::provider::ProviderId::Claude => "Claude",
+    }
+}
+
+fn claude_auth_label(state: &AppState) -> &'static str {
+    if matches!(
+        state.claude.availability,
+        crate::app::ClaudeAvailability::Unavailable(_)
+    ) {
+        return "CLI unavailable";
+    }
+    match state.claude.auth {
+        crate::claude::ClaudeAuthStatus::Missing => "signed out",
+        crate::claude::ClaudeAuthStatus::Unverified => "unverified key",
+        crate::claude::ClaudeAuthStatus::Valid => "Console key configured",
+        crate::claude::ClaudeAuthStatus::Invalid => "invalid key",
+        crate::claude::ClaudeAuthStatus::CredentialUnavailable => "credential unavailable",
+        crate::claude::ClaudeAuthStatus::CliUnavailable => "CLI unavailable",
+    }
 }
 
 fn codex_auth_label(state: &AppState) -> &'static str {

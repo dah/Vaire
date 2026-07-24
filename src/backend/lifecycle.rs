@@ -1,5 +1,6 @@
 use super::*;
 
+mod claude_events;
 mod openrouter_events;
 mod restart;
 mod runtime_events;
@@ -12,6 +13,7 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
             state: AppState::default(),
             session: Some(session),
             openrouter: None,
+            claude: None,
             preferences,
             browser,
             may_persist: false,
@@ -29,6 +31,7 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
             state,
             session: None,
             openrouter: None,
+            claude: None,
             preferences,
             browser,
             may_persist: false,
@@ -39,7 +42,7 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
 
     pub(in crate::backend) fn persist_preferences(
         &mut self,
-        preferences: &crate::persistence::PreferencesV2,
+        preferences: &crate::persistence::PreferencesV3,
     ) -> Result<Option<crate::storage::CommitStatus>, PersistenceError> {
         if !self.may_persist {
             return Ok(None);
@@ -61,6 +64,18 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
     pub fn with_openrouter(mut self, openrouter: OpenRouterService) -> Self {
         self.openrouter = Some(openrouter);
         self
+    }
+
+    pub fn with_claude(mut self, claude: ClaudeBackendRuntime) -> Self {
+        self.claude = Some(claude);
+        self
+    }
+
+    pub fn record_claude_unavailable(&mut self, message: impl Into<String>) {
+        self.state.reduce(Action::Event(DomainEvent::ClaudeStartup {
+            availability: crate::app::ClaudeAvailability::Unavailable(message.into()),
+            auth: ClaudeAuthStatus::CliUnavailable,
+        }));
     }
 
     pub fn state(&self) -> &AppState {

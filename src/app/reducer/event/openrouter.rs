@@ -54,7 +54,12 @@ impl AppState {
                 self.openrouter.credential_validation = OpenRouterCredentialValidation::Idle;
                 self.openrouter.auth = crate::openrouter::OpenRouterAuthStatus::Valid;
                 self.openrouter.catalog = catalog;
-                if matches!(self.popup, Some(PopupState::OpenRouterSecret)) {
+                if matches!(
+                    self.popup,
+                    Some(PopupState::ProviderSecret {
+                        provider: ProviderId::OpenRouter
+                    })
+                ) {
                     self.popup = None;
                 }
             }
@@ -63,7 +68,12 @@ impl AppState {
                 let previous_model = self.selected_model.clone();
                 self.openrouter.auth = crate::openrouter::OpenRouterAuthStatus::Valid;
                 self.openrouter.catalog = catalog;
-                if matches!(self.popup, Some(PopupState::OpenRouterSecret)) {
+                if matches!(
+                    self.popup,
+                    Some(PopupState::ProviderSecret {
+                        provider: ProviderId::OpenRouter
+                    })
+                ) {
                     self.popup = None;
                     self.notice = Some("OpenRouter credential saved and verified".to_owned());
                 }
@@ -88,7 +98,12 @@ impl AppState {
                 self.openrouter.credential_validation = OpenRouterCredentialValidation::Idle;
                 if candidate_was_saved && category == OpenRouterFailureCategory::Unauthorized {
                     self.openrouter.auth = crate::openrouter::OpenRouterAuthStatus::Invalid;
-                    if matches!(self.popup, Some(PopupState::OpenRouterSecret)) {
+                    if matches!(
+                        self.popup,
+                        Some(PopupState::ProviderSecret {
+                            provider: ProviderId::OpenRouter
+                        })
+                    ) {
                         self.popup = None;
                     }
                     self.notice = Some(
@@ -96,7 +111,12 @@ impl AppState {
                             .to_owned(),
                     );
                 } else if candidate_was_saved {
-                    if matches!(self.popup, Some(PopupState::OpenRouterSecret)) {
+                    if matches!(
+                        self.popup,
+                        Some(PopupState::ProviderSecret {
+                            provider: ProviderId::OpenRouter
+                        })
+                    ) {
                         self.popup = None;
                     }
                     self.notice = Some(format!(

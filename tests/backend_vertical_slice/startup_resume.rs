@@ -46,7 +46,7 @@ IFS= read -r hold
 "#
     );
     let session = session(temp.path(), &body).await;
-    let preferences = MemoryPreferences::new(PreferencesV2::default());
+    let preferences = MemoryPreferences::new(PreferencesV3::default());
     let saved = preferences.clone();
     let mut backend = BackendCoordinator::new(session, preferences, RecordingBrowser::default());
     backend.startup().await.unwrap();
@@ -120,7 +120,7 @@ fi
     );
     let mut backend = BackendCoordinator::new(
         session(temp.path(), &body).await,
-        MemoryPreferences::new(PreferencesV2::default()),
+        MemoryPreferences::new(PreferencesV3::default()),
         RecordingBrowser::default(),
     );
     backend.startup().await.unwrap();
@@ -179,7 +179,7 @@ printf '%s\n' '{{"id":5,"result":{{"thread":{{"id":"thr-saved","turns":[{{"id":"
 IFS= read -r hold
 "#
     );
-    let preferences = MemoryPreferences::new(PreferencesV2 {
+    let preferences = MemoryPreferences::new(PreferencesV3 {
         codex: CodexPreferencesV2 {
             account_scope: AccountScope::from_chatgpt_email("user@example.com"),
             auto_resume_thread_id: Some("thr-saved".to_owned()),
@@ -187,7 +187,7 @@ IFS= read -r hold
             reasoning_effort: Some("high".to_owned()),
             ..CodexPreferencesV2::default()
         },
-        ..PreferencesV2::default()
+        ..PreferencesV3::default()
     });
     let mut backend = BackendCoordinator::new(
         session(temp.path(), &body).await,
@@ -214,7 +214,7 @@ printf '%s\n' '{{"id":4,"error":{{"code":-32001,"message":"stale thread details 
 IFS= read -r hold
 "#
     );
-    let stale_preferences = MemoryPreferences::new(PreferencesV2 {
+    let stale_preferences = MemoryPreferences::new(PreferencesV3 {
         codex: CodexPreferencesV2 {
             account_scope: AccountScope::from_chatgpt_email("user@example.com"),
             auto_resume_thread_id: Some("thr-stale".to_owned()),
@@ -222,7 +222,7 @@ IFS= read -r hold
             reasoning_effort: Some("high".to_owned()),
             ..CodexPreferencesV2::default()
         },
-        ..PreferencesV2::default()
+        ..PreferencesV3::default()
     });
     let saved = stale_preferences.clone();
     let mut stale = BackendCoordinator::new(
@@ -257,7 +257,7 @@ printf '%s\n' '{MODEL_PAGE}'
 IFS= read -r hold
 "#
     );
-    let mismatch_preferences = MemoryPreferences::new(PreferencesV2 {
+    let mismatch_preferences = MemoryPreferences::new(PreferencesV3 {
         codex: CodexPreferencesV2 {
             account_scope: AccountScope::from_chatgpt_email("old@example.com"),
             auto_resume_thread_id: Some("thr-other-account".to_owned()),
@@ -265,7 +265,7 @@ IFS= read -r hold
             reasoning_effort: Some("high".to_owned()),
             ..CodexPreferencesV2::default()
         },
-        ..PreferencesV2::default()
+        ..PreferencesV3::default()
     });
     let mut mismatch = BackendCoordinator::new(
         session(mismatch_temp.path(), &mismatch_body).await,

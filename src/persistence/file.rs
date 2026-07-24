@@ -8,10 +8,10 @@ use std::sync::Arc;
 use crate::storage::{CommitStatus, DirectorySync, RealDirectorySync};
 
 use super::domain::{
-    LoadNotice, LoadOutcome, PersistenceError, PreferencesPort, PreferencesV2,
-    LEGACY_PREFERENCES_VERSION, MAX_PREFERENCES_BYTES, PREFERENCES_VERSION,
+    LoadNotice, LoadOutcome, PersistenceError, PreferencesPort, PreferencesV3,
+    LEGACY_PREFERENCES_VERSION, MAX_PREFERENCES_BYTES, PREFERENCES_VERSION, V2_PREFERENCES_VERSION,
 };
-use super::validation::{corrupt_load_outcome, valid_legacy, valid_preferences};
+use super::validation::{corrupt_load_outcome, valid_legacy, valid_preferences, valid_v2};
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -81,7 +81,7 @@ impl PreferencesPort for FilePreferences {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Ok(LoadOutcome {
-                    preferences: PreferencesV2::default(),
+                    preferences: PreferencesV3::default(),
                     notice: Some(LoadNotice::Missing),
                     may_overwrite: true,
                     needs_save: false,
@@ -116,8 +116,17 @@ impl PreferencesPort for FilePreferences {
         match version {
             LEGACY_PREFERENCES_VERSION => match serde_json::from_value(raw) {
                 Ok(preferences) if valid_legacy(&preferences) => Ok(LoadOutcome {
-                    preferences: PreferencesV2::from(preferences),
+                    preferences: PreferencesV3::from(preferences),
                     notice: Some(LoadNotice::MigratedV1),
+                    may_overwrite: true,
+                    needs_save: true,
+                }),
+                Ok(_) | Err(_) => Ok(corrupt_load_outcome()),
+            },
+            V2_PREFERENCES_VERSION => match serde_json::from_value(raw) {
+                Ok(preferences) if valid_v2(&preferences) => Ok(LoadOutcome {
+                    preferences: PreferencesV3::from(preferences),
+                    notice: Some(LoadNotice::MigratedV2),
                     may_overwrite: true,
                     needs_save: true,
                 }),
@@ -133,7 +142,7 @@ impl PreferencesPort for FilePreferences {
                 Ok(_) | Err(_) => Ok(corrupt_load_outcome()),
             },
             _ => Ok(LoadOutcome {
-                preferences: PreferencesV2::default(),
+                preferences: PreferencesV3::default(),
                 notice: Some(LoadNotice::UnsupportedVersion(version)),
                 may_overwrite: false,
                 needs_save: false,
@@ -141,13 +150,13 @@ impl PreferencesPort for FilePreferences {
         }
     }
 
-    fn save(&self, preferences: &PreferencesV2) -> Result<(), PersistenceError> {
+    fn save(&self, preferences: &PreferencesV3) -> Result<(), PersistenceError> {
         self.save_with_commit(preferences).map(|_| ())
     }
 
     fn save_with_commit(
         &self,
-        preferences: &PreferencesV2,
+        preferences: &PreferencesV3,
     ) -> Result<CommitStatus, PersistenceError> {
         if !valid_preferences(preferences) {
             return Err(io::Error::new(

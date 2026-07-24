@@ -2,6 +2,14 @@ use super::*;
 
 impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
     pub async fn shutdown(&mut self) -> Result<(), BackendError> {
+        let claude_drained = if let Some(claude) = &mut self.claude {
+            claude.service.shutdown().await
+        } else {
+            Vec::new()
+        };
+        for event in claude_drained {
+            let _ = self.reduce_claude_service_event(event);
+        }
         let active_openrouter_turn = match &self.state.turn {
             crate::app::TurnState::OpenRouterStreaming {
                 conversation_id,

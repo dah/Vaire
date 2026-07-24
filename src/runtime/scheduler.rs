@@ -155,6 +155,19 @@ pub(in crate::runtime) async fn run_backend(
                 let _ = backend.accept_openrouter_credential(value);
                 publish(&states, backend.state());
             }
+            RuntimeWork::Command(Some(RuntimeCommand::ClaudeCredential(value))) => {
+                prefer_event = true;
+                let (_, shutdown_latched) = finish_work_and_latch_shutdown(
+                    &mut shutdowns,
+                    backend.accept_claude_credential(value),
+                )
+                .await;
+                publish(&states, backend.state());
+                if shutdown_latched {
+                    shutdown_backend(&mut backend, &states).await;
+                    break;
+                }
+            }
             RuntimeWork::Command(None) => {
                 let effects = backend.accept_intent(Intent::Quit);
                 let _ = backend.execute_pending(effects).await;

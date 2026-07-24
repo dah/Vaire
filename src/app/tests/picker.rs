@@ -246,13 +246,13 @@ fn picker_only_exposes_threads_registered_to_the_current_account() {
     let scope = AccountScope::from_chatgpt_email("legacy@example.com").unwrap();
     let mut legacy = AppState::default();
     legacy.reduce(Action::Event(DomainEvent::PreferencesLoaded(
-        PreferencesV2 {
+        PreferencesV3 {
             codex: CodexPreferencesV2 {
                 account_scope: Some(scope.clone()),
                 auto_resume_thread_id: Some("thr-legacy".to_owned()),
                 ..CodexPreferencesV2::default()
             },
-            ..PreferencesV2::default()
+            ..PreferencesV3::default()
         },
     )));
     assert_eq!(

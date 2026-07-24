@@ -17,13 +17,22 @@ pub(in crate::tui) fn render_thread_picker(
     if let Some(confirmation) = &picker.confirmation {
         let targets = confirmation.targets();
         let mut text = match confirmation {
+            ThreadDeleteConfirmation::Selected { target }
+                if target.provider == crate::provider::ProviderId::Claude =>
+            {
+                format!(
+                    "Forget this inactive Claude session from Vairë?\n\n{}\nID: {}",
+                    sanitize_terminal_text(&target.title).replace('\n', " "),
+                    sanitize_terminal_text(&target.id)
+                )
+            }
             ThreadDeleteConfirmation::Selected { target } => format!(
                 "Permanently delete this inactive thread?\n\n{}\nID: {}",
                 sanitize_terminal_text(&target.title).replace('\n', " "),
                 sanitize_terminal_text(&target.id)
             ),
             ThreadDeleteConfirmation::AllInactive { targets } => format!(
-                "Permanently delete all {} inactive threads? The active saved thread, if any, is excluded.",
+                "Remove all {} inactive saved histories? The active saved conversation, if any, is excluded.",
                 targets.len()
             ),
         };
@@ -36,12 +45,28 @@ pub(in crate::tui) fn render_thread_picker(
                 ));
             }
         }
+        if targets
+            .iter()
+            .any(|target| target.provider == crate::provider::ProviderId::Claude)
+        {
+            text.push_str(
+                "\n\nClaude entries: removes Vairë’s registration and bounded display history only. Claude CLI private session data is not inspected or deleted.",
+            );
+        }
         text.push_str("\n\nThis cannot be undone. Press Enter to confirm or Esc to cancel.");
+        let title = if targets
+            .iter()
+            .any(|target| target.provider == crate::provider::ProviderId::Claude)
+        {
+            " Confirm saved-history removal "
+        } else {
+            " Confirm permanent deletion "
+        };
         frame.render_widget(
             Paragraph::new(text)
                 .block(
                     Block::default()
-                        .title(" Confirm permanent deletion ")
+                        .title(title)
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Red)),
                 )
@@ -103,7 +128,7 @@ pub(in crate::tui) fn render_thread_picker(
                     };
                     ListItem::new(vec![
                         Line::from(Span::styled(
-                            format!("[{}] {title}", thread.provider),
+                            format!("[{}] {title}", provider_label(thread.provider)),
                             Style::default().add_modifier(Modifier::BOLD),
                         )),
                         Line::from(Span::styled(
@@ -148,4 +173,12 @@ pub(in crate::tui) fn render_thread_picker(
             .wrap(Wrap { trim: false }),
         regions[1],
     );
+}
+
+fn provider_label(provider: crate::provider::ProviderId) -> &'static str {
+    match provider {
+        crate::provider::ProviderId::Codex => "Codex",
+        crate::provider::ProviderId::OpenRouter => "OpenRouter",
+        crate::provider::ProviderId::Claude => "Claude",
+    }
 }

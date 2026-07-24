@@ -6,7 +6,20 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
         codex_ids: Vec<String>,
         openrouter_ids: Vec<crate::provider::OpenRouterConversationId>,
     ) -> Vec<Effect> {
-        let requested = codex_ids.len().saturating_add(openrouter_ids.len());
+        self.delete_all_conversations(codex_ids, openrouter_ids, Vec::new())
+            .await
+    }
+
+    pub(in crate::backend) async fn delete_all_conversations(
+        &mut self,
+        codex_ids: Vec<String>,
+        openrouter_ids: Vec<crate::provider::OpenRouterConversationId>,
+        claude_ids: Vec<crate::provider::ClaudeSessionId>,
+    ) -> Vec<Effect> {
+        let requested = codex_ids
+            .len()
+            .saturating_add(openrouter_ids.len())
+            .saturating_add(claude_ids.len());
         let mut deleted = Vec::new();
         let mut failures = Vec::new();
         for id in codex_ids {
@@ -52,6 +65,32 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                 continue;
             };
             match openrouter.delete_conversation(id).await {
+                Ok(()) => deleted.push(id_text),
+                Err(error) => failures.push(ThreadDeletionFailure {
+                    id: id_text,
+                    message: error.to_string(),
+                }),
+            }
+        }
+        for id in claude_ids {
+            let id_text = id.as_str().to_owned();
+            let protected = self.state.active_provider == ProviderId::Claude
+                && self.state.active_saved_thread_id() == Some(id.as_str());
+            if protected {
+                failures.push(ThreadDeletionFailure {
+                    id: id_text,
+                    message: "active saved conversation is protected".to_owned(),
+                });
+                continue;
+            }
+            let Some(claude) = &self.claude else {
+                failures.push(ThreadDeletionFailure {
+                    id: id_text,
+                    message: "Claude Code runtime is unavailable".to_owned(),
+                });
+                continue;
+            };
+            match claude.service.delete_session(id).await {
                 Ok(()) => deleted.push(id_text),
                 Err(error) => failures.push(ThreadDeletionFailure {
                     id: id_text,

@@ -3,8 +3,8 @@ mod file;
 mod validation;
 
 pub use domain::{
-    AccountScope, CodexPreferencesV2, LoadNotice, LoadOutcome, OpenRouterPreferencesV2,
-    PersistenceError, PreferencesPort, PreferencesV2, PREFERENCES_VERSION,
+    AccountScope, ClaudePreferencesV3, CodexPreferencesV2, LoadNotice, LoadOutcome,
+    OpenRouterPreferencesV2, PersistenceError, PreferencesPort, PreferencesV3, PREFERENCES_VERSION,
 };
 pub use file::FilePreferences;
 

@@ -1,45 +1,65 @@
 use super::*;
+use crate::provider::ProviderId;
 
 impl UiState {
     pub fn sync_secret_editor(&mut self, state: &AppState) {
-        if matches!(state.popup, Some(PopupState::OpenRouterSecret)) {
-            match state.openrouter.credential_validation {
-                OpenRouterCredentialValidation::Refreshing { .. }
-                | OpenRouterCredentialValidation::Validating { .. } => {
-                    self.secret_editor = None;
-                    self.submitted_secret = None;
-                    self.secret_submission_pending = false;
-                }
-                OpenRouterCredentialValidation::Idle => {
-                    if self.secret_submission_pending && state.notice.is_some() {
-                        self.secret_submission_pending = false;
-                    }
-                    if !self.secret_submission_pending
-                        && self.secret_editor.is_none()
-                        && self.submitted_secret.is_none()
-                    {
-                        self.secret_editor = Some(SecretEditor::default());
-                    }
-                }
-            }
-        } else {
-            self.secret_editor = None;
-            self.submitted_secret = None;
+        let Some(PopupState::ProviderSecret { provider }) = state.popup.as_ref() else {
+            self.clear_secret_state();
+            return;
+        };
+        let provider = *provider;
+        let busy = match provider {
+            ProviderId::OpenRouter => !matches!(
+                state.openrouter.credential_validation,
+                OpenRouterCredentialValidation::Idle
+            ),
+            ProviderId::Claude => !matches!(
+                state.claude.credential_validation,
+                crate::app::ClaudeCredentialValidation::Idle
+            ),
+            ProviderId::Codex => true,
+        };
+        if busy {
+            self.clear_secret_state();
+            return;
+        }
+        if self.secret_submission_pending && state.notice.is_some() {
             self.secret_submission_pending = false;
         }
+        if !self.secret_submission_pending
+            && self.secret_editor.is_none()
+            && self.submitted_secret.is_none()
+        {
+            self.secret_editor = Some(SecretEditor::new(provider));
+        }
+    }
+
+    fn clear_secret_state(&mut self) {
+        self.secret_editor = None;
+        self.submitted_secret = None;
+        self.secret_submission_pending = false;
     }
 
     pub fn secret_mask(&self) -> Option<&'static str> {
         self.secret_editor.as_ref().map(|_| "••••••••")
     }
 
-    pub fn take_submitted_secret(&mut self) -> Option<crate::credentials::SecretValue> {
-        self.submitted_secret.take()
+    pub fn take_submitted_secret(
+        &mut self,
+    ) -> Option<(ProviderId, crate::credentials::SecretValue)> {
+        self.submitted_secret
+            .take()
+            .map(|submitted| (submitted.provider, submitted.value))
     }
 
-    pub fn restore_openrouter_secret(&mut self, value: crate::credentials::SecretValue) {
+    pub fn restore_provider_secret(
+        &mut self,
+        provider: ProviderId,
+        value: crate::credentials::SecretValue,
+    ) {
         self.secret_submission_pending = false;
         self.secret_editor = Some(SecretEditor {
+            provider,
             value: value.into_input(),
         });
     }
@@ -48,6 +68,8 @@ impl UiState {
         let Some(editor) = &mut self.secret_editor else {
             return None;
         };
+        let provider = editor.provider;
+        let provider_name = provider_secret_name(provider);
         match event {
             Event::Paste(value) => {
                 let value = value.trim();
@@ -60,9 +82,9 @@ impl UiState {
                 {
                     editor.value.push_str(value);
                 } else {
-                    self.overlay = Some(
-                        "OpenRouter key must be printable ASCII without whitespace".to_owned(),
-                    );
+                    self.overlay = Some(format!(
+                        "{provider_name} key must be printable ASCII without whitespace"
+                    ));
                 }
                 None
             }
@@ -81,28 +103,21 @@ impl UiState {
                     None
                 }
                 KeyCode::Enter => {
-                    let openrouter_turn_active = matches!(
-                        state.turn,
-                        crate::app::TurnState::OpenRouterStreaming { .. }
-                    ) || (state.active_provider
-                        == crate::provider::ProviderId::OpenRouter
-                        && state.turn == crate::app::TurnState::Starting);
-                    if openrouter_turn_active {
-                        self.overlay = Some(
-                            "wait for or interrupt the active OpenRouter turn before replacing its credential"
-                                .to_owned(),
-                        );
+                    if provider_turn_active(state, provider) {
+                        self.overlay = Some(format!(
+                            "wait for or interrupt the active {provider_name} turn before replacing its credential"
+                        ));
                         return None;
                     }
                     let value = std::mem::take(&mut *editor.value);
                     match crate::credentials::SecretValue::from_input(value) {
                         Ok(value) => {
                             self.secret_editor = None;
-                            self.submitted_secret = Some(value);
+                            self.submitted_secret = Some(SubmittedSecret { provider, value });
                             self.secret_submission_pending = true;
                         }
                         Err(_) => {
-                            self.overlay = Some("Enter a valid OpenRouter API key".to_owned());
+                            self.overlay = Some(format!("Enter a valid {provider_name} API key"));
                         }
                     }
                     None
@@ -119,5 +134,27 @@ impl UiState {
             },
             _ => None,
         }
+    }
+}
+
+fn provider_turn_active(state: &AppState, provider: ProviderId) -> bool {
+    match provider {
+        ProviderId::OpenRouter => {
+            matches!(state.turn, TurnState::OpenRouterStreaming { .. })
+                || (state.active_provider == provider && state.turn == TurnState::Starting)
+        }
+        ProviderId::Claude => {
+            matches!(state.turn, TurnState::ClaudeStreaming { .. })
+                || (state.active_provider == provider && state.turn == TurnState::Starting)
+        }
+        ProviderId::Codex => false,
+    }
+}
+
+fn provider_secret_name(provider: ProviderId) -> &'static str {
+    match provider {
+        ProviderId::OpenRouter => "OpenRouter",
+        ProviderId::Claude => "Anthropic Console",
+        ProviderId::Codex => "Codex",
     }
 }

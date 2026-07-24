@@ -176,7 +176,7 @@ impl AppState {
                     thread_id: active_thread,
                     turn_id: active_turn,
                 } => active_thread == thread_id && active_turn == turn_id,
-                TurnState::OpenRouterStreaming { .. } => false,
+                TurnState::OpenRouterStreaming { .. } | TurnState::ClaudeStreaming { .. } => false,
                 TurnState::Completed {
                     turn_id: active_turn,
                 }
@@ -215,7 +215,9 @@ impl AppState {
                 turn_id: Some(turn_id),
                 ..
             } => turn_id,
-            TurnState::OpenRouterStreaming { .. } => return None,
+            TurnState::OpenRouterStreaming { .. } | TurnState::ClaudeStreaming { .. } => {
+                return None
+            }
             TurnState::Idle | TurnState::Starting | TurnState::Failed { turn_id: None, .. } => {
                 return None;
             }

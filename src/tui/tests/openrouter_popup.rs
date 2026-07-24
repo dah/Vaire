@@ -8,7 +8,9 @@ const FAKE_KEY: &str = "sk-or-v1-secret-ui-regression-key";
 #[test]
 fn secret_entry_is_masked_non_clonable_and_never_uses_the_composer() {
     let mut state = ready();
-    state.popup = Some(PopupState::OpenRouterSecret);
+    state.popup = Some(PopupState::ProviderSecret {
+        provider: ProviderId::OpenRouter,
+    });
     let mut ui = UiState::default();
     ui.sync_secret_editor(&state);
     assert_eq!(ui.secret_mask(), Some("••••••••"));
@@ -29,17 +31,19 @@ fn secret_entry_is_masked_non_clonable_and_never_uses_the_composer() {
         ),
         None
     );
-    let submitted = ui.take_submitted_secret().expect("submitted secret");
+    let (provider, submitted) = ui.take_submitted_secret().expect("submitted secret");
+    assert_eq!(provider, ProviderId::OpenRouter);
     assert_eq!(submitted.expose_bytes(), FAKE_KEY.as_bytes());
     assert!(ui.composer.is_empty());
 
     // A full/closed runtime channel returns ownership to the UI for an exact retry.
-    ui.restore_openrouter_secret(submitted);
+    ui.restore_provider_secret(ProviderId::OpenRouter, submitted);
     ui.handle_event_for_state(
         Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
         &state,
     );
-    let retried = ui.take_submitted_secret().expect("retried secret");
+    let (provider, retried) = ui.take_submitted_secret().expect("retried secret");
+    assert_eq!(provider, ProviderId::OpenRouter);
     assert_eq!(retried.expose_bytes(), FAKE_KEY.as_bytes());
 }
 
@@ -47,7 +51,9 @@ fn secret_entry_is_masked_non_clonable_and_never_uses_the_composer() {
 fn active_openrouter_turn_keeps_the_candidate_in_the_masked_editor() {
     let mut state = ready();
     state.active_provider = ProviderId::OpenRouter;
-    state.popup = Some(PopupState::OpenRouterSecret);
+    state.popup = Some(PopupState::ProviderSecret {
+        provider: ProviderId::OpenRouter,
+    });
     state.turn = TurnState::OpenRouterStreaming {
         conversation_id: OpenRouterConversationId::new(),
         turn_id: OpenRouterTurnId::new(),
@@ -99,7 +105,9 @@ fn auth_and_model_popups_keep_provider_labels_at_narrow_width() {
 #[test]
 fn secret_paste_is_cumulatively_bounded_and_validation_does_not_recreate_editor() {
     let mut state = ready();
-    state.popup = Some(PopupState::OpenRouterSecret);
+    state.popup = Some(PopupState::ProviderSecret {
+        provider: ProviderId::OpenRouter,
+    });
     let mut ui = UiState::default();
     ui.sync_secret_editor(&state);
     ui.handle_event_for_state(
@@ -112,7 +120,8 @@ fn secret_paste_is_cumulatively_bounded_and_validation_does_not_recreate_editor(
         Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
         &state,
     );
-    let submitted = ui.take_submitted_secret().unwrap();
+    let (provider, submitted) = ui.take_submitted_secret().unwrap();
+    assert_eq!(provider, ProviderId::OpenRouter);
     assert_eq!(
         submitted.expose_bytes().len(),
         crate::credentials::MAX_CREDENTIAL_BYTES

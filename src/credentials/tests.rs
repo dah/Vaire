@@ -57,9 +57,72 @@ fn fake_store_is_deterministic_and_records_no_secret_content() {
 }
 
 #[test]
+fn file_stores_are_bound_to_one_account_and_keep_provider_files_isolated() {
+    let temp = tempdir().unwrap();
+    let runtime = temp.path().join("runtime");
+    let openrouter_home = runtime.join("openrouter-home");
+    let openrouter_file = openrouter_home.join("api-key");
+    let anthropic_home = runtime.join("anthropic-home");
+    let anthropic_file = anthropic_home.join("api-key");
+    let openrouter = FileCredentialStore::new(
+        CredentialAccount::OpenRouterApiKey,
+        &openrouter_home,
+        &openrouter_file,
+    )
+    .unwrap();
+    let anthropic = FileCredentialStore::new(
+        CredentialAccount::AnthropicConsoleApiKey,
+        &anthropic_home,
+        &anthropic_file,
+    )
+    .unwrap();
+
+    openrouter
+        .replace(
+            CredentialAccount::OpenRouterApiKey,
+            secret("openrouter-test"),
+        )
+        .unwrap();
+    anthropic
+        .replace(
+            CredentialAccount::AnthropicConsoleApiKey,
+            secret("anthropic-test"),
+        )
+        .unwrap();
+
+    for error in [
+        openrouter
+            .load(CredentialAccount::AnthropicConsoleApiKey)
+            .unwrap_err(),
+        openrouter
+            .replace(
+                CredentialAccount::AnthropicConsoleApiKey,
+                secret("must-not-write"),
+            )
+            .unwrap_err(),
+        anthropic
+            .delete(CredentialAccount::OpenRouterApiKey)
+            .unwrap_err(),
+    ] {
+        assert_eq!(error.category(), CredentialFailureCategory::Permissions);
+    }
+    assert_eq!(fs::read(&openrouter_file).unwrap(), b"openrouter-test");
+    assert_eq!(fs::read(&anthropic_file).unwrap(), b"anthropic-test");
+    assert_eq!(
+        fs::metadata(&anthropic_home).unwrap().permissions().mode() & 0o7777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(&anthropic_file).unwrap().permissions().mode() & 0o7777,
+        0o600
+    );
+}
+
+#[test]
 fn file_store_creates_exact_owner_only_layout_and_round_trips_without_newline() {
     let (_temp, home, credential) = paths();
-    let store = FileCredentialStore::new(&home, &credential).unwrap();
+    let store =
+        FileCredentialStore::new(CredentialAccount::OpenRouterApiKey, &home, &credential).unwrap();
     assert_eq!(
         fs::metadata(&home).unwrap().permissions().mode() & 0o7777,
         0o700
@@ -104,7 +167,7 @@ fn initialization_cleans_only_recognized_orphan_files() {
     fs::write(&unrelated, b"keep").unwrap();
     fs::write(&similar_but_unrecognized, b"also keep").unwrap();
 
-    FileCredentialStore::new(&home, &credential).unwrap();
+    FileCredentialStore::new(CredentialAccount::OpenRouterApiKey, &home, &credential).unwrap();
     assert!(!orphan.exists());
     assert_eq!(fs::read(unrelated).unwrap(), b"keep");
     assert_eq!(fs::read(similar_but_unrecognized).unwrap(), b"also keep");
@@ -116,13 +179,14 @@ fn file_store_rejects_unsafe_directory_file_and_content_states() {
     fs::create_dir_all(&home).unwrap();
     fs::set_permissions(&home, fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(
-        FileCredentialStore::new(&home, &credential)
+        FileCredentialStore::new(CredentialAccount::OpenRouterApiKey, &home, &credential)
             .unwrap_err()
             .category(),
         CredentialFailureCategory::Permissions
     );
     fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
-    let store = FileCredentialStore::new(&home, &credential).unwrap();
+    let store =
+        FileCredentialStore::new(CredentialAccount::OpenRouterApiKey, &home, &credential).unwrap();
 
     for bytes in [
         Vec::new(),
@@ -157,7 +221,8 @@ fn file_store_rejects_unsafe_directory_file_and_content_states() {
 #[test]
 fn file_store_rejects_symlinks_and_non_regular_targets_without_following_them() {
     let (_temp, home, credential) = paths();
-    let store = FileCredentialStore::new(&home, &credential).unwrap();
+    let store =
+        FileCredentialStore::new(CredentialAccount::OpenRouterApiKey, &home, &credential).unwrap();
     let victim = home.parent().unwrap().join("victim");
     fs::write(&victim, b"sk-victim").unwrap();
     fs::set_permissions(&victim, fs::Permissions::from_mode(0o600)).unwrap();
@@ -194,6 +259,7 @@ fn file_store_rejects_symlinks_and_non_regular_targets_without_following_them() 
 fn committed_replace_and_delete_survive_directory_sync_failure() {
     let (_temp, home, credential) = paths();
     let store = FileCredentialStore::with_directory_sync(
+        CredentialAccount::OpenRouterApiKey,
         &home,
         &credential,
         Arc::new(ScriptedDirectorySync::fail_after(0)),
@@ -219,7 +285,8 @@ fn committed_replace_and_delete_survive_directory_sync_failure() {
 #[test]
 fn deletion_unlinks_the_valid_file_and_is_idempotent() {
     let (_temp, home, credential) = paths();
-    let store = FileCredentialStore::new(&home, &credential).unwrap();
+    let store =
+        FileCredentialStore::new(CredentialAccount::OpenRouterApiKey, &home, &credential).unwrap();
     store
         .replace(CredentialAccount::OpenRouterApiKey, secret("sk-delete"))
         .unwrap();
@@ -231,7 +298,8 @@ fn deletion_unlinks_the_valid_file_and_is_idempotent() {
 #[test]
 fn invalid_existing_target_preserves_prior_bytes_on_replace_failure() {
     let (_temp, home, credential) = paths();
-    let store = FileCredentialStore::new(&home, &credential).unwrap();
+    let store =
+        FileCredentialStore::new(CredentialAccount::OpenRouterApiKey, &home, &credential).unwrap();
     fs::write(&credential, b"sk-preserve").unwrap();
     fs::set_permissions(&credential, fs::Permissions::from_mode(0o644)).unwrap();
 

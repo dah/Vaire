@@ -16,6 +16,7 @@ pub const MAX_CREDENTIAL_BYTES: usize = 8 * 1024;
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum CredentialAccount {
     OpenRouterApiKey,
+    AnthropicConsoleApiKey,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

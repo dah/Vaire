@@ -1,8 +1,9 @@
 use super::{
-    AccountScope, CodexPreferencesV2, FilePreferences, LoadNotice, OpenRouterPreferencesV2,
-    PreferencesPort, PreferencesV2, MAX_PREFERENCES_BYTES, PREFERENCES_VERSION,
+    AccountScope, ClaudePreferencesV3, CodexPreferencesV2, FilePreferences, LoadNotice,
+    OpenRouterPreferencesV2, PreferencesPort, PreferencesV3, MAX_PREFERENCES_BYTES,
+    PREFERENCES_VERSION,
 };
-use crate::provider::{OpenRouterConversationId, ProviderId};
+use crate::provider::{ClaudeModelAlias, ClaudeSessionId, OpenRouterConversationId, ProviderId};
 use crate::storage::{CommitStatus, ScriptedDirectorySync};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -23,18 +24,18 @@ fn rename_commit_is_reported_when_directory_sync_fails() {
         FilePreferences::with_directory_sync(&path, Arc::new(ScriptedDirectorySync::fail_after(0)));
 
     assert_eq!(
-        store.save_with_commit(&PreferencesV2::default()).unwrap(),
+        store.save_with_commit(&PreferencesV3::default()).unwrap(),
         CommitStatus::CommittedUnverified
     );
-    assert_eq!(store.load().unwrap().preferences, PreferencesV2::default());
+    assert_eq!(store.load().unwrap().preferences, PreferencesV3::default());
 }
 
 #[test]
-fn round_trips_v2_atomically_with_owner_only_permissions() {
+fn round_trips_v3_atomically_with_owner_only_permissions() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("state").join("preferences.json");
     let store = FilePreferences::new(&path);
-    let preferences = PreferencesV2 {
+    let preferences = PreferencesV3 {
         version: PREFERENCES_VERSION,
         active_provider: ProviderId::Codex,
         codex: CodexPreferencesV2 {
@@ -48,6 +49,10 @@ fn round_trips_v2_atomically_with_owner_only_permissions() {
             selected_model_id: Some("anthropic/claude".to_owned()),
             enabled_model_ids: BTreeSet::from(["anthropic/claude".to_owned()]),
             ..OpenRouterPreferencesV2::default()
+        },
+        claude: ClaudePreferencesV3 {
+            auto_resume_session_id: None,
+            selected_model_alias: Some(ClaudeModelAlias::Sonnet),
         },
     };
     store.save(&preferences).unwrap();
@@ -90,7 +95,7 @@ fn migrates_every_v1_field_exactly_and_marks_it_for_atomic_resave() {
     assert_eq!(outcome.notice, Some(LoadNotice::MigratedV1));
     assert!(outcome.may_overwrite);
     assert!(outcome.needs_save);
-    assert_eq!(outcome.preferences.version, 2);
+    assert_eq!(outcome.preferences.version, 3);
     assert_eq!(outcome.preferences.active_provider, ProviderId::Codex);
     assert_eq!(
         outcome.preferences.codex,
@@ -109,6 +114,48 @@ fn migrates_every_v1_field_exactly_and_marks_it_for_atomic_resave() {
         outcome.preferences.openrouter,
         OpenRouterPreferencesV2::default()
     );
+    assert_eq!(outcome.preferences.claude, ClaudePreferencesV3::default());
+}
+
+#[test]
+fn migrates_every_v2_field_and_defaults_claude_preferences() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("preferences.json");
+    fs::write(
+        &path,
+        br#"{
+          "version": 2,
+          "active_provider": "open_router",
+          "codex": {
+            "account_scope": null,
+            "auto_resume_thread_id": null,
+            "model_id": "gpt-5",
+            "reasoning_effort": "high",
+            "thread_account_scopes": {}
+          },
+          "openrouter": {
+            "auto_resume_conversation_id": "or_00000000000000000000000000000000",
+            "selected_model_id": "anthropic/claude",
+            "enabled_model_ids": ["anthropic/claude"]
+          }
+        }"#,
+    )
+    .unwrap();
+
+    let before = fs::read(&path).unwrap();
+    let outcome = FilePreferences::new(&path).load().unwrap();
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(outcome.notice, Some(LoadNotice::MigratedV2));
+    assert!(outcome.may_overwrite);
+    assert!(outcome.needs_save);
+    assert_eq!(outcome.preferences.version, 3);
+    assert_eq!(outcome.preferences.active_provider, ProviderId::OpenRouter);
+    assert_eq!(outcome.preferences.codex.model_id.as_deref(), Some("gpt-5"));
+    assert_eq!(
+        outcome.preferences.openrouter.selected_model_id.as_deref(),
+        Some("anthropic/claude")
+    );
+    assert_eq!(outcome.preferences.claude, ClaudePreferencesV3::default());
 }
 
 #[test]
@@ -138,14 +185,14 @@ fn enforces_the_single_active_provider_resume_pointer_invariant() {
     let conversation: OpenRouterConversationId =
         "or_00000000000000000000000000000000".parse().unwrap();
 
-    let mut codex = PreferencesV2::default();
+    let mut codex = PreferencesV3::default();
     codex.codex.auto_resume_thread_id = Some("thr".to_owned());
     codex.openrouter.auto_resume_conversation_id = Some(conversation.clone());
     assert!(store.save(&codex).is_err());
 
-    let mut openrouter = PreferencesV2 {
+    let mut openrouter = PreferencesV3 {
         active_provider: ProviderId::OpenRouter,
-        ..PreferencesV2::default()
+        ..PreferencesV3::default()
     };
     openrouter.codex.auto_resume_thread_id = Some("thr".to_owned());
     assert!(store.save(&openrouter).is_err());
@@ -160,7 +207,22 @@ fn enforces_the_single_active_provider_resume_pointer_invariant() {
     assert!(openrouter.openrouter.auto_resume_conversation_id.is_none());
     store.save(&openrouter).unwrap();
 
-    let mut independent_clear = PreferencesV2::default();
+    let session: ClaudeSessionId = "00000000-0000-4000-8000-000000000000".parse().unwrap();
+    openrouter.set_auto_resume_claude_session(Some(session.clone()));
+    assert_eq!(openrouter.active_provider, ProviderId::Claude);
+    assert!(openrouter.codex.auto_resume_thread_id.is_none());
+    assert!(openrouter.openrouter.auto_resume_conversation_id.is_none());
+    assert_eq!(
+        openrouter.claude.auto_resume_session_id.as_ref(),
+        Some(&session)
+    );
+    store.save(&openrouter).unwrap();
+
+    openrouter.codex.auto_resume_thread_id = Some("cross-provider".to_owned());
+    assert!(store.save(&openrouter).is_err());
+    openrouter.codex.auto_resume_thread_id = None;
+
+    let mut independent_clear = PreferencesV3::default();
     independent_clear.codex.auto_resume_thread_id = Some("thr-keep".to_owned());
     independent_clear.set_auto_resume_conversation(None);
     assert_eq!(
@@ -180,6 +242,8 @@ fn rejects_semantically_corrupt_and_oversized_preferences_without_overwriting_th
         br#"{"version":1,"account_scope":{"kind":"chatgpt_email","value":" USER@example.com "},"thread_id":null,"model_id":null,"reasoning_effort":null}"#.as_slice(),
         br#"{"version":1,"account_scope":{"kind":"chatgpt_email","value":"a@example.com"},"thread_id":"thr","model_id":null,"reasoning_effort":null,"thread_account_scopes":{"thr":{"kind":"chatgpt_email","value":"b@example.com"}}}"#.as_slice(),
         br#"{"version":2,"active_provider":"codex","codex":{"account_scope":null,"auto_resume_thread_id":null,"model_id":" ","reasoning_effort":null,"thread_account_scopes":{}},"openrouter":{"auto_resume_conversation_id":null,"selected_model_id":null,"enabled_model_ids":[]}}"#.as_slice(),
+        br#"{"version":3,"active_provider":"claude","codex":{"account_scope":null,"auto_resume_thread_id":null,"model_id":null,"reasoning_effort":null,"thread_account_scopes":{}},"openrouter":{"auto_resume_conversation_id":null,"selected_model_id":null,"enabled_model_ids":[]},"claude":{"auto_resume_session_id":null,"selected_model_alias":"unknown"}}"#.as_slice(),
+        br#"{"version":3,"active_provider":"codex","codex":{"account_scope":null,"auto_resume_thread_id":null,"model_id":null,"reasoning_effort":null,"thread_account_scopes":{}},"openrouter":{"auto_resume_conversation_id":null,"selected_model_id":null,"enabled_model_ids":[]},"claude":{"auto_resume_session_id":"00000000-0000-4000-8000-000000000000","selected_model_alias":"default"}}"#.as_slice(),
         br#"{"version":4294967297}"#.as_slice(),
     ];
     for bytes in malformed {
@@ -192,7 +256,7 @@ fn rejects_semantically_corrupt_and_oversized_preferences_without_overwriting_th
     fs::write(&path, vec![b' '; MAX_PREFERENCES_BYTES + 1]).unwrap();
     assert_eq!(store.load().unwrap().notice, Some(LoadNotice::Corrupt));
 
-    let valid = PreferencesV2::default();
+    let valid = PreferencesV3::default();
     store.save(&valid).unwrap();
     let before = fs::read(&path).unwrap();
     let mut too_large = valid;
@@ -202,8 +266,8 @@ fn rejects_semantically_corrupt_and_oversized_preferences_without_overwriting_th
 }
 
 #[test]
-fn serialized_v2_has_no_credential_or_runtime_secret_fields() {
-    let json = serde_json::to_string(&PreferencesV2::default()).unwrap();
+fn serialized_v3_has_no_credential_or_runtime_secret_fields() {
+    let json = serde_json::to_string(&PreferencesV3::default()).unwrap();
     for forbidden in [
         "api_key",
         "credential",
@@ -227,14 +291,14 @@ fn atomic_save_never_follows_a_predictable_legacy_temp_symlink() {
     symlink(&victim, &legacy_temp).unwrap();
 
     let store = FilePreferences::new(&path);
-    store.save(&PreferencesV2::default()).unwrap();
+    store.save(&PreferencesV3::default()).unwrap();
 
     assert_eq!(fs::read(&victim).unwrap(), b"must remain unchanged");
     assert!(!fs::symlink_metadata(&path)
         .unwrap()
         .file_type()
         .is_symlink());
-    assert_eq!(store.load().unwrap().preferences, PreferencesV2::default());
+    assert_eq!(store.load().unwrap().preferences, PreferencesV3::default());
 }
 
 #[test]
@@ -245,7 +309,7 @@ fn failed_atomic_replace_preserves_the_target_and_cleans_its_temp_file() {
     fs::write(path.join("sentinel"), b"preserve me").unwrap();
     let store = FilePreferences::new(&path);
 
-    assert!(store.save(&PreferencesV2::default()).is_err());
+    assert!(store.save(&PreferencesV3::default()).is_err());
 
     assert_eq!(fs::read(path.join("sentinel")).unwrap(), b"preserve me");
     let temp_prefix = format!(".preferences.json.{}.", std::process::id());

@@ -29,6 +29,10 @@ impl AppState {
                         .selected_model_id
                         .clone()
                         .and_then(|id| ModelKey::openrouter(id).ok()),
+                    ProviderId::Claude => preferences
+                        .claude
+                        .selected_model_alias
+                        .and_then(|alias| ModelKey::claude(alias.as_str()).ok()),
                 };
                 self.selected_reasoning = (preferences.active_provider == ProviderId::Codex)
                     .then(|| preferences.codex.reasoning_effort.clone())
@@ -65,7 +69,7 @@ impl AppState {
             }
             DomainEvent::AccountLoaded(scope) => {
                 let completed_login = matches!(self.auth, AuthState::SigningIn { .. });
-                if self.active_provider == ProviderId::OpenRouter {
+                if self.active_provider != ProviderId::Codex {
                     self.auth = AuthState::SignedIn { scope };
                     if completed_login {
                         self.notice = Some("Signed in to ChatGPT".to_owned());
@@ -123,7 +127,7 @@ impl AppState {
             }
             DomainEvent::UnsupportedAccount(message) => {
                 self.auth = AuthState::Unsupported(message);
-                if self.active_provider == ProviderId::OpenRouter {
+                if self.active_provider != ProviderId::Codex {
                     return Vec::new();
                 }
                 self.pending_new_thread_scope = None;
@@ -151,7 +155,7 @@ impl AppState {
             }
             DomainEvent::LoggedOut => {
                 self.auth = AuthState::SignedOut;
-                if self.active_provider == ProviderId::OpenRouter {
+                if self.active_provider != ProviderId::Codex {
                     return Vec::new();
                 }
                 self.pending_new_thread_scope = None;

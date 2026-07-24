@@ -75,14 +75,14 @@ impl AppState {
                     AuthState::SignedIn { scope: Some(scope) } => threads
                         .into_iter()
                         .filter(|thread| {
-                            thread.provider == ProviderId::OpenRouter
+                            thread.provider != ProviderId::Codex
                                 || self.preferences.codex.thread_account_scopes.get(&thread.id)
                                     == Some(scope)
                         })
                         .collect(),
                     _ => threads
                         .into_iter()
-                        .filter(|thread| thread.provider == ProviderId::OpenRouter)
+                        .filter(|thread| thread.provider != ProviderId::Codex)
                         .collect(),
                 };
                 if let Some(picker) = self.conversation_popup_mut() {

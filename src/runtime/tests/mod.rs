@@ -21,6 +21,7 @@ async fn missing_codex_is_provider_scoped_and_openrouter_runtime_still_starts() 
     let config = super::RuntimeConfig {
         paths,
         codex_override: Some(directory.path().join("missing-codex").into_os_string()),
+        claude_override: Some(directory.path().join("missing-claude").into_os_string()),
     };
     let mut backend = super::build_backend(config)
         .await

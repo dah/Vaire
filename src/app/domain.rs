@@ -15,6 +15,8 @@ pub enum Intent {
     SelectProviderModel(ModelKey),
     RefreshOpenRouter,
     LogoutOpenRouter,
+    RefreshClaude,
+    LogoutClaude,
     PopupMoveUp,
     PopupMoveDown,
     PopupPageUp,
@@ -99,6 +101,10 @@ pub enum TurnState {
         conversation_id: OpenRouterConversationId,
         turn_id: OpenRouterTurnId,
     },
+    ClaudeStreaming {
+        session_id: ClaudeSessionId,
+        turn_id: ClaudeTurnId,
+    },
     Completed {
         turn_id: String,
     },
@@ -115,7 +121,10 @@ impl TurnState {
     pub fn is_active(&self) -> bool {
         matches!(
             self,
-            Self::Starting | Self::Streaming { .. } | Self::OpenRouterStreaming { .. }
+            Self::Starting
+                | Self::Streaming { .. }
+                | Self::OpenRouterStreaming { .. }
+                | Self::ClaudeStreaming { .. }
         )
     }
 }
@@ -159,6 +168,67 @@ impl Default for OpenRouterState {
             catalog: Vec::new(),
             conversation: OpenRouterConversationState::None,
             credential_validation: OpenRouterCredentialValidation::Idle,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClaudeAvailability {
+    Ready,
+    Unavailable(String),
+}
+
+impl Default for ClaudeAvailability {
+    fn default() -> Self {
+        Self::Unavailable("Claude Code runtime has not been inspected".to_owned())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClaudeConversationState {
+    None,
+    Ready {
+        id: ClaudeSessionId,
+    },
+    ResumeFailed {
+        id: ClaudeSessionId,
+        message: String,
+    },
+    CreationUncertain {
+        id: ClaudeSessionId,
+        message: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClaudeCredentialValidation {
+    Idle,
+    Refreshing {
+        operation_id: u64,
+    },
+    Validating {
+        operation_id: u64,
+        candidate_saved: bool,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaudeState {
+    pub availability: ClaudeAvailability,
+    pub auth: ClaudeAuthStatus,
+    pub conversation: ClaudeConversationState,
+    pub resolved_model: Option<ClaudeModelMetadata>,
+    pub credential_validation: ClaudeCredentialValidation,
+}
+
+impl Default for ClaudeState {
+    fn default() -> Self {
+        Self {
+            availability: ClaudeAvailability::default(),
+            auth: ClaudeAuthStatus::Missing,
+            conversation: ClaudeConversationState::None,
+            resolved_model: None,
+            credential_validation: ClaudeCredentialValidation::Idle,
         }
     }
 }

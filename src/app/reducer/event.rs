@@ -1,5 +1,6 @@
 use super::*;
 
+mod claude;
 mod openrouter;
 mod openrouter_turn;
 
@@ -17,6 +18,20 @@ impl AppState {
             | DomainEvent::LoginFailed(_)
             | DomainEvent::LoggedOut
             | DomainEvent::CatalogLoaded(_)) => self.reduce_account_event(event),
+            event @ (DomainEvent::ClaudeStartup { .. }
+            | DomainEvent::ClaudeAuthChanged(_)
+            | DomainEvent::ClaudeOperationFailed(_)
+            | DomainEvent::ClaudeCandidateRejected(_)
+            | DomainEvent::ClaudeSessionStarted { .. }
+            | DomainEvent::ClaudeNewSessionFailed(_)
+            | DomainEvent::ClaudeSessionCreationUncertain { .. }
+            | DomainEvent::ClaudeSessionRestored { .. }
+            | DomainEvent::ClaudeSessionSwitchFailed { .. }
+            | DomainEvent::ClaudeResumeFailed { .. }
+            | DomainEvent::ClaudeTurnStarted { .. }
+            | DomainEvent::ClaudeInitialized { .. }
+            | DomainEvent::ClaudeDelta { .. }
+            | DomainEvent::ClaudeTurnFinished { .. }) => self.reduce_claude_event(event),
             event @ (DomainEvent::OpenRouterStartup { .. }
             | DomainEvent::OpenRouterAuthChanged(_)
             | DomainEvent::OpenRouterCatalogLoaded(_)

@@ -66,6 +66,13 @@ impl AppState {
                     .filter(|key| key.provider == ProviderId::OpenRouter)
                     .map(|key| key.id.clone());
             }
+            ProviderId::Claude => {
+                self.preferences.claude.selected_model_alias = self
+                    .selected_model
+                    .as_ref()
+                    .filter(|key| key.provider == ProviderId::Claude)
+                    .and_then(|key| key.id.parse().ok());
+            }
         }
     }
 
@@ -79,6 +86,13 @@ impl AppState {
                 .then(|| ModelKey::openrouter(model.id.clone()).ok())
                 .flatten()
         }));
+        if matches!(self.claude.availability, ClaudeAvailability::Ready) {
+            keys.extend(
+                CLAUDE_MODEL_ALIASES
+                    .into_iter()
+                    .filter_map(|alias| ModelKey::claude(alias.as_str()).ok()),
+            );
+        }
         keys
     }
 
@@ -95,6 +109,10 @@ impl AppState {
                         .catalog
                         .iter()
                         .any(|model| model.id == key.id)
+            }
+            ProviderId::Claude => {
+                matches!(self.claude.availability, ClaudeAvailability::Ready)
+                    && key.id.parse::<ClaudeModelAlias>().is_ok()
             }
         }
     }
@@ -172,6 +190,23 @@ impl AppState {
                     .and_then(|model| ModelKey::openrouter(model.id.clone()).ok())
                     .map(|key| (key, None))
             }
+            ProviderId::Claude => {
+                if !matches!(self.claude.availability, ClaudeAvailability::Ready) {
+                    return None;
+                }
+                let alias = self
+                    .preferences
+                    .claude
+                    .selected_model_alias
+                    .or_else(|| {
+                        self.selected_model
+                            .as_ref()
+                            .filter(|key| key.provider == ProviderId::Claude)
+                            .and_then(|key| key.id.parse().ok())
+                    })
+                    .unwrap_or(ClaudeModelAlias::Default);
+                ModelKey::claude(alias.as_str()).ok().map(|key| (key, None))
+            }
         }
     }
 
@@ -195,7 +230,7 @@ impl AppState {
                         .unwrap_or_else(|| choice.default_reasoning_effort.clone()),
                 )
             }
-            ProviderId::OpenRouter => None,
+            ProviderId::OpenRouter | ProviderId::Claude => None,
         };
         self.active_provider = provider;
         self.selected_model = Some(model);

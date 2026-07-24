@@ -17,9 +17,14 @@ impl AppState {
         match popup {
             PopupState::Auth { selected, .. } => {
                 if matches!(intent, Intent::PopupMoveUp | Intent::PopupMoveDown) {
-                    *selected = match selected {
-                        ProviderId::Codex => ProviderId::OpenRouter,
-                        ProviderId::OpenRouter => ProviderId::Codex,
+                    *selected = match (intent.clone(), *selected) {
+                        (Intent::PopupMoveDown, ProviderId::Codex)
+                        | (Intent::PopupMoveUp, ProviderId::Claude) => ProviderId::OpenRouter,
+                        (Intent::PopupMoveDown, ProviderId::OpenRouter)
+                        | (Intent::PopupMoveUp, ProviderId::Codex) => ProviderId::Claude,
+                        (Intent::PopupMoveDown, ProviderId::Claude)
+                        | (Intent::PopupMoveUp, ProviderId::OpenRouter) => ProviderId::Codex,
+                        _ => *selected,
                     };
                 }
             }
@@ -46,7 +51,7 @@ impl AppState {
                     .count();
                 *selected = movement(*selected, count);
             }
-            PopupState::OpenRouterSecret | PopupState::Conversation(_) => {}
+            PopupState::ProviderSecret { .. } | PopupState::Conversation(_) => {}
         }
     }
 
@@ -82,8 +87,11 @@ impl AppState {
                     self.popup = None;
                     self.reduce_intent(Intent::Login)
                 }
-                (AuthPopupMode::Login, ProviderId::OpenRouter) => {
-                    self.popup = Some(PopupState::OpenRouterSecret);
+                (
+                    AuthPopupMode::Login,
+                    provider @ (ProviderId::OpenRouter | ProviderId::Claude),
+                ) => {
+                    self.popup = Some(PopupState::ProviderSecret { provider });
                     Vec::new()
                 }
                 (AuthPopupMode::Logout, ProviderId::Codex) => {
@@ -93,6 +101,10 @@ impl AppState {
                 (AuthPopupMode::Logout, ProviderId::OpenRouter) => {
                     self.popup = None;
                     vec![Effect::LogoutOpenRouter]
+                }
+                (AuthPopupMode::Logout, ProviderId::Claude) => {
+                    self.popup = None;
+                    vec![Effect::LogoutClaude]
                 }
             },
             PopupState::Model {
@@ -121,7 +133,7 @@ impl AppState {
                 }
                 vec![Effect::Persist(self.preferences.clone())]
             }
-            PopupState::OpenRouterSecret | PopupState::Conversation(_) => Vec::new(),
+            PopupState::ProviderSecret { .. } | PopupState::Conversation(_) => Vec::new(),
         }
     }
 }

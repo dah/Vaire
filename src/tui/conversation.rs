@@ -10,18 +10,31 @@ pub(in crate::tui) fn render_transcript(
 ) {
     let mut lines = Vec::<Line<'static>>::new();
     if state.transcript.is_empty() && activity_frame.is_none() {
-        let prompt = if state.active_provider == crate::provider::ProviderId::OpenRouter {
-            match (&state.openrouter.auth, &state.openrouter.conversation) {
-                (crate::openrouter::OpenRouterAuthStatus::Missing, _) => {
-                    "OpenRouter is signed out. Use /login to enter an API key."
+        let prompt = match state.active_provider {
+            crate::provider::ProviderId::OpenRouter => {
+                match (&state.openrouter.auth, &state.openrouter.conversation) {
+                    (crate::openrouter::OpenRouterAuthStatus::Missing, _) => {
+                        "OpenRouter is signed out. Use /login to enter an API key."
+                    }
+                    (_, crate::app::OpenRouterConversationState::ResumeFailed { .. }) => {
+                        "The saved OpenRouter conversation could not be resumed. Use /resume or /new; it was not replaced."
+                    }
+                    _ => "OpenRouter ready. Type a message, use /new, or browse history with /resume.",
                 }
-                (_, crate::app::OpenRouterConversationState::ResumeFailed { .. }) => {
-                    "The saved OpenRouter conversation could not be resumed. Use /resume or /new; it was not replaced."
-                }
-                _ => "OpenRouter ready. Type a message, use /new, or browse history with /resume.",
             }
-        } else {
-            match (&state.auth, &state.thread) {
+            crate::provider::ProviderId::Claude => match (&state.claude.auth, &state.claude.conversation) {
+                (crate::claude::ClaudeAuthStatus::Missing, _) => {
+                    "Claude is signed out. Use /login to enter an Anthropic Console API key."
+                }
+                (_, crate::app::ClaudeConversationState::ResumeFailed { .. }) => {
+                    "The saved Claude session could not be resumed. Use /resume or /new; it was not replaced."
+                }
+                (_, crate::app::ClaudeConversationState::CreationUncertain { .. }) => {
+                    "Claude session creation is uncertain. Use /resume or /new; no replacement was created."
+                }
+                _ => "Claude ready. Type a message, use /new, or browse Vairë-registered sessions with /resume.",
+            },
+            crate::provider::ProviderId::Codex => match (&state.auth, &state.thread) {
                 (AuthState::SignedOut, _) => {
                     "Signed out. Use /login to connect your ChatGPT subscription."
                 }
@@ -29,7 +42,7 @@ pub(in crate::tui) fn render_transcript(
                     "The saved thread could not be resumed. Use /resume to choose a thread or /new to start fresh; it was not replaced."
                 }
                 _ => "Ready. Type a message, use /new, or browse saved threads with /resume.",
-            }
+            },
         };
         lines.push(Line::from(Span::styled(
             prompt,
@@ -88,11 +101,18 @@ pub(in crate::tui) fn render_transcript(
 }
 
 pub(in crate::tui) fn render_thinking(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    if state.active_provider == crate::provider::ProviderId::OpenRouter {
+    if state.active_provider != crate::provider::ProviderId::Codex {
+        let provider = match state.active_provider {
+            crate::provider::ProviderId::OpenRouter => "OpenRouter",
+            crate::provider::ProviderId::Claude => "Claude",
+            crate::provider::ProviderId::Codex => unreachable!(),
+        };
         frame.render_widget(
-            Paragraph::new("OpenRouter reasoning is not collected in this milestone.")
-                .block(Block::default().title(" Reasoning ").borders(Borders::ALL))
-                .wrap(Wrap { trim: true }),
+            Paragraph::new(format!(
+                "{provider} reasoning is not collected in this milestone."
+            ))
+            .block(Block::default().title(" Reasoning ").borders(Borders::ALL))
+            .wrap(Wrap { trim: true }),
             area,
         );
         return;

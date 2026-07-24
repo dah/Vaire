@@ -46,11 +46,29 @@ pub enum Effect {
         text: String,
     },
     InterruptOpenRouterTurn,
+    RefreshClaude,
+    LogoutClaude,
+    StartNewClaudeSession,
+    SwitchClaudeSession {
+        id: ClaudeSessionId,
+    },
+    SendClaudeMessage {
+        text: String,
+    },
+    InterruptClaudeTurn,
+    DeleteClaudeSessions {
+        ids: Vec<ClaudeSessionId>,
+    },
+    DeleteAllConversations {
+        codex_ids: Vec<String>,
+        openrouter_ids: Vec<OpenRouterConversationId>,
+        claude_ids: Vec<ClaudeSessionId>,
+    },
     InterruptTurn {
         thread_id: String,
         turn_id: String,
     },
-    Persist(PreferencesV2),
+    Persist(PreferencesV3),
     Shutdown,
 }
 
@@ -63,7 +81,7 @@ pub enum TurnOutcome {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DomainEvent {
-    PreferencesLoaded(PreferencesV2),
+    PreferencesLoaded(PreferencesV3),
     Connecting,
     Connected {
         generation: u64,
@@ -115,6 +133,56 @@ pub enum DomainEvent {
         conversation_id: OpenRouterConversationId,
         turn_id: OpenRouterTurnId,
         usage: TokenUsage,
+    },
+    ClaudeStartup {
+        availability: ClaudeAvailability,
+        auth: ClaudeAuthStatus,
+    },
+    ClaudeAuthChanged(ClaudeAuthStatus),
+    ClaudeOperationFailed(ClaudeError),
+    ClaudeCandidateRejected(ClaudeError),
+    ClaudeSessionStarted {
+        session_id: ClaudeSessionId,
+    },
+    ClaudeNewSessionFailed(String),
+    ClaudeSessionCreationUncertain {
+        session_id: ClaudeSessionId,
+        message: String,
+    },
+    ClaudeSessionRestored {
+        session: ClaudeSessionV1,
+        automatic: bool,
+    },
+    ClaudeSessionSwitchFailed {
+        session_id: ClaudeSessionId,
+        message: String,
+    },
+    ClaudeResumeFailed {
+        session_id: ClaudeSessionId,
+        message: String,
+    },
+    ClaudeTurnStarted {
+        session_id: ClaudeSessionId,
+        turn_id: ClaudeTurnId,
+    },
+    ClaudeInitialized {
+        session_id: ClaudeSessionId,
+        turn_id: ClaudeTurnId,
+        model: ClaudeModelMetadata,
+    },
+    ClaudeDelta {
+        session_id: ClaudeSessionId,
+        turn_id: ClaudeTurnId,
+        delta: String,
+    },
+    ClaudeTurnFinished {
+        session_id: ClaudeSessionId,
+        turn_id: ClaudeTurnId,
+        outcome: ClaudeTurnOutcome,
+        assistant_text: Option<String>,
+        incomplete_assistant_text: Option<String>,
+        creation_uncertain: bool,
+        failure: Option<ClaudeError>,
     },
     OpenRouterTurnFinished {
         conversation_id: OpenRouterConversationId,

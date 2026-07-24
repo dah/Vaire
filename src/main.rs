@@ -69,9 +69,11 @@ async fn event_loop(
                             ui.overlay = Some(message.to_owned());
                         }
                     }
-                    if let Some(secret) = ui.take_submitted_secret() {
-                        if let Err((secret, message)) = runtime.try_send_openrouter_credential(secret) {
-                            ui.restore_openrouter_secret(secret);
+                    if let Some((provider, secret)) = ui.take_submitted_secret() {
+                        if let Err((secret, message)) =
+                            runtime.try_send_provider_credential(provider, secret)
+                        {
+                            ui.restore_provider_secret(provider, secret);
                             ui.overlay = Some(message.to_owned());
                         }
                     }

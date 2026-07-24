@@ -81,7 +81,36 @@ pub enum BackendError {
 #[derive(Debug)]
 pub enum BackendRuntimeEvent {
     Codex(Option<Result<SessionEvent, SessionError>>),
-    OpenRouter(OpenRouterServiceEvent),
+    OpenRouter(Option<OpenRouterServiceEvent>),
+    Claude(Option<ClaudeServiceEvent>),
+}
+
+pub struct ClaudeBackendRuntime {
+    pub(in crate::backend) service: ClaudeService,
+    pub(in crate::backend) credentials: std::sync::Arc<dyn CredentialStore>,
+    pub(in crate::backend) policy: ClaudeCliPolicy,
+    pub(in crate::backend) next_operation_id: u64,
+}
+
+impl ClaudeBackendRuntime {
+    pub fn new(
+        service: ClaudeService,
+        credentials: std::sync::Arc<dyn CredentialStore>,
+        policy: ClaudeCliPolicy,
+    ) -> Self {
+        Self {
+            service,
+            credentials,
+            policy,
+            next_operation_id: 1,
+        }
+    }
+
+    pub(in crate::backend) fn operation_id(&mut self) -> u64 {
+        let id = self.next_operation_id;
+        self.next_operation_id = self.next_operation_id.saturating_add(1);
+        id
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -95,6 +124,7 @@ pub struct BackendCoordinator<P, B> {
     pub(in crate::backend) state: AppState,
     pub(in crate::backend) session: Option<SessionService>,
     pub(in crate::backend) openrouter: Option<OpenRouterService>,
+    pub(in crate::backend) claude: Option<ClaudeBackendRuntime>,
     pub(in crate::backend) preferences: P,
     pub(in crate::backend) browser: B,
     pub(in crate::backend) may_persist: bool,

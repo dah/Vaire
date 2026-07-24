@@ -11,7 +11,7 @@ pub(super) use vaire::codex::safety::{FullAccessPolicy, IsolationPaths};
 pub(super) use vaire::codex::session::SessionService;
 pub(super) use vaire::codex::transport::{AppServerTransport, ProcessSpec, RequestTimeouts};
 pub(super) use vaire::persistence::{
-    AccountScope, CodexPreferencesV2, LoadOutcome, PersistenceError, PreferencesPort, PreferencesV2,
+    AccountScope, CodexPreferencesV2, LoadOutcome, PersistenceError, PreferencesPort, PreferencesV3,
 };
 pub(super) use vaire::platform::{validate_login_url, BrowserError, BrowserOpener};
 
@@ -33,16 +33,16 @@ pub(super) async fn session(root: &Path, body: &str) -> SessionService {
 
 #[derive(Clone)]
 pub(super) struct MemoryPreferences {
-    value: Arc<Mutex<PreferencesV2>>,
+    value: Arc<Mutex<PreferencesV3>>,
 }
 
 impl MemoryPreferences {
-    pub(super) fn new(value: PreferencesV2) -> Self {
+    pub(super) fn new(value: PreferencesV3) -> Self {
         Self {
             value: Arc::new(Mutex::new(value)),
         }
     }
-    pub(super) fn value(&self) -> PreferencesV2 {
+    pub(super) fn value(&self) -> PreferencesV3 {
         self.value.lock().unwrap().clone()
     }
 }
@@ -57,7 +57,7 @@ impl PreferencesPort for MemoryPreferences {
         })
     }
 
-    fn save(&self, preferences: &PreferencesV2) -> Result<(), PersistenceError> {
+    fn save(&self, preferences: &PreferencesV3) -> Result<(), PersistenceError> {
         *self.value.lock().unwrap() = preferences.clone();
         Ok(())
     }
@@ -68,14 +68,14 @@ pub(super) struct FailingPreferences;
 impl PreferencesPort for FailingPreferences {
     fn load(&self) -> Result<LoadOutcome, PersistenceError> {
         Ok(LoadOutcome {
-            preferences: PreferencesV2::default(),
+            preferences: PreferencesV3::default(),
             notice: None,
             may_overwrite: true,
             needs_save: false,
         })
     }
 
-    fn save(&self, _preferences: &PreferencesV2) -> Result<(), PersistenceError> {
+    fn save(&self, _preferences: &PreferencesV3) -> Result<(), PersistenceError> {
         Err(std::io::Error::other("simulated persistence failure").into())
     }
 }

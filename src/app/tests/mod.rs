@@ -100,7 +100,7 @@ fn thread_ready_state() -> AppState {
             item_id: None,
             turn_id: None,
         }],
-        preferences: PreferencesV2 {
+        preferences: PreferencesV3 {
             codex: CodexPreferencesV2 {
                 account_scope: scope,
                 auto_resume_thread_id: Some("thr-active".to_owned()),
@@ -122,7 +122,7 @@ fn thread_ready_state() -> AppState {
                 })
                 .collect(),
             },
-            ..PreferencesV2::default()
+            ..PreferencesV3::default()
         },
         ..AppState::default()
     }
@@ -160,6 +160,7 @@ fn active_context_state() -> AppState {
 }
 
 mod account_auth;
+mod claude_integration;
 mod context_activity;
 mod deletion;
 mod openrouter_integration;

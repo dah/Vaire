@@ -26,13 +26,28 @@ pub struct UiState {
     pub scroll_from_bottom: usize,
     pub(in crate::tui) activity: ActivityAnimation,
     pub(in crate::tui) secret_editor: Option<SecretEditor>,
-    pub(in crate::tui) submitted_secret: Option<crate::credentials::SecretValue>,
+    pub(in crate::tui) submitted_secret: Option<SubmittedSecret>,
     pub(in crate::tui) secret_submission_pending: bool,
 }
 
-#[derive(Default)]
+#[derive(Debug)]
+pub(in crate::tui) struct SubmittedSecret {
+    pub(in crate::tui) provider: crate::provider::ProviderId,
+    pub(in crate::tui) value: crate::credentials::SecretValue,
+}
+
 pub(in crate::tui) struct SecretEditor {
+    provider: crate::provider::ProviderId,
     value: Zeroizing<String>,
+}
+
+impl SecretEditor {
+    fn new(provider: crate::provider::ProviderId) -> Self {
+        Self {
+            provider,
+            value: Zeroizing::new(String::new()),
+        }
+    }
 }
 
 impl std::fmt::Debug for SecretEditor {

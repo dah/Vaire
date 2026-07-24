@@ -62,6 +62,9 @@ pub(in crate::tui) fn header_text(state: &AppState, width: u16) -> String {
 }
 
 pub(in crate::tui) fn status_text(state: &AppState) -> String {
+    if state.active_provider == crate::provider::ProviderId::Claude {
+        return claude_status_text(state);
+    }
     if state.active_provider == crate::provider::ProviderId::OpenRouter {
         let auth = match state.openrouter.auth {
             crate::openrouter::OpenRouterAuthStatus::Missing => "signed out",
@@ -90,6 +93,7 @@ pub(in crate::tui) fn status_text(state: &AppState) -> String {
             TurnState::Interrupted { .. } => "interrupted",
             TurnState::Failed { .. } => "failed",
             TurnState::Streaming { .. } => "stale Codex turn",
+            TurnState::ClaudeStreaming { .. } => "stale Claude turn",
         };
         let shutdown = if state.shutting_down {
             " • shutting down"
@@ -127,7 +131,7 @@ pub(in crate::tui) fn status_text(state: &AppState) -> String {
         TurnState::Idle => "idle",
         TurnState::Starting => "starting",
         TurnState::Streaming { .. } => "streaming",
-        TurnState::OpenRouterStreaming { .. } => "streaming",
+        TurnState::OpenRouterStreaming { .. } | TurnState::ClaudeStreaming { .. } => "streaming",
         TurnState::Completed { .. } => "completed",
         TurnState::Interrupted { .. } => "interrupted",
         TurnState::Failed { .. } => "failed",
@@ -149,6 +153,58 @@ pub(in crate::tui) fn status_text(state: &AppState) -> String {
     };
     sanitize_header_text(&format!(
         " Codex • {connection} • {auth} • {thread} • {model}/{reasoning} • {turn}{shutdown}"
+    ))
+}
+
+fn claude_status_text(state: &AppState) -> String {
+    let provider_status = match &state.claude.availability {
+        crate::app::ClaudeAvailability::Ready => match state.claude.auth {
+            crate::claude::ClaudeAuthStatus::Missing => "signed out",
+            crate::claude::ClaudeAuthStatus::Unverified => "key unverified",
+            crate::claude::ClaudeAuthStatus::Valid => "configured",
+            crate::claude::ClaudeAuthStatus::Invalid => "invalid key",
+            crate::claude::ClaudeAuthStatus::CredentialUnavailable => "credential unavailable",
+            crate::claude::ClaudeAuthStatus::CliUnavailable => "CLI unavailable",
+        }
+        .to_owned(),
+        crate::app::ClaudeAvailability::Unavailable(message) => {
+            format!("CLI unavailable: {message}")
+        }
+    };
+    let session = match &state.claude.conversation {
+        crate::app::ClaudeConversationState::None => "no session",
+        crate::app::ClaudeConversationState::Ready { .. } => "session ready",
+        crate::app::ClaudeConversationState::ResumeFailed { .. } => "resume failed",
+        crate::app::ClaudeConversationState::CreationUncertain { .. } => "session uncertain",
+    };
+    let alias = state
+        .selected_model
+        .as_ref()
+        .filter(|key| key.provider == crate::provider::ProviderId::Claude)
+        .map_or("model?", |key| key.id.as_str());
+    let model = state
+        .claude
+        .resolved_model
+        .as_ref()
+        .map(|model| model.display_name.as_deref().unwrap_or(model.id.as_str()));
+    let model = model.map_or_else(|| alias.to_owned(), |model| format!("{alias} → {model}"));
+    let turn = match &state.turn {
+        TurnState::Idle => "idle",
+        TurnState::Starting => "starting",
+        TurnState::ClaudeStreaming { .. } => "streaming",
+        TurnState::Completed { .. } => "completed",
+        TurnState::Interrupted { .. } => "interrupted",
+        TurnState::Failed { .. } => "failed",
+        TurnState::Streaming { .. } => "stale Codex turn",
+        TurnState::OpenRouterStreaming { .. } => "stale OpenRouter turn",
+    };
+    let shutdown = if state.shutting_down {
+        " • shutting down"
+    } else {
+        ""
+    };
+    sanitize_header_text(&format!(
+        " Claude Code • {provider_status} • {session} • {model}/reasoning n/a • {turn}{shutdown}"
     ))
 }
 

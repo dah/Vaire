@@ -1,6 +1,7 @@
 use super::*;
 
 mod auth;
+mod claude;
 mod codex_turn;
 mod conversations;
 mod openrouter;
@@ -49,6 +50,28 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                 Effect::RefreshOpenRouter => self.refresh_openrouter_effect(),
                 Effect::LogoutOpenRouter => self.logout_openrouter_effect().await,
                 Effect::InterruptOpenRouterTurn => self.interrupt_openrouter_turn_effect(),
+                Effect::RefreshClaude => self.refresh_claude_effect().await,
+                Effect::LogoutClaude => self.logout_claude_effect().await,
+                Effect::StartNewClaudeSession => self.start_new_claude_session_effect().await,
+                Effect::SwitchClaudeSession { id } => {
+                    // Resume restores the registered session's own alias. Alias changes create a
+                    // new blank session at the reducer boundary.
+                    self.switch_claude_session_effect(id).await
+                }
+                Effect::SendClaudeMessage { text } => self.send_claude_message_effect(text).await,
+                Effect::InterruptClaudeTurn => self.interrupt_claude_turn_effect(),
+                Effect::DeleteClaudeSessions { ids } => {
+                    self.delete_all_conversations(Vec::new(), Vec::new(), ids)
+                        .await
+                }
+                Effect::DeleteAllConversations {
+                    codex_ids,
+                    openrouter_ids,
+                    claude_ids,
+                } => {
+                    self.delete_all_conversations(codex_ids, openrouter_ids, claude_ids)
+                        .await
+                }
                 Effect::InterruptTurn { thread_id, turn_id } => {
                     self.interrupt_codex_turn_effect(thread_id, turn_id).await?
                 }

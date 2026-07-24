@@ -62,7 +62,11 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                 Some(openrouter) => openrouter.list_conversations().await.ok(),
                 None => None,
             };
-            if codex.is_err() && openrouter.is_none() {
+            let claude = match &self.claude {
+                Some(claude) => claude.service.list_sessions().await.ok(),
+                None => None,
+            };
+            if codex.is_err() && openrouter.is_none() && claude.is_none() {
                 self.state
                     .reduce(Action::Event(DomainEvent::ThreadListFailed(
                         codex.expect_err("checked error").to_string(),
@@ -73,6 +77,14 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                     crate::app::ThreadChoice {
                         provider: ProviderId::OpenRouter,
                         id: summary.id.as_str().to_owned(),
+                        title: summary.title,
+                        updated_at: i64::try_from(summary.updated_at_ms).unwrap_or(i64::MAX),
+                    }
+                }));
+                choices.extend(claude.unwrap_or_default().into_iter().map(|summary| {
+                    crate::app::ThreadChoice {
+                        provider: ProviderId::Claude,
+                        id: summary.session_id.as_str().to_owned(),
                         title: summary.title,
                         updated_at: i64::try_from(summary.updated_at_ms).unwrap_or(i64::MAX),
                     }

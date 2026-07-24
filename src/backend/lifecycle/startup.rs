@@ -30,6 +30,8 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
             self.state.notice = Some(message);
         }
 
+        self.startup_claude().await;
+
         self.pending_openrouter_auto_resume = None;
         if let Some(openrouter) = &mut self.openrouter {
             let started = openrouter.startup().await;
@@ -83,8 +85,10 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
             }
         }
         if self.session.is_none() {
-            self.state.notice =
-                Some("Codex is unavailable; configured OpenRouter chat remains usable".to_owned());
+            self.state.notice = Some(
+                "Codex is unavailable; configured OpenRouter and Claude providers remain usable"
+                    .to_owned(),
+            );
             return Ok(());
         }
         self.state.reduce(Action::Event(DomainEvent::Connecting));
@@ -137,5 +141,70 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
             ))));
         let effects = self.reduce_account(account);
         self.execute_effects(effects).await
+    }
+
+    async fn startup_claude(&mut self) {
+        let saved_session = (self.state.active_provider == ProviderId::Claude)
+            .then(|| self.state.preferences.claude.auto_resume_session_id.clone())
+            .flatten();
+        let Some(runtime) = &mut self.claude else {
+            if let Some(session_id) = saved_session {
+                self.state
+                    .reduce(Action::Event(DomainEvent::ClaudeResumeFailed {
+                        session_id,
+                        message: "Claude Code runtime is unavailable".to_owned(),
+                    }));
+            }
+            return;
+        };
+        let credentials = runtime.credentials.clone();
+        let key = tokio::task::spawn_blocking(move || {
+            credentials.load(CredentialAccount::AnthropicConsoleApiKey)
+        })
+        .await;
+        let auth = match key {
+            Ok(Ok(None)) => ClaudeAuthStatus::Missing,
+            Ok(Err(_)) | Err(_) => ClaudeAuthStatus::CredentialUnavailable,
+            Ok(Ok(Some(key))) => {
+                match crate::backend::claude_runtime::validate_claude_key(runtime, &key).await {
+                    Ok(()) => ClaudeAuthStatus::Valid,
+                    Err(error) if error.category == ClaudeFailureCategory::InvalidCredential => {
+                        ClaudeAuthStatus::Invalid
+                    }
+                    Err(_) => ClaudeAuthStatus::Unverified,
+                }
+            }
+        };
+        self.state.reduce(Action::Event(DomainEvent::ClaudeStartup {
+            availability: crate::app::ClaudeAvailability::Ready,
+            auth,
+        }));
+        let Some(session_id) = saved_session else {
+            return;
+        };
+        if auth != ClaudeAuthStatus::Valid {
+            self.state.reduce(Action::Event(DomainEvent::ClaudeResumeFailed {
+                session_id,
+                message: "the saved Claude session could not be restored until its Console API key is valid"
+                    .to_owned(),
+            }));
+            return;
+        }
+        match runtime.service.load_session(session_id.clone()).await {
+            Ok(session) => {
+                self.state
+                    .reduce(Action::Event(DomainEvent::ClaudeSessionRestored {
+                        session,
+                        automatic: true,
+                    }));
+            }
+            Err(error) => {
+                self.state
+                    .reduce(Action::Event(DomainEvent::ClaudeResumeFailed {
+                        session_id,
+                        message: error.to_string(),
+                    }));
+            }
+        }
     }
 }

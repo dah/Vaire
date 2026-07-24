@@ -2,8 +2,9 @@ use crate::provider::ProviderId;
 use crate::text::is_terminal_unsafe;
 
 use super::domain::{
-    AccountScope, CodexPreferencesV2, LoadNotice, LoadOutcome, PreferencesV1, PreferencesV2,
-    LEGACY_PREFERENCES_VERSION, MAX_PREFERENCE_STRING_BYTES, PREFERENCES_VERSION,
+    AccountScope, CodexPreferencesV2, LoadNotice, LoadOutcome, OpenRouterPreferencesV2,
+    PreferencesV1, PreferencesV2, PreferencesV3, LEGACY_PREFERENCES_VERSION,
+    MAX_PREFERENCE_STRING_BYTES, PREFERENCES_VERSION, V2_PREFERENCES_VERSION,
 };
 
 fn valid_preference_string(value: &str) -> bool {
@@ -58,6 +59,17 @@ fn valid_codex(preferences: &CodexPreferencesV2) -> bool {
     }
 }
 
+fn valid_openrouter(preferences: &OpenRouterPreferencesV2) -> bool {
+    !preferences
+        .selected_model_id
+        .as_deref()
+        .is_some_and(|value| !valid_preference_string(value))
+        && !preferences
+            .enabled_model_ids
+            .iter()
+            .any(|value| !valid_preference_string(value))
+}
+
 pub(super) fn valid_legacy(preferences: &PreferencesV1) -> bool {
     preferences.version == LEGACY_PREFERENCES_VERSION
         && valid_codex(&CodexPreferencesV2 {
@@ -69,19 +81,10 @@ pub(super) fn valid_legacy(preferences: &PreferencesV1) -> bool {
         })
 }
 
-pub(super) fn valid_preferences(preferences: &PreferencesV2) -> bool {
-    if preferences.version != PREFERENCES_VERSION
+pub(super) fn valid_v2(preferences: &PreferencesV2) -> bool {
+    if preferences.version != V2_PREFERENCES_VERSION
         || !valid_codex(&preferences.codex)
-        || preferences
-            .openrouter
-            .selected_model_id
-            .as_deref()
-            .is_some_and(|value| !valid_preference_string(value))
-        || preferences
-            .openrouter
-            .enabled_model_ids
-            .iter()
-            .any(|value| !valid_preference_string(value))
+        || !valid_openrouter(&preferences.openrouter)
     {
         return false;
     }
@@ -89,12 +92,37 @@ pub(super) fn valid_preferences(preferences: &PreferencesV2) -> bool {
     match preferences.active_provider {
         ProviderId::Codex => preferences.openrouter.auto_resume_conversation_id.is_none(),
         ProviderId::OpenRouter => preferences.codex.auto_resume_thread_id.is_none(),
+        ProviderId::Claude => false,
+    }
+}
+
+pub(super) fn valid_preferences(preferences: &PreferencesV3) -> bool {
+    if preferences.version != PREFERENCES_VERSION
+        || !valid_codex(&preferences.codex)
+        || !valid_openrouter(&preferences.openrouter)
+    {
+        return false;
+    }
+
+    match preferences.active_provider {
+        ProviderId::Codex => {
+            preferences.openrouter.auto_resume_conversation_id.is_none()
+                && preferences.claude.auto_resume_session_id.is_none()
+        }
+        ProviderId::OpenRouter => {
+            preferences.codex.auto_resume_thread_id.is_none()
+                && preferences.claude.auto_resume_session_id.is_none()
+        }
+        ProviderId::Claude => {
+            preferences.codex.auto_resume_thread_id.is_none()
+                && preferences.openrouter.auto_resume_conversation_id.is_none()
+        }
     }
 }
 
 pub(super) fn corrupt_load_outcome() -> LoadOutcome {
     LoadOutcome {
-        preferences: PreferencesV2::default(),
+        preferences: PreferencesV3::default(),
         notice: Some(LoadNotice::Corrupt),
         may_overwrite: false,
         needs_save: false,

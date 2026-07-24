@@ -12,7 +12,7 @@ pub(super) use vaire::codex::safety::{FullAccessPolicy, IsolationPaths};
 pub(super) use vaire::codex::session::{SessionError, SessionService};
 pub(super) use vaire::codex::transport::{AppServerTransport, ProcessSpec};
 pub(super) use vaire::persistence::{
-    AccountScope, CodexPreferencesV2, LoadOutcome, PersistenceError, PreferencesPort, PreferencesV2,
+    AccountScope, CodexPreferencesV2, LoadOutcome, PersistenceError, PreferencesPort, PreferencesV3,
 };
 pub(super) use vaire::platform::{BrowserError, BrowserOpener};
 
@@ -45,14 +45,14 @@ pub(super) async fn session_with_historical(
 }
 
 #[derive(Clone)]
-pub(super) struct MemoryPreferences(Arc<Mutex<PreferencesV2>>);
+pub(super) struct MemoryPreferences(Arc<Mutex<PreferencesV3>>);
 
 impl MemoryPreferences {
-    pub(super) fn new(value: PreferencesV2) -> Self {
+    pub(super) fn new(value: PreferencesV3) -> Self {
         Self(Arc::new(Mutex::new(value)))
     }
 
-    pub(super) fn value(&self) -> PreferencesV2 {
+    pub(super) fn value(&self) -> PreferencesV3 {
         self.0.lock().unwrap().clone()
     }
 }
@@ -67,7 +67,7 @@ impl PreferencesPort for MemoryPreferences {
         })
     }
 
-    fn save(&self, preferences: &PreferencesV2) -> Result<(), PersistenceError> {
+    fn save(&self, preferences: &PreferencesV3) -> Result<(), PersistenceError> {
         *self.0.lock().unwrap() = preferences.clone();
         Ok(())
     }
@@ -82,9 +82,9 @@ impl BrowserOpener for NoopBrowser {
     }
 }
 
-pub(super) fn preferences(thread_id: Option<&str>) -> PreferencesV2 {
+pub(super) fn preferences(thread_id: Option<&str>) -> PreferencesV3 {
     let scope = AccountScope::from_chatgpt_email("user@example.com").unwrap();
-    PreferencesV2 {
+    PreferencesV3 {
         codex: CodexPreferencesV2 {
             account_scope: Some(scope.clone()),
             auto_resume_thread_id: thread_id.map(str::to_owned),
@@ -101,7 +101,7 @@ pub(super) fn preferences(thread_id: Option<&str>) -> PreferencesV2 {
             .map(|id| (id.to_owned(), scope.clone()))
             .collect(),
         },
-        ..PreferencesV2::default()
+        ..PreferencesV3::default()
     }
 }
 

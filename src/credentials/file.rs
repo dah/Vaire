@@ -15,6 +15,7 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug)]
 pub struct FileCredentialStore {
+    account: CredentialAccount,
     home_dir: PathBuf,
     credential_file: PathBuf,
     directory_sync: Arc<dyn DirectorySync>,
@@ -22,10 +23,12 @@ pub struct FileCredentialStore {
 
 impl FileCredentialStore {
     pub fn new(
+        account: CredentialAccount,
         home_dir: impl Into<PathBuf>,
         credential_file: impl Into<PathBuf>,
     ) -> Result<Self, CredentialStoreError> {
         let store = Self {
+            account,
             home_dir: home_dir.into(),
             credential_file: credential_file.into(),
             directory_sync: Arc::new(RealDirectorySync),
@@ -42,11 +45,12 @@ impl FileCredentialStore {
 
     #[cfg(test)]
     pub(crate) fn with_directory_sync(
+        account: CredentialAccount,
         home_dir: impl Into<PathBuf>,
         credential_file: impl Into<PathBuf>,
         directory_sync: Arc<dyn DirectorySync>,
     ) -> Result<Self, CredentialStoreError> {
-        let mut store = Self::new(home_dir, credential_file)?;
+        let mut store = Self::new(account, home_dir, credential_file)?;
         store.directory_sync = directory_sync;
         Ok(store)
     }
@@ -126,10 +130,13 @@ impl FileCredentialStore {
         Ok(())
     }
 
-    fn path_for(&self, account: CredentialAccount) -> &Path {
-        match account {
-            CredentialAccount::OpenRouterApiKey => &self.credential_file,
+    fn path_for(&self, account: CredentialAccount) -> Result<&Path, CredentialStoreError> {
+        if account != self.account {
+            return Err(CredentialStoreError::new(
+                CredentialFailureCategory::Permissions,
+            ));
         }
+        Ok(&self.credential_file)
     }
 
     fn create_temp_file(&self) -> Result<(PathBuf, File), CredentialStoreError> {
@@ -168,7 +175,7 @@ impl CredentialStore for FileCredentialStore {
         account: CredentialAccount,
     ) -> Result<Option<SecretValue>, CredentialStoreError> {
         self.validate_home()?;
-        let path = self.path_for(account);
+        let path = self.path_for(account)?;
         let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -214,7 +221,7 @@ impl CredentialStore for FileCredentialStore {
         value: SecretValue,
     ) -> Result<CommitStatus, CredentialStoreError> {
         self.validate_home()?;
-        let target = self.path_for(account);
+        let target = self.path_for(account)?;
         match fs::symlink_metadata(target) {
             Ok(metadata) => validate_credential_file(&metadata)?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -257,7 +264,7 @@ impl CredentialStore for FileCredentialStore {
         account: CredentialAccount,
     ) -> Result<CommitStatus, CredentialStoreError> {
         self.validate_home()?;
-        let path = self.path_for(account);
+        let path = self.path_for(account)?;
         let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {

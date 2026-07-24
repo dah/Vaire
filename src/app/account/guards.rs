@@ -57,6 +57,41 @@ impl AppState {
     }
 
     pub(in crate::app) fn send_block_reason(&self) -> Option<String> {
+        if self.active_provider == ProviderId::Claude {
+            if !matches!(self.claude.availability, ClaudeAvailability::Ready) {
+                return Some("Claude Code runtime is not available".to_owned());
+            }
+            if self.claude.auth != ClaudeAuthStatus::Valid {
+                return Some("configure Claude Code with /login before sending".to_owned());
+            }
+            let Some(model) = self
+                .selected_model
+                .as_ref()
+                .filter(|key| key.provider == ProviderId::Claude)
+            else {
+                return Some("select a Claude model alias with /model".to_owned());
+            };
+            if !self.model_key_is_available(model) {
+                return Some("select a Claude model alias with /model".to_owned());
+            }
+            if self.pending_new_claude_session {
+                return Some("wait for the new Claude conversation request to finish".to_owned());
+            }
+            if self.turn.is_active() {
+                return Some("wait for or interrupt the active turn".to_owned());
+            }
+            if self.conversation_popup().is_some() {
+                return Some("close the conversation picker before sending".to_owned());
+            }
+            if matches!(
+                self.claude.conversation,
+                ClaudeConversationState::ResumeFailed { .. }
+                    | ClaudeConversationState::CreationUncertain { .. }
+            ) {
+                return Some("resolve the saved Claude session with /resume or /new".to_owned());
+            }
+            return None;
+        }
         if self.active_provider == ProviderId::OpenRouter {
             if self.openrouter.auth != crate::openrouter::OpenRouterAuthStatus::Valid {
                 return Some("configure OpenRouter with /login before sending".to_owned());

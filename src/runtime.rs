@@ -1,6 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::future::Future;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -15,11 +16,15 @@ use tokio::task::JoinHandle;
 use tokio::time;
 
 use crate::app::{Action, AppState, AuthState, ConnectionState, Intent};
-use crate::backend::BackendCoordinator;
+use crate::backend::{BackendCoordinator, ClaudeBackendRuntime};
+use crate::claude::{
+    resolve_claude, verify_claude_version, ClaudeCliPolicy, ClaudeService, ClaudeSessionStore,
+    FileClaudeSessionStore,
+};
 use crate::codex::safety::{FullAccessPolicy, IsolationPaths};
 use crate::codex::session::SessionService;
 use crate::codex::transport::{AppServerTransport, ProcessSpec};
-use crate::credentials::{CredentialStore, FileCredentialStore};
+use crate::credentials::{CredentialAccount, CredentialStore, FileCredentialStore};
 use crate::diagnostics::{DiagnosticSink, FileDiagnosticSink};
 use crate::openrouter::{
     FileOpenRouterStore, OpenRouterClient, OpenRouterConversationStore, OpenRouterService,

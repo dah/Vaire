@@ -106,13 +106,13 @@ fn thread_picker_requires_account_identity_and_can_safely_replace_a_mismatched_a
         thread: ThreadState::AccountMismatch {
             id: "thr-saved".to_owned(),
         },
-        preferences: PreferencesV2 {
+        preferences: PreferencesV3 {
             codex: CodexPreferencesV2 {
                 account_scope: saved_scope.clone(),
                 auto_resume_thread_id: Some("thr-saved".to_owned()),
                 ..CodexPreferencesV2::default()
             },
-            ..PreferencesV2::default()
+            ..PreferencesV3::default()
         },
         models: vec![model("m1", true, &["high"], "high")],
         selected_model: Some(ModelKey::codex("m1").unwrap()),

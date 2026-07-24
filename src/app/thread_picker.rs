@@ -110,6 +110,12 @@ impl AppState {
                     OpenRouterConversationState::Ready { id } if id.as_str() == selected.id
                 ) && self.active_provider == ProviderId::OpenRouter
             }
+            ProviderId::Claude => {
+                matches!(
+                    &self.claude.conversation,
+                    ClaudeConversationState::Ready { id } if id.as_str() == selected.id
+                ) && self.active_provider == ProviderId::Claude
+            }
         };
         if already_active {
             self.close_conversation_popup();
@@ -128,6 +134,35 @@ impl AppState {
                 );
             }
             return Vec::new();
+        }
+
+        if selected.provider == ProviderId::Claude {
+            if !matches!(self.claude.availability, ClaudeAvailability::Ready)
+                || self.claude.auth != ClaudeAuthStatus::Valid
+            {
+                if let Some(picker) = self.conversation_popup_mut() {
+                    picker.message = Some(
+                        "Claude Code must be available and authenticated before resuming"
+                            .to_owned(),
+                    );
+                }
+                return Vec::new();
+            }
+            let Ok(id) = selected.id.parse() else {
+                if let Some(picker) = self.conversation_popup_mut() {
+                    picker.phase = ThreadPickerPhase::Failed;
+                    picker.message = Some("Invalid Claude session identity".to_owned());
+                }
+                return Vec::new();
+            };
+            if let Some(picker) = self.conversation_popup_mut() {
+                picker.phase = ThreadPickerPhase::Resuming {
+                    provider: ProviderId::Claude,
+                    id: selected.id,
+                };
+                picker.message = Some(format!("Opening {}…", selected.title));
+            }
+            return vec![Effect::SwitchClaudeSession { id }];
         }
 
         let Some((model, reasoning)) = self.resolve_provider_selection(selected.provider) else {
@@ -169,6 +204,9 @@ impl AppState {
                     return Vec::new();
                 }
             },
+            ProviderId::Claude => {
+                unreachable!("Claude resumes are handled before model resolution")
+            }
         };
         if let Some(picker) = self.conversation_popup_mut() {
             picker.phase = ThreadPickerPhase::Resuming {
@@ -266,6 +304,11 @@ impl AppState {
             );
             return Vec::new();
         }
+        let claude_ids = targets
+            .iter()
+            .filter(|target| target.provider == ProviderId::Claude)
+            .filter_map(|target| target.id.parse().ok())
+            .collect::<Vec<_>>();
         let openrouter_ids = targets
             .iter()
             .filter(|target| target.provider == ProviderId::OpenRouter)
@@ -292,21 +335,39 @@ impl AppState {
             .filter(|target| target.provider == ProviderId::Codex)
             .map(|target| target.id)
             .collect::<Vec<_>>();
-        if openrouter_ids.is_empty() {
-            vec![Effect::DeleteThreads { ids: codex_ids }]
-        } else if codex_ids.is_empty() {
-            vec![Effect::DeleteOpenRouterConversations {
-                ids: openrouter_ids,
-            }]
-        } else {
-            vec![Effect::DeleteConversations {
+        match (
+            codex_ids.is_empty(),
+            openrouter_ids.is_empty(),
+            claude_ids.is_empty(),
+        ) {
+            (false, true, true) => vec![Effect::DeleteThreads { ids: codex_ids }],
+            (true, false, true) => {
+                vec![Effect::DeleteOpenRouterConversations {
+                    ids: openrouter_ids,
+                }]
+            }
+            (true, true, false) => vec![Effect::DeleteClaudeSessions { ids: claude_ids }],
+            _ => vec![Effect::DeleteAllConversations {
                 codex_ids,
                 openrouter_ids,
-            }]
+                claude_ids,
+            }],
         }
     }
 
     pub(crate) fn active_saved_thread_id(&self) -> Option<&str> {
+        if self.active_provider == ProviderId::Claude {
+            return self
+                .preferences
+                .claude
+                .auto_resume_session_id
+                .as_ref()
+                .map(ClaudeSessionId::as_str)
+                .or(match &self.claude.conversation {
+                    ClaudeConversationState::Ready { id } => Some(id.as_str()),
+                    _ => None,
+                });
+        }
         if self.active_provider == ProviderId::OpenRouter {
             return self
                 .preferences

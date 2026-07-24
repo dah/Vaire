@@ -1,7 +1,8 @@
-//! Backend core for Vairë, a conversation-focused Codex and OpenRouter terminal client.
+//! Backend core for Vairë, a conversation-focused Codex, OpenRouter, and Claude Code terminal client.
 
 pub mod app;
 pub mod backend;
+pub mod claude;
 pub mod codex;
 pub mod command;
 pub mod credentials;

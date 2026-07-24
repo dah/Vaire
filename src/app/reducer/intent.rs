@@ -12,6 +12,7 @@ impl AppState {
             Intent::Quit => {
                 self.shutting_down = true;
                 self.pending_new_thread_scope = None;
+                self.pending_new_claude_session = false;
                 self.pending_thread_deletions = None;
                 let mut effects = Vec::new();
                 if let TurnState::Streaming { thread_id, turn_id } = &self.turn {
@@ -22,6 +23,9 @@ impl AppState {
                 }
                 if matches!(self.turn, TurnState::OpenRouterStreaming { .. }) {
                     effects.push(Effect::InterruptOpenRouterTurn);
+                }
+                if matches!(self.turn, TurnState::ClaudeStreaming { .. }) {
+                    effects.push(Effect::InterruptClaudeTurn);
                 }
                 effects.push(Effect::Shutdown);
                 return effects;
@@ -43,10 +47,11 @@ impl AppState {
                 }
             }
             Intent::ShowReasoning => {
-                if self.active_provider == ProviderId::OpenRouter {
-                    self.notice = Some(
-                        "OpenRouter reasoning effort is unsupported in this milestone".to_owned(),
-                    );
+                if self.active_provider != ProviderId::Codex {
+                    self.notice = Some(format!(
+                        "{} reasoning effort is unsupported",
+                        self.active_provider
+                    ));
                     return Vec::new();
                 }
                 self.notice = Some(self.current_model().map_or_else(
@@ -123,7 +128,12 @@ impl AppState {
                     });
                 }
             }
-            Intent::PopupRefresh => return vec![Effect::RefreshOpenRouter],
+            Intent::PopupRefresh => {
+                return match self.popup.as_ref().and_then(PopupState::selected_provider) {
+                    Some(ProviderId::Claude) => vec![Effect::RefreshClaude],
+                    _ => vec![Effect::RefreshOpenRouter],
+                };
+            }
             Intent::PopupSelect => return self.select_popup(),
             Intent::SelectModel(id) => {
                 let Ok(key) = ModelKey::codex(id.clone()) else {
@@ -133,6 +143,11 @@ impl AppState {
                 return self.reduce_intent(Intent::SelectProviderModel(key));
             }
             Intent::SelectProviderModel(key) => {
+                if self.pending_new_claude_session {
+                    self.notice =
+                        Some("wait for the new Claude conversation request to finish".to_owned());
+                    return Vec::new();
+                }
                 if !self.model_key_is_available(&key) {
                     self.notice = Some(format!("unknown model {}; use /model", key.id));
                     return Vec::new();
@@ -143,11 +158,14 @@ impl AppState {
                         self.notice = Some("wait for or interrupt the active turn".to_owned());
                         return Vec::new();
                     }
+                    self.pending_new_claude_session = false;
                     self.active_provider = key.provider;
                     self.preferences.active_provider = key.provider;
                     self.preferences.clear_auto_resume();
                     self.thread = ThreadState::None;
                     self.openrouter.conversation = OpenRouterConversationState::None;
+                    self.claude.conversation = ClaudeConversationState::None;
+                    self.claude.resolved_model = None;
                     self.turn = TurnState::Idle;
                     self.clear_transcript();
                     self.thinking.clear_content();
@@ -159,7 +177,7 @@ impl AppState {
                             .iter()
                             .find(|model| model.id == key.id)
                             .map(|model| model.default_reasoning_effort.clone()),
-                        ProviderId::OpenRouter => None,
+                        ProviderId::OpenRouter | ProviderId::Claude => None,
                     };
                     self.sync_active_selection_preferences();
                     self.notice = Some(
@@ -174,6 +192,25 @@ impl AppState {
                     self.selected_reasoning = None;
                     if changed {
                         self.invalidate_context_for_current_turn();
+                    }
+                    self.sync_active_selection_preferences();
+                    return vec![Effect::Persist(self.preferences.clone())];
+                }
+                if key.provider == ProviderId::Claude {
+                    let changed = self.selected_model.as_ref() != Some(&key);
+                    self.selected_model = Some(key);
+                    self.selected_reasoning = None;
+                    if changed {
+                        self.claude.conversation = ClaudeConversationState::None;
+                        self.claude.resolved_model = None;
+                        self.preferences.set_auto_resume_claude_session(None);
+                        self.clear_transcript();
+                        self.thinking.clear_content();
+                        self.reset_context_window();
+                        self.notice = Some(
+                            "Changing Claude model starts a new conversation; use /resume for history."
+                                .to_owned(),
+                        );
                     }
                     self.sync_active_selection_preferences();
                     return vec![Effect::Persist(self.preferences.clone())];
@@ -204,6 +241,8 @@ impl AppState {
             }
             Intent::RefreshOpenRouter => return vec![Effect::RefreshOpenRouter],
             Intent::LogoutOpenRouter => return vec![Effect::LogoutOpenRouter],
+            Intent::RefreshClaude => return vec![Effect::RefreshClaude],
+            Intent::LogoutClaude => return vec![Effect::LogoutClaude],
             Intent::SelectReasoning(effort) => {
                 let Some(model) = self.current_model() else {
                     self.notice = Some("select a model first".to_owned());
@@ -232,6 +271,39 @@ impl AppState {
                 self.notice = Some("not signed in".to_owned());
             }
             Intent::NewThread => {
+                if self.active_provider == ProviderId::Claude {
+                    let reason = if !matches!(self.claude.availability, ClaudeAvailability::Ready) {
+                        Some("Claude Code runtime is not available".to_owned())
+                    } else if self.claude.auth != ClaudeAuthStatus::Valid {
+                        Some(
+                            "configure Claude Code with /login before starting a conversation"
+                                .to_owned(),
+                        )
+                    } else if self.selected_model.as_ref().is_none_or(|key| {
+                        key.provider != ProviderId::Claude || !self.model_key_is_available(key)
+                    }) {
+                        Some("select a Claude model alias with /model".to_owned())
+                    } else if self.turn.is_active() {
+                        Some("wait for or interrupt the active turn".to_owned())
+                    } else if self.conversation_popup().is_some() {
+                        Some(
+                            "close the conversation picker before starting a conversation"
+                                .to_owned(),
+                        )
+                    } else if self.pending_new_claude_session {
+                        Some("wait for the new Claude conversation request to finish".to_owned())
+                    } else {
+                        None
+                    };
+                    if let Some(reason) = reason {
+                        self.notice = Some(reason);
+                    } else {
+                        self.pending_new_claude_session = true;
+                        self.notice = Some("Starting a new Claude conversation…".to_owned());
+                        return vec![Effect::StartNewClaudeSession];
+                    }
+                    return Vec::new();
+                }
                 if self.active_provider == ProviderId::OpenRouter {
                     if let Some(reason) = self.send_block_reason() {
                         self.notice = Some(reason);
@@ -253,7 +325,10 @@ impl AppState {
                 }
             }
             Intent::Resume => {
-                if self.turn.is_active() {
+                if self.pending_new_claude_session {
+                    self.notice =
+                        Some("wait for the new Claude conversation request to finish".to_owned());
+                } else if self.turn.is_active() {
                     self.notice = Some("wait for or interrupt the active turn".to_owned());
                 } else if self.popup.is_some() {
                     self.notice = Some("close the current popup before opening history".to_owned());
@@ -308,6 +383,7 @@ impl AppState {
                     return vec![match self.active_provider {
                         ProviderId::Codex => Effect::SendMessage { text },
                         ProviderId::OpenRouter => Effect::SendOpenRouterMessage { text },
+                        ProviderId::Claude => Effect::SendClaudeMessage { text },
                     }];
                 }
             }
@@ -320,6 +396,9 @@ impl AppState {
                 }
                 if matches!(self.turn, TurnState::OpenRouterStreaming { .. }) {
                     return vec![Effect::InterruptOpenRouterTurn];
+                }
+                if matches!(self.turn, TurnState::ClaudeStreaming { .. }) {
+                    return vec![Effect::InterruptClaudeTurn];
                 }
                 self.notice = Some("there is no active turn to interrupt".to_owned());
             }

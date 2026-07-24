@@ -1,9 +1,14 @@
+use crate::claude::{
+    ClaudeAuthStatus, ClaudeError, ClaudeModelMetadata, ClaudeSessionV1, ClaudeTurnOutcome,
+    CLAUDE_MODEL_ALIASES,
+};
 use crate::command::HELP_TEXT;
 #[cfg(test)]
 use crate::persistence::CodexPreferencesV2;
-use crate::persistence::{AccountScope, PreferencesV2};
+use crate::persistence::{AccountScope, PreferencesV3};
 use crate::provider::{
-    ConversationRef, ModelKey, OpenRouterConversationId, OpenRouterTurnId, ProviderId, TurnRef,
+    ClaudeModelAlias, ClaudeSessionId, ClaudeTurnId, ConversationRef, ModelKey,
+    OpenRouterConversationId, OpenRouterTurnId, ProviderId, TurnRef,
 };
 use crate::text::sanitize_terminal_text;
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,7 +29,8 @@ mod turn;
 
 pub use actions::{Action, DomainEvent, Effect, TurnOutcome};
 pub use domain::{
-    AuthState, ConnectionState, Intent, ModelChoice, OpenRouterConversationState,
+    AuthState, ClaudeAvailability, ClaudeConversationState, ClaudeCredentialValidation,
+    ClaudeState, ConnectionState, Intent, ModelChoice, OpenRouterConversationState,
     OpenRouterCredentialValidation, OpenRouterState, ThreadState, TranscriptEntry,
     TranscriptEntryStatus, TranscriptRole, TranscriptTruncation, TurnState,
 };

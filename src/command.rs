@@ -1,7 +1,7 @@
 use crate::app::Intent;
 
 pub const HELP_TEXT: &str = "\
-Commands:\n  /login                 Choose Codex or OpenRouter sign-in and manage the OpenRouter catalog\n  /login browser         Start Codex browser callback sign-in directly\n  /login device          Start Codex device-code sign-in directly\n  /logout                Choose Codex or OpenRouter to sign out\n  /model                 Browse searchable Codex and OpenRouter models\n  /reasoning [value]     List or select a Codex reasoning level\n  /new                   Start and switch to a new conversation\n  /resume                Browse saved Codex and OpenRouter conversations\n  /thinking              Toggle the Reasoning panel\n  /help                  Show this help\n  /quit                  Exit Vairë\nProvider popup: arrows or j/k move; Enter selects. For OpenRouter, c manages the catalog and r revalidates or refreshes it; d starts Codex device login.\nModel/catalog: type to search, Backspace edits, Space toggles catalog models, Enter commits, Esc discards or closes.\nConversation picker: arrows or j/k move, Enter resumes, d permanently deletes one inactive conversation, D permanently clears all inactive conversations, Esc closes. Deletion always requires Enter confirmation.\nSwitching provider starts a new conversation; use /resume for history.\nKeys: Enter sends, Alt-Enter inserts a newline, Escape interrupts or closes help, PageUp/PageDown scroll, Ctrl-C quits.";
+Commands:\n  /login                 Choose Codex, OpenRouter, or Claude authentication\n  /login browser         Start Codex browser callback sign-in directly\n  /login device          Start Codex device-code sign-in directly\n  /logout                Choose a provider to sign out\n  /model                 Browse searchable provider-labelled models\n  /reasoning [value]     List or select a Codex reasoning level\n  /new                   Start and switch to a new conversation\n  /resume                Browse saved Codex, OpenRouter, and Claude conversations\n  /thinking              Toggle the Reasoning panel\n  /help                  Show this help\n  /quit                  Exit Vairë\nProvider popup: arrows or j/k move; Enter selects. OpenRouter and Claude use masked API-key entry; c manages the OpenRouter catalog, r refreshes the selected key-backed provider, and d starts Codex device login. Claude accepts Anthropic Console keys only, never Claude.ai subscription OAuth.\nModel/catalog: type to search, Backspace edits, Space toggles OpenRouter catalog models, Enter commits, Esc discards or closes.\nConversation picker: arrows or j/k move, Enter resumes, d removes one inactive history, D removes all inactive histories, Esc closes. Every removal requires Enter confirmation; Claude removal forgets only Vairë's registration/display history.\nSwitching provider starts a new conversation; changing a Claude alias also starts blank. Use /resume for history.\nCodex and Claude tools run with unrestricted same-user access and no approval UI; this is not a sandbox.\nKeys: Enter sends, Alt-Enter inserts a newline, Escape interrupts or closes help, PageUp/PageDown scroll, Ctrl-C quits.";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ParseError {
@@ -135,12 +135,13 @@ mod tests {
             "use /login, /login browser, or /login device"
         );
         assert!(HELP_TEXT.contains("/login device"));
-        assert!(HELP_TEXT.contains("Choose Codex or OpenRouter sign-in"));
-        assert!(HELP_TEXT.contains("manages the catalog"));
-        assert!(HELP_TEXT.contains("saved Codex and OpenRouter conversations"));
-        assert!(HELP_TEXT.contains("D permanently clears all inactive conversations"));
-        assert!(HELP_TEXT
-            .contains("Switching provider starts a new conversation; use /resume for history."));
+        assert!(HELP_TEXT.contains("Choose Codex, OpenRouter, or Claude authentication"));
+        assert!(HELP_TEXT.contains("manages the OpenRouter catalog"));
+        assert!(HELP_TEXT.contains("saved Codex, OpenRouter, and Claude conversations"));
+        assert!(HELP_TEXT.contains("D removes all inactive histories"));
+        assert!(HELP_TEXT.contains("changing a Claude alias also starts blank"));
+        assert!(HELP_TEXT.contains("Claude accepts Anthropic Console keys only"));
+        assert!(HELP_TEXT.contains("unrestricted same-user access"));
         assert!(HELP_TEXT.contains("/quit"));
         assert!(HELP_TEXT.contains("/thinking              Toggle the Reasoning panel"));
         assert!(HELP_TEXT.contains("/reasoning [value]     List or select a Codex reasoning level"));

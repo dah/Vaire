@@ -32,10 +32,27 @@ impl UiState {
             KeyCode::Char(' ') if matches!(popup, PopupState::OpenRouterCatalog { .. }) => {
                 Some(Intent::PopupCatalogToggle)
             }
-            KeyCode::Char('c') if matches!(popup, PopupState::Auth { .. }) => {
+            KeyCode::Char('c')
+                if matches!(
+                    popup,
+                    PopupState::Auth {
+                        selected: crate::provider::ProviderId::OpenRouter,
+                        ..
+                    }
+                ) =>
+            {
                 Some(Intent::PopupOpenCatalog)
             }
-            KeyCode::Char('r') if matches!(popup, PopupState::Auth { .. }) => {
+            KeyCode::Char('r')
+                if matches!(
+                    popup,
+                    PopupState::Auth {
+                        selected: crate::provider::ProviderId::OpenRouter
+                            | crate::provider::ProviderId::Claude,
+                        ..
+                    }
+                ) =>
+            {
                 Some(Intent::PopupRefresh)
             }
             KeyCode::Char('d')

@@ -4,12 +4,14 @@ use crate::credentials::SecretValue;
 pub enum RuntimeCommand {
     Intent(Intent),
     OpenRouterCredential(SecretValue),
+    ClaudeCredential(SecretValue),
 }
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
     pub paths: AppPaths,
     pub codex_override: Option<OsString>,
+    pub claude_override: Option<OsString>,
 }
 
 impl RuntimeConfig {
@@ -20,12 +22,17 @@ impl RuntimeConfig {
                 "HOME is not set",
             ))
         })?;
-        Self::discover_with_home(&home, || std::env::var_os("VAIRE_CODEX_BIN"))
+        Self::discover_with_home(
+            &home,
+            || std::env::var_os("VAIRE_CODEX_BIN"),
+            || std::env::var_os("VAIRE_CLAUDE_BIN"),
+        )
     }
 
     fn discover_with_home(
         home: &Path,
         codex_lookup: impl FnOnce() -> Option<OsString>,
+        claude_lookup: impl FnOnce() -> Option<OsString>,
     ) -> Result<Self, RuntimeError> {
         #[cfg(target_os = "macos")]
         crate::platform::migrate_support_root(home)
@@ -33,6 +40,7 @@ impl RuntimeConfig {
         Ok(Self {
             paths: AppPaths::from_home(home),
             codex_override: codex_lookup(),
+            claude_override: claude_lookup(),
         })
     }
 }
@@ -53,6 +61,8 @@ pub enum RuntimeError {
     AppServer(String),
     #[error("could not prepare OpenRouter support: {0}")]
     OpenRouter(String),
+    #[error("could not prepare Claude Code support: {0}")]
+    Claude(String),
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -75,10 +85,14 @@ mod discovery_tests {
             fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
         }
         let looked_up = AtomicBool::new(false);
-        let result = RuntimeConfig::discover_with_home(home.path(), || {
-            looked_up.store(true, Ordering::SeqCst);
-            None
-        });
+        let result = RuntimeConfig::discover_with_home(
+            home.path(),
+            || {
+                looked_up.store(true, Ordering::SeqCst);
+                None
+            },
+            || None,
+        );
         assert!(matches!(result, Err(RuntimeError::SupportRootMigration(_))));
         assert!(!looked_up.load(Ordering::SeqCst));
     }
@@ -143,6 +157,42 @@ impl RuntimeHandle {
                 };
                 let RuntimeCommand::OpenRouterCredential(value) = command else {
                     unreachable!("submitted an OpenRouter credential command")
+                };
+                (value, message)
+            })
+    }
+
+    pub fn try_send_provider_credential(
+        &self,
+        provider: crate::provider::ProviderId,
+        value: SecretValue,
+    ) -> Result<(), (SecretValue, &'static str)> {
+        match provider {
+            crate::provider::ProviderId::OpenRouter => self.try_send_openrouter_credential(value),
+            crate::provider::ProviderId::Claude => self.try_send_claude_credential(value),
+            crate::provider::ProviderId::Codex => {
+                Err((value, "Codex authentication does not accept an API key"))
+            }
+        }
+    }
+
+    pub fn try_send_claude_credential(
+        &self,
+        value: SecretValue,
+    ) -> Result<(), (SecretValue, &'static str)> {
+        self.intents
+            .try_send(RuntimeCommand::ClaudeCredential(value))
+            .map_err(|error| {
+                let (command, message) = match error {
+                    mpsc::error::TrySendError::Full(command) => {
+                        (command, "background backend is busy; try again")
+                    }
+                    mpsc::error::TrySendError::Closed(command) => {
+                        (command, "background backend has stopped")
+                    }
+                };
+                let RuntimeCommand::ClaudeCredential(value) = command else {
+                    unreachable!("submitted a Claude credential command")
                 };
                 (value, message)
             })

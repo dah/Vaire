@@ -82,9 +82,9 @@ fn unified_resume_switches_codex_to_openrouter_with_destination_model() {
 #[test]
 fn openrouter_startup_preserves_exact_saved_model_for_automatic_resume() {
     let conversation_id = OpenRouterConversationId::default();
-    let mut preferences = PreferencesV2 {
+    let mut preferences = PreferencesV3 {
         active_provider: ProviderId::OpenRouter,
-        ..PreferencesV2::default()
+        ..PreferencesV3::default()
     };
     preferences.openrouter.selected_model_id = Some("vendor/saved".to_owned());
     preferences

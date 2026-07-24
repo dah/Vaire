@@ -11,23 +11,32 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
     /// Do not race this combined future against unrelated work: use `receive_event` followed by
     /// `process_received_event` so cancellation cannot land between receipt and processing.
     pub async fn receive_event(&mut self) -> BackendRuntimeEvent {
-        if let (Some(openrouter), Some(session)) = (&mut self.openrouter, &mut self.session) {
-            tokio::select! {
+        match (&mut self.session, &mut self.openrouter, &mut self.claude) {
+            (Some(session), Some(openrouter), Some(claude)) => tokio::select! {
                 event = session.next_event() => BackendRuntimeEvent::Codex(event),
-                event = openrouter.next_event() => match event {
-                    Some(event) => BackendRuntimeEvent::OpenRouter(event),
-                    None => BackendRuntimeEvent::Codex(None),
-                },
+                event = openrouter.next_event() => BackendRuntimeEvent::OpenRouter(event),
+                event = claude.service.next_event() => BackendRuntimeEvent::Claude(event),
+            },
+            (Some(session), Some(openrouter), None) => tokio::select! {
+                event = session.next_event() => BackendRuntimeEvent::Codex(event),
+                event = openrouter.next_event() => BackendRuntimeEvent::OpenRouter(event),
+            },
+            (Some(session), None, Some(claude)) => tokio::select! {
+                event = session.next_event() => BackendRuntimeEvent::Codex(event),
+                event = claude.service.next_event() => BackendRuntimeEvent::Claude(event),
+            },
+            (None, Some(openrouter), Some(claude)) => tokio::select! {
+                event = openrouter.next_event() => BackendRuntimeEvent::OpenRouter(event),
+                event = claude.service.next_event() => BackendRuntimeEvent::Claude(event),
+            },
+            (Some(session), None, None) => BackendRuntimeEvent::Codex(session.next_event().await),
+            (None, Some(openrouter), None) => {
+                BackendRuntimeEvent::OpenRouter(openrouter.next_event().await)
             }
-        } else if let Some(session) = &mut self.session {
-            BackendRuntimeEvent::Codex(session.next_event().await)
-        } else if let Some(openrouter) = &mut self.openrouter {
-            match openrouter.next_event().await {
-                Some(event) => BackendRuntimeEvent::OpenRouter(event),
-                None => BackendRuntimeEvent::Codex(None),
+            (None, None, Some(claude)) => {
+                BackendRuntimeEvent::Claude(claude.service.next_event().await)
             }
-        } else {
-            BackendRuntimeEvent::Codex(None)
+            (None, None, None) => BackendRuntimeEvent::Codex(None),
         }
     }
 
@@ -41,19 +50,33 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
         event: BackendRuntimeEvent,
     ) -> Result<bool, BackendError> {
         if let BackendRuntimeEvent::OpenRouter(event) = event {
+            let Some(event) = event else {
+                self.openrouter = None;
+                return Ok(self.session.is_some() || self.claude.is_some());
+            };
             let effects = self.process_openrouter_service_event(event).await;
             self.execute_effects(effects).await?;
             return Ok(true);
         }
+        if let BackendRuntimeEvent::Claude(event) = event {
+            let Some(event) = event else {
+                self.record_claude_unavailable("Claude Code event stream closed");
+                self.claude = None;
+                return Ok(self.session.is_some() || self.openrouter.is_some());
+            };
+            let effects = self.reduce_claude_service_event(event);
+            self.execute_effects(effects).await?;
+            return Ok(true);
+        }
         let BackendRuntimeEvent::Codex(event) = event else {
-            unreachable!("OpenRouter event returned above")
+            unreachable!("provider events returned above")
         };
         let Some(event) = event else {
             self.state.reduce(Action::Event(DomainEvent::ProcessExited(
                 "app-server event stream closed".to_owned(),
             )));
             self.session = None;
-            return Ok(self.openrouter.is_some());
+            return Ok(self.openrouter.is_some() || self.claude.is_some());
         };
         let event = match event {
             Ok(event) => event,
@@ -63,7 +86,7 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                         error.to_string(),
                     )));
                 self.session = None;
-                return Ok(self.openrouter.is_some());
+                return Ok(self.openrouter.is_some() || self.claude.is_some());
             }
         };
         let connection_closed = matches!(event, SessionEvent::ConnectionClosed(_));
@@ -76,7 +99,7 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                             error.to_string(),
                         )));
                     self.session = None;
-                    return Ok(self.openrouter.is_some());
+                    return Ok(self.openrouter.is_some() || self.claude.is_some());
                 }
             },
             SessionEvent::UnknownNotification(_) => Vec::new(),
@@ -94,6 +117,6 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
             self.session = None;
         }
         self.execute_effects(effects).await?;
-        Ok(self.session.is_some() || self.openrouter.is_some())
+        Ok(self.session.is_some() || self.openrouter.is_some() || self.claude.is_some())
     }
 }

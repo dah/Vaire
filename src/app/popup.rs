@@ -39,7 +39,9 @@ pub enum PopupState {
         mode: AuthPopupMode,
         selected: ProviderId,
     },
-    OpenRouterSecret,
+    ProviderSecret {
+        provider: ProviderId,
+    },
     Conversation(ThreadPickerState),
     Model {
         choices: Vec<ModelKey>,
