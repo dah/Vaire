@@ -121,9 +121,9 @@ async fn offline_backend_runs_openrouter_startup_catalog_chat_persistence_and_sh
     )
     .unwrap();
     let openrouter = OpenRouterService::new(client, credentials, store.clone());
-    let mut preferences = PreferencesV3 {
+    let mut preferences = PreferencesV4 {
         active_provider: ProviderId::OpenRouter,
-        ..PreferencesV3::default()
+        ..PreferencesV4::default()
     };
     preferences.openrouter.selected_model_id = Some("vendor/model".to_owned());
     preferences.openrouter.enabled_model_ids = BTreeSet::from(["vendor/model".to_owned()]);

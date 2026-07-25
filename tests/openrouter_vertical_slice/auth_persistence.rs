@@ -25,7 +25,7 @@ async fn stored_candidate_rejected_by_catalog_401_or_403_becomes_invalid_but_is_
         .unwrap();
         let openrouter = OpenRouterService::new(client, credentials.clone(), store);
         let mut backend = BackendCoordinator::without_codex(
-            MemoryPreferences(Arc::new(Mutex::new(PreferencesV3::default()))),
+            MemoryPreferences(Arc::new(Mutex::new(PreferencesV4::default()))),
             NoopBrowser,
             "offline Codex unavailable".to_owned(),
         )
@@ -85,9 +85,9 @@ async fn first_openrouter_send_never_bypasses_a_read_only_preferences_gate() {
     )
     .unwrap();
     let openrouter = OpenRouterService::new(client, credentials, store.clone());
-    let mut value = PreferencesV3 {
+    let mut value = PreferencesV4 {
         active_provider: ProviderId::OpenRouter,
-        ..PreferencesV3::default()
+        ..PreferencesV4::default()
     };
     value.openrouter.selected_model_id = Some("vendor/model".to_owned());
     value.openrouter.enabled_model_ids = BTreeSet::from(["vendor/model".to_owned()]);

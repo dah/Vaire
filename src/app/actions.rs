@@ -55,6 +55,7 @@ pub enum Effect {
     },
     SendClaudeMessage {
         text: String,
+        effort: Option<ClaudeEffort>,
     },
     InterruptClaudeTurn,
     DeleteClaudeSessions {
@@ -69,7 +70,7 @@ pub enum Effect {
         thread_id: String,
         turn_id: String,
     },
-    Persist(PreferencesV3),
+    Persist(PreferencesV4),
     Shutdown,
 }
 
@@ -82,7 +83,7 @@ pub enum TurnOutcome {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DomainEvent {
-    PreferencesLoaded(PreferencesV3),
+    PreferencesLoaded(PreferencesV4),
     Connecting,
     Connected {
         generation: u64,

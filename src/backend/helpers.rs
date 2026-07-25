@@ -70,7 +70,9 @@ pub(in crate::backend) fn is_fatal_transport(error: &SessionError) -> bool {
 pub(in crate::backend) fn load_notice_message(notice: Option<LoadNotice>) -> Option<String> {
     match notice {
         None | Some(LoadNotice::Missing) => None,
-        Some(LoadNotice::MigratedV1) => Some("preferences were upgraded to version 2".to_owned()),
+        Some(LoadNotice::MigratedV1 | LoadNotice::MigratedV2 | LoadNotice::MigratedV3) => {
+            Some("preferences were upgraded to version 4".to_owned())
+        }
         Some(notice) => Some(format!("preferences were not restored: {notice:?}")),
     }
 }

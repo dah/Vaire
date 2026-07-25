@@ -2,7 +2,7 @@
 name: "rp-refactor-cli"
 description: "Refactoring assistant using rpce-cli to analyze and improve code organization"
 repoprompt_managed: true
-repoprompt_skills_version: 61
+repoprompt_skills_version: 62
 repoprompt_variant: cli
 ---
 

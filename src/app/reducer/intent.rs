@@ -46,19 +46,27 @@ impl AppState {
                     });
                 }
             }
-            Intent::ShowReasoning => {
-                if self.active_provider != ProviderId::Codex {
-                    self.notice = Some(format!(
-                        "{} reasoning effort is unsupported",
-                        self.active_provider
+            Intent::ShowReasoning => match self.active_provider {
+                ProviderId::Codex => {
+                    self.notice = Some(self.current_model().map_or_else(
+                        || "select a model first".to_owned(),
+                        |model| model.supported_reasoning_efforts.join(", "),
                     ));
-                    return Vec::new();
                 }
-                self.notice = Some(self.current_model().map_or_else(
-                    || "select a model first".to_owned(),
-                    |model| model.supported_reasoning_efforts.join(", "),
-                ));
-            }
+                ProviderId::OpenRouter => {
+                    self.notice = Some("OpenRouter reasoning effort is unsupported".to_owned());
+                }
+                ProviderId::Claude => {
+                    let current = self
+                        .preferences
+                        .claude
+                        .selected_effort
+                        .map_or("default", ClaudeEffort::as_str);
+                    self.notice = Some(format!(
+                        "Claude effort: {current}; choices: default, low, medium, high, xhigh, max"
+                    ));
+                }
+            },
             Intent::ToggleThinking => {
                 self.thinking.visible = !self.thinking.visible;
             }
@@ -269,12 +277,48 @@ impl AppState {
                 );
             }
             Intent::SelectReasoning(effort) => {
-                if self.active_provider != ProviderId::Codex {
-                    self.notice = Some(format!(
-                        "{} reasoning effort is unsupported",
-                        self.active_provider
-                    ));
-                    return Vec::new();
+                match self.active_provider {
+                    ProviderId::OpenRouter => {
+                        self.notice = Some("OpenRouter reasoning effort is unsupported".to_owned());
+                        return Vec::new();
+                    }
+                    ProviderId::Claude => {
+                        if self.turn.is_active() {
+                            self.notice = Some("wait for or interrupt the active turn".to_owned());
+                            return Vec::new();
+                        }
+                        if self.pending_new_claude_session {
+                            self.notice = Some(
+                                "wait for the new Claude conversation request to finish".to_owned(),
+                            );
+                            return Vec::new();
+                        }
+                        let selected_effort = if effort == "default" {
+                            None
+                        } else {
+                            let Ok(selected) = effort.parse::<ClaudeEffort>() else {
+                                self.notice = Some(format!(
+                                    "unsupported Claude effort {effort}; use /reasoning"
+                                ));
+                                return Vec::new();
+                            };
+                            Some(selected)
+                        };
+                        if self.preferences.claude.selected_effort == selected_effort {
+                            self.notice = Some(format!(
+                                "Claude effort is already {}; it applies to the next turn",
+                                selected_effort.map_or("default", ClaudeEffort::as_str)
+                            ));
+                            return Vec::new();
+                        }
+                        self.preferences.claude.selected_effort = selected_effort;
+                        self.notice = Some(format!(
+                            "Claude effort set to {}; it applies to the next turn",
+                            selected_effort.map_or("default", ClaudeEffort::as_str)
+                        ));
+                        return vec![Effect::Persist(self.preferences.clone())];
+                    }
+                    ProviderId::Codex => {}
                 }
                 let Some(model) = self.current_model() else {
                     self.notice = Some("select a model first".to_owned());
@@ -420,7 +464,10 @@ impl AppState {
                     return vec![match self.active_provider {
                         ProviderId::Codex => Effect::SendMessage { text },
                         ProviderId::OpenRouter => Effect::SendOpenRouterMessage { text },
-                        ProviderId::Claude => Effect::SendClaudeMessage { text },
+                        ProviderId::Claude => Effect::SendClaudeMessage {
+                            text,
+                            effort: self.preferences.claude.selected_effort,
+                        },
                     }];
                 }
             }

@@ -100,7 +100,7 @@ fn thread_ready_state() -> AppState {
             item_id: None,
             turn_id: None,
         }],
-        preferences: PreferencesV3 {
+        preferences: PreferencesV4 {
             codex: CodexPreferencesV2 {
                 account_scope: scope,
                 auto_resume_thread_id: Some("thr-active".to_owned()),
@@ -122,7 +122,7 @@ fn thread_ready_state() -> AppState {
                 })
                 .collect(),
             },
-            ..PreferencesV3::default()
+            ..PreferencesV4::default()
         },
         ..AppState::default()
     }

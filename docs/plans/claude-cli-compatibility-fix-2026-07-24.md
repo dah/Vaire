@@ -3,6 +3,12 @@
 Date: 2026-07-24  
 Status: complete
 
+> **Historical superseding note (2026-07-24):** This compatibility plan accurately records why
+> Claude effort was unsupported at the time and why 2.1.178 was the tested executable. The
+> completed `claude-reasoning-effort-2026-07-24.md` milestone now supersedes the unsupported-effort
+> statements and raises the current minimum to 2.1.218. Its new `--effort` behavior does not change
+> this plan's empty strict MCP configuration, `fable`, direct-spawn, auth, or safety findings.
+
 ## Goal
 
 Make the first real Claude Code turn establish reliably after native subscription sign-in, expose

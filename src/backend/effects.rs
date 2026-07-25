@@ -59,7 +59,9 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                     // new blank session at the reducer boundary.
                     self.switch_claude_session_effect(id).await
                 }
-                Effect::SendClaudeMessage { text } => self.send_claude_message_effect(text).await,
+                Effect::SendClaudeMessage { text, effort } => {
+                    self.send_claude_message_effect(text, effort).await
+                }
                 Effect::InterruptClaudeTurn => self.interrupt_claude_turn_effect(),
                 Effect::DeleteClaudeSessions { ids } => {
                     self.delete_all_conversations(Vec::new(), Vec::new(), ids)

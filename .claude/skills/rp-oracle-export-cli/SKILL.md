@@ -2,7 +2,7 @@
 name: "rp-oracle-export-cli"
 description: "Export a ChatGPT-ready Question / Plan / Review prompt using rpce-cli"
 repoprompt_managed: true
-repoprompt_skills_version: 61
+repoprompt_skills_version: 62
 repoprompt_variant: cli
 ---
 

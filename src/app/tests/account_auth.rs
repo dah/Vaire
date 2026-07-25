@@ -9,13 +9,13 @@ fn signed_out_send_is_local_and_same_account_auto_resumes() {
     assert!(state.notice.as_deref().unwrap().contains("sign in"));
     let scope = AccountScope::from_chatgpt_email("a@example.com");
     state.reduce(Action::Event(DomainEvent::PreferencesLoaded(
-        PreferencesV3 {
+        PreferencesV4 {
             codex: CodexPreferencesV2 {
                 account_scope: scope.clone(),
                 auto_resume_thread_id: Some("thr-old".to_owned()),
                 ..CodexPreferencesV2::default()
             },
-            ..PreferencesV3::default()
+            ..PreferencesV4::default()
         },
     )));
     assert_eq!(

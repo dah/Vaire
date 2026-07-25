@@ -42,7 +42,7 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
 
     pub(in crate::backend) fn persist_preferences(
         &mut self,
-        preferences: &crate::persistence::PreferencesV3,
+        preferences: &crate::persistence::PreferencesV4,
     ) -> Result<Option<crate::storage::CommitStatus>, PersistenceError> {
         if !self.may_persist {
             return Ok(None);

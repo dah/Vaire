@@ -16,7 +16,7 @@ Requirements:
 
 - macOS and stable Rust
 - codex-cli 0.144.6 or newer available as `codex` on `PATH`
-- Claude Code 2.1.178 or newer available as `claude` on `PATH` to use the Claude provider
+- Claude Code 2.1.218 or newer available as `claude` on `PATH` to use the Claude provider
 
 ```bash
 cargo run --bin vaire
@@ -125,6 +125,15 @@ The initial Claude model choices are Anthropic's documented selectors `default`,
 and terminal metadata establish the provider-reported model. Selecting a different Claude alias
 starts a fresh blank Claude conversation because resumed CLI sessions retain their original model.
 
+For Claude, **/reasoning** reports Vairë's provider-wide requested effort and accepts exactly
+`default`, `low`, `medium`, `high`, `xhigh`, and `max`. A concrete value is snapshotted when the
+next turn is sent and passed as one `--effort` pair on both new and resumed invocations. `default`
+emits no effort flag and lets Claude Code choose its provider/model default. Claude Code may clamp
+an unsupported request, so the header and preference describe the requested effort, not a verified
+effective effort. Changing effort preserves the active session; Vairë does not attach historical
+effort to session or turn records. **/thinking** remains separate and does not collect Claude
+reasoning output.
+
 OpenRouter SSE and Claude stream-json events are bounded and terminally validated. Malformed
 required payloads, correlation mismatches, duplicate terminals, resource exhaustion, or EOF
 without a terminal result fail visibly. Optional usage/metadata never clears earlier valid data,
@@ -148,8 +157,9 @@ reported instead of allocating without bound or silently replacing the active co
 - **/model** opens a searchable, provider-labelled picker. Switching providers immediately starts
   a blank conversation; selecting a different Claude alias does likewise. **/resume** is the only
   operation that deliberately restores cross-provider history.
-- **/reasoning [value]** uses Codex choices. OpenRouter and Claude reasoning effort are unsupported
-  in this milestone.
+- **/reasoning [value]** uses the server-derived choices for Codex. For Claude it reports or selects
+  `default`, `low`, `medium`, `high`, `xhigh`, or `max` for the next turn while preserving the
+  conversation. OpenRouter reasoning remains unsupported.
 - **/new** eagerly creates a fresh conversation for the active provider without deleting history.
 - **/resume** opens the provider-labelled conversation picker; arrows or **j/k** navigate and
   **Enter** resumes.
@@ -179,5 +189,6 @@ cargo test --all-targets
 ```
 
 Normal Claude tests use fake executables and temporary configuration directories and never inspect
-Keychain, real tokens, or a user's Claude configuration. Installed-CLI smoke tests are explicit,
-ignored, and do not require provider login or network access.
+Keychain, real tokens, or a user's Claude configuration. Installed-CLI smoke tests are explicit, ignored, and inspect only Claude `--version` and top-level
+`--help`; they never inspect auth/config/private sessions or launch a turn, and do not require
+provider login or network access.

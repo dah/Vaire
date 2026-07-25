@@ -1,9 +1,11 @@
 use super::{
-    AccountScope, ClaudePreferencesV3, CodexPreferencesV2, FilePreferences, LoadNotice,
-    OpenRouterPreferencesV2, PreferencesPort, PreferencesV3, MAX_PREFERENCES_BYTES,
+    AccountScope, ClaudePreferencesV4, CodexPreferencesV2, FilePreferences, LoadNotice,
+    OpenRouterPreferencesV2, PreferencesPort, PreferencesV4, MAX_PREFERENCES_BYTES,
     PREFERENCES_VERSION,
 };
-use crate::provider::{ClaudeModelAlias, ClaudeSessionId, OpenRouterConversationId, ProviderId};
+use crate::provider::{
+    ClaudeEffort, ClaudeModelAlias, ClaudeSessionId, OpenRouterConversationId, ProviderId,
+};
 use crate::storage::{CommitStatus, ScriptedDirectorySync};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -24,18 +26,18 @@ fn rename_commit_is_reported_when_directory_sync_fails() {
         FilePreferences::with_directory_sync(&path, Arc::new(ScriptedDirectorySync::fail_after(0)));
 
     assert_eq!(
-        store.save_with_commit(&PreferencesV3::default()).unwrap(),
+        store.save_with_commit(&PreferencesV4::default()).unwrap(),
         CommitStatus::CommittedUnverified
     );
-    assert_eq!(store.load().unwrap().preferences, PreferencesV3::default());
+    assert_eq!(store.load().unwrap().preferences, PreferencesV4::default());
 }
 
 #[test]
-fn round_trips_v3_atomically_with_owner_only_permissions() {
+fn round_trips_v4_atomically_with_owner_only_permissions() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("state").join("preferences.json");
     let store = FilePreferences::new(&path);
-    let preferences = PreferencesV3 {
+    let preferences = PreferencesV4 {
         version: PREFERENCES_VERSION,
         active_provider: ProviderId::Codex,
         codex: CodexPreferencesV2 {
@@ -50,9 +52,10 @@ fn round_trips_v3_atomically_with_owner_only_permissions() {
             enabled_model_ids: BTreeSet::from(["anthropic/claude".to_owned()]),
             ..OpenRouterPreferencesV2::default()
         },
-        claude: ClaudePreferencesV3 {
+        claude: ClaudePreferencesV4 {
             auto_resume_session_id: None,
             selected_model_alias: Some(ClaudeModelAlias::Sonnet),
+            selected_effort: Some(ClaudeEffort::XHigh),
         },
     };
     store.save(&preferences).unwrap();
@@ -95,7 +98,7 @@ fn migrates_every_v1_field_exactly_and_marks_it_for_atomic_resave() {
     assert_eq!(outcome.notice, Some(LoadNotice::MigratedV1));
     assert!(outcome.may_overwrite);
     assert!(outcome.needs_save);
-    assert_eq!(outcome.preferences.version, 3);
+    assert_eq!(outcome.preferences.version, 4);
     assert_eq!(outcome.preferences.active_provider, ProviderId::Codex);
     assert_eq!(
         outcome.preferences.codex,
@@ -114,7 +117,7 @@ fn migrates_every_v1_field_exactly_and_marks_it_for_atomic_resave() {
         outcome.preferences.openrouter,
         OpenRouterPreferencesV2::default()
     );
-    assert_eq!(outcome.preferences.claude, ClaudePreferencesV3::default());
+    assert_eq!(outcome.preferences.claude, ClaudePreferencesV4::default());
 }
 
 #[test]
@@ -148,14 +151,121 @@ fn migrates_every_v2_field_and_defaults_claude_preferences() {
     assert_eq!(outcome.notice, Some(LoadNotice::MigratedV2));
     assert!(outcome.may_overwrite);
     assert!(outcome.needs_save);
-    assert_eq!(outcome.preferences.version, 3);
+    assert_eq!(outcome.preferences.version, 4);
     assert_eq!(outcome.preferences.active_provider, ProviderId::OpenRouter);
     assert_eq!(outcome.preferences.codex.model_id.as_deref(), Some("gpt-5"));
     assert_eq!(
         outcome.preferences.openrouter.selected_model_id.as_deref(),
         Some("anthropic/claude")
     );
-    assert_eq!(outcome.preferences.claude, ClaudePreferencesV3::default());
+    assert_eq!(outcome.preferences.claude, ClaudePreferencesV4::default());
+}
+
+#[test]
+fn migrates_every_v3_field_and_defaults_claude_effort() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("preferences.json");
+    fs::write(
+        &path,
+        br#"{
+          "version": 3,
+          "active_provider": "claude",
+          "codex": {
+            "account_scope": null,
+            "auto_resume_thread_id": null,
+            "model_id": "gpt-5",
+            "reasoning_effort": "high",
+            "thread_account_scopes": {}
+          },
+          "openrouter": {
+            "auto_resume_conversation_id": null,
+            "selected_model_id": "anthropic/claude",
+            "enabled_model_ids": ["anthropic/claude"]
+          },
+          "claude": {
+            "auto_resume_session_id": "00000000-0000-4000-8000-000000000000",
+            "selected_model_alias": "sonnet"
+          }
+        }"#,
+    )
+    .unwrap();
+
+    let before = fs::read(&path).unwrap();
+    let outcome = FilePreferences::new(&path).load().unwrap();
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(outcome.notice, Some(LoadNotice::MigratedV3));
+    assert!(outcome.may_overwrite);
+    assert!(outcome.needs_save);
+    assert_eq!(outcome.preferences.version, 4);
+    assert_eq!(outcome.preferences.active_provider, ProviderId::Claude);
+    assert_eq!(outcome.preferences.codex.model_id.as_deref(), Some("gpt-5"));
+    assert_eq!(
+        outcome.preferences.openrouter.selected_model_id.as_deref(),
+        Some("anthropic/claude")
+    );
+    assert_eq!(
+        outcome.preferences.claude.auto_resume_session_id,
+        Some("00000000-0000-4000-8000-000000000000".parse().unwrap())
+    );
+    assert_eq!(
+        outcome.preferences.claude.selected_model_alias,
+        Some(ClaudeModelAlias::Sonnet)
+    );
+    assert_eq!(outcome.preferences.claude.selected_effort, None);
+}
+
+#[test]
+fn round_trips_every_claude_effort_and_provider_default() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("preferences.json");
+    let store = FilePreferences::new(&path);
+
+    for selected_effort in [
+        None,
+        Some(ClaudeEffort::Low),
+        Some(ClaudeEffort::Medium),
+        Some(ClaudeEffort::High),
+        Some(ClaudeEffort::XHigh),
+        Some(ClaudeEffort::Max),
+    ] {
+        let mut preferences = PreferencesV4::default();
+        preferences.claude.selected_effort = selected_effort;
+        store.save(&preferences).unwrap();
+        assert_eq!(store.load().unwrap().preferences, preferences);
+    }
+}
+
+#[test]
+fn invalid_v4_effort_and_unknown_fields_are_corrupt_and_non_overwritable() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("preferences.json");
+    let store = FilePreferences::new(&path);
+    let valid = serde_json::to_value(PreferencesV4::default()).unwrap();
+
+    let mut invalid_effort = valid.clone();
+    invalid_effort["claude"]["selected_effort"] = serde_json::json!("ultracode");
+    let bytes = serde_json::to_vec(&invalid_effort).unwrap();
+    fs::write(&path, &bytes).unwrap();
+    let outcome = store.load().unwrap();
+    assert_eq!(outcome.notice, Some(LoadNotice::Corrupt));
+    assert!(!outcome.may_overwrite);
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+
+    let mut unknown_top_level = valid.clone();
+    unknown_top_level["future"] = serde_json::json!(true);
+    fs::write(&path, serde_json::to_vec(&unknown_top_level).unwrap()).unwrap();
+    let outcome = store.load().unwrap();
+    assert_eq!(outcome.notice, Some(LoadNotice::Corrupt));
+    assert!(!outcome.may_overwrite);
+
+    for section in ["codex", "openrouter", "claude"] {
+        let mut unknown_nested = valid.clone();
+        unknown_nested[section]["future"] = serde_json::json!(true);
+        fs::write(&path, serde_json::to_vec(&unknown_nested).unwrap()).unwrap();
+        let outcome = store.load().unwrap();
+        assert_eq!(outcome.notice, Some(LoadNotice::Corrupt));
+        assert!(!outcome.may_overwrite);
+    }
 }
 
 #[test]
@@ -185,14 +295,14 @@ fn enforces_the_single_active_provider_resume_pointer_invariant() {
     let conversation: OpenRouterConversationId =
         "or_00000000000000000000000000000000".parse().unwrap();
 
-    let mut codex = PreferencesV3::default();
+    let mut codex = PreferencesV4::default();
     codex.codex.auto_resume_thread_id = Some("thr".to_owned());
     codex.openrouter.auto_resume_conversation_id = Some(conversation.clone());
     assert!(store.save(&codex).is_err());
 
-    let mut openrouter = PreferencesV3 {
+    let mut openrouter = PreferencesV4 {
         active_provider: ProviderId::OpenRouter,
-        ..PreferencesV3::default()
+        ..PreferencesV4::default()
     };
     openrouter.codex.auto_resume_thread_id = Some("thr".to_owned());
     assert!(store.save(&openrouter).is_err());
@@ -222,7 +332,7 @@ fn enforces_the_single_active_provider_resume_pointer_invariant() {
     assert!(store.save(&openrouter).is_err());
     openrouter.codex.auto_resume_thread_id = None;
 
-    let mut independent_clear = PreferencesV3::default();
+    let mut independent_clear = PreferencesV4::default();
     independent_clear.codex.auto_resume_thread_id = Some("thr-keep".to_owned());
     independent_clear.set_auto_resume_conversation(None);
     assert_eq!(
@@ -256,7 +366,7 @@ fn rejects_semantically_corrupt_and_oversized_preferences_without_overwriting_th
     fs::write(&path, vec![b' '; MAX_PREFERENCES_BYTES + 1]).unwrap();
     assert_eq!(store.load().unwrap().notice, Some(LoadNotice::Corrupt));
 
-    let valid = PreferencesV3::default();
+    let valid = PreferencesV4::default();
     store.save(&valid).unwrap();
     let before = fs::read(&path).unwrap();
     let mut too_large = valid;
@@ -266,8 +376,8 @@ fn rejects_semantically_corrupt_and_oversized_preferences_without_overwriting_th
 }
 
 #[test]
-fn serialized_v3_has_no_credential_or_runtime_secret_fields() {
-    let json = serde_json::to_string(&PreferencesV3::default()).unwrap();
+fn serialized_v4_has_no_credential_or_runtime_secret_fields() {
+    let json = serde_json::to_string(&PreferencesV4::default()).unwrap();
     for forbidden in [
         "api_key",
         "credential",
@@ -291,14 +401,14 @@ fn atomic_save_never_follows_a_predictable_legacy_temp_symlink() {
     symlink(&victim, &legacy_temp).unwrap();
 
     let store = FilePreferences::new(&path);
-    store.save(&PreferencesV3::default()).unwrap();
+    store.save(&PreferencesV4::default()).unwrap();
 
     assert_eq!(fs::read(&victim).unwrap(), b"must remain unchanged");
     assert!(!fs::symlink_metadata(&path)
         .unwrap()
         .file_type()
         .is_symlink());
-    assert_eq!(store.load().unwrap().preferences, PreferencesV3::default());
+    assert_eq!(store.load().unwrap().preferences, PreferencesV4::default());
 }
 
 #[test]
@@ -309,7 +419,7 @@ fn failed_atomic_replace_preserves_the_target_and_cleans_its_temp_file() {
     fs::write(path.join("sentinel"), b"preserve me").unwrap();
     let store = FilePreferences::new(&path);
 
-    assert!(store.save(&PreferencesV3::default()).is_err());
+    assert!(store.save(&PreferencesV4::default()).is_err());
 
     assert_eq!(fs::read(path.join("sentinel")).unwrap(), b"preserve me");
     let temp_prefix = format!(".preferences.json.{}.", std::process::id());

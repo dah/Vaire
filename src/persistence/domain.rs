@@ -4,11 +4,14 @@ use std::io;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::provider::{ClaudeModelAlias, ClaudeSessionId, OpenRouterConversationId, ProviderId};
+use crate::provider::{
+    ClaudeEffort, ClaudeModelAlias, ClaudeSessionId, OpenRouterConversationId, ProviderId,
+};
 use crate::storage::CommitStatus;
 use crate::text::is_terminal_unsafe;
 
-pub const PREFERENCES_VERSION: u32 = 3;
+pub const PREFERENCES_VERSION: u32 = 4;
+pub(super) const V3_PREFERENCES_VERSION: u32 = 3;
 pub(super) const V2_PREFERENCES_VERSION: u32 = 2;
 pub(super) const LEGACY_PREFERENCES_VERSION: u32 = 1;
 pub(super) const MAX_PREFERENCES_BYTES: usize = 1024 * 1024;
@@ -34,6 +37,7 @@ impl AccountScope {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CodexPreferencesV2 {
     pub account_scope: Option<AccountScope>,
     pub auto_resume_thread_id: Option<String>,
@@ -44,6 +48,7 @@ pub struct CodexPreferencesV2 {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpenRouterPreferencesV2 {
     pub auto_resume_conversation_id: Option<OpenRouterConversationId>,
     pub selected_model_id: Option<String>,
@@ -52,33 +57,36 @@ pub struct OpenRouterPreferencesV2 {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ClaudePreferencesV3 {
+#[serde(deny_unknown_fields)]
+pub struct ClaudePreferencesV4 {
     pub auto_resume_session_id: Option<ClaudeSessionId>,
     pub selected_model_alias: Option<ClaudeModelAlias>,
+    pub selected_effort: Option<ClaudeEffort>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct PreferencesV3 {
+#[serde(deny_unknown_fields)]
+pub struct PreferencesV4 {
     pub version: u32,
     pub active_provider: ProviderId,
     pub codex: CodexPreferencesV2,
     pub openrouter: OpenRouterPreferencesV2,
-    pub claude: ClaudePreferencesV3,
+    pub claude: ClaudePreferencesV4,
 }
 
-impl Default for PreferencesV3 {
+impl Default for PreferencesV4 {
     fn default() -> Self {
         Self {
             version: PREFERENCES_VERSION,
             active_provider: ProviderId::Codex,
             codex: CodexPreferencesV2::default(),
             openrouter: OpenRouterPreferencesV2::default(),
-            claude: ClaudePreferencesV3::default(),
+            claude: ClaudePreferencesV4::default(),
         }
     }
 }
 
-impl PreferencesV3 {
+impl PreferencesV4 {
     pub fn set_auto_resume_conversation(
         &mut self,
         conversation_id: Option<OpenRouterConversationId>,
@@ -135,7 +143,22 @@ pub(super) struct PreferencesV2 {
     pub(super) openrouter: OpenRouterPreferencesV2,
 }
 
-impl From<PreferencesV1> for PreferencesV3 {
+#[derive(Clone, Debug, Default, Deserialize)]
+pub(super) struct ClaudePreferencesV3 {
+    pub(super) auto_resume_session_id: Option<ClaudeSessionId>,
+    pub(super) selected_model_alias: Option<ClaudeModelAlias>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub(super) struct PreferencesV3 {
+    pub(super) version: u32,
+    pub(super) active_provider: ProviderId,
+    pub(super) codex: CodexPreferencesV2,
+    pub(super) openrouter: OpenRouterPreferencesV2,
+    pub(super) claude: ClaudePreferencesV3,
+}
+
+impl From<PreferencesV1> for PreferencesV4 {
     fn from(value: PreferencesV1) -> Self {
         Self {
             version: PREFERENCES_VERSION,
@@ -148,19 +171,35 @@ impl From<PreferencesV1> for PreferencesV3 {
                 thread_account_scopes: value.thread_account_scopes,
             },
             openrouter: OpenRouterPreferencesV2::default(),
-            claude: ClaudePreferencesV3::default(),
+            claude: ClaudePreferencesV4::default(),
         }
     }
 }
 
-impl From<PreferencesV2> for PreferencesV3 {
+impl From<PreferencesV2> for PreferencesV4 {
     fn from(value: PreferencesV2) -> Self {
         Self {
             version: PREFERENCES_VERSION,
             active_provider: value.active_provider,
             codex: value.codex,
             openrouter: value.openrouter,
-            claude: ClaudePreferencesV3::default(),
+            claude: ClaudePreferencesV4::default(),
+        }
+    }
+}
+
+impl From<PreferencesV3> for PreferencesV4 {
+    fn from(value: PreferencesV3) -> Self {
+        Self {
+            version: PREFERENCES_VERSION,
+            active_provider: value.active_provider,
+            codex: value.codex,
+            openrouter: value.openrouter,
+            claude: ClaudePreferencesV4 {
+                auto_resume_session_id: value.claude.auto_resume_session_id,
+                selected_model_alias: value.claude.selected_model_alias,
+                selected_effort: None,
+            },
         }
     }
 }
@@ -170,13 +209,14 @@ pub enum LoadNotice {
     Missing,
     MigratedV1,
     MigratedV2,
+    MigratedV3,
     Corrupt,
     UnsupportedVersion(u32),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoadOutcome {
-    pub preferences: PreferencesV3,
+    pub preferences: PreferencesV4,
     pub notice: Option<LoadNotice>,
     pub may_overwrite: bool,
     pub needs_save: bool,
@@ -192,11 +232,11 @@ pub enum PersistenceError {
 
 pub trait PreferencesPort {
     fn load(&self) -> Result<LoadOutcome, PersistenceError>;
-    fn save(&self, preferences: &PreferencesV3) -> Result<(), PersistenceError>;
+    fn save(&self, preferences: &PreferencesV4) -> Result<(), PersistenceError>;
 
     fn save_with_commit(
         &self,
-        preferences: &PreferencesV3,
+        preferences: &PreferencesV4,
     ) -> Result<CommitStatus, PersistenceError> {
         self.save(preferences)?;
         Ok(CommitStatus::Verified)

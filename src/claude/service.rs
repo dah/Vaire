@@ -9,10 +9,11 @@ use crate::storage::CommitStatus;
 
 use super::protocol::EVENT_QUEUE_CAPACITY;
 use super::{
-    ClaudeChild, ClaudeCliPolicy, ClaudeError, ClaudeFailureCategory, ClaudeFailureStage,
-    ClaudeInvocation, ClaudeModelAlias, ClaudeModelMetadata, ClaudeProcessError,
-    ClaudeServiceEvent, ClaudeSessionLifecycle, ClaudeSessionStore, ClaudeSessionSummary,
-    ClaudeSessionV1, ClaudeStoreError, ClaudeStreamEvent, ClaudeTurnOutcome, ClaudeTurnRecord,
+    ClaudeChild, ClaudeCliPolicy, ClaudeEffort, ClaudeError, ClaudeFailureCategory,
+    ClaudeFailureStage, ClaudeInvocation, ClaudeModelAlias, ClaudeModelMetadata,
+    ClaudeProcessError, ClaudeServiceEvent, ClaudeSessionLifecycle, ClaudeSessionStore,
+    ClaudeSessionSummary, ClaudeSessionV1, ClaudeStoreError, ClaudeStreamEvent, ClaudeTurnOutcome,
+    ClaudeTurnRecord,
 };
 
 const DEFAULT_TITLE: &str = "New Claude conversation";
@@ -24,6 +25,13 @@ pub struct PreparedClaudeTurn {
     prompt: String,
     recovering_creation_uncertainty: bool,
     preparation_verified: bool,
+}
+
+#[cfg(test)]
+impl PreparedClaudeTurn {
+    pub(crate) fn invocation(&self) -> &ClaudeInvocation {
+        &self.invocation
+    }
 }
 
 struct ActiveTurn {
@@ -95,6 +103,7 @@ impl ClaudeService {
         &mut self,
         session_id: ClaudeSessionId,
         alias: ClaudeModelAlias,
+        effort: Option<ClaudeEffort>,
         text: String,
         now_ms: u64,
     ) -> Result<PreparedClaudeTurn, ClaudeError> {
@@ -119,6 +128,7 @@ impl ClaudeService {
                         ClaudeInvocation::NewSession {
                             session_id: lookup.clone(),
                             model: alias,
+                            effort,
                         },
                         false,
                     )
@@ -128,6 +138,7 @@ impl ClaudeService {
                     ClaudeInvocation::ResumeSession {
                         session_id: lookup.clone(),
                         model: alias,
+                        effort,
                     },
                     false,
                 ),
@@ -135,6 +146,7 @@ impl ClaudeService {
                     ClaudeInvocation::ResumeSession {
                         session_id: lookup.clone(),
                         model: alias,
+                        effort,
                     },
                     true,
                 ),

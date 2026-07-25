@@ -24,7 +24,7 @@ use vaire::openrouter::{
     OpenRouterConversationStore, OpenRouterConversationV2, OpenRouterService, OpenRouterTimeouts,
     OpenRouterTurnOutcome,
 };
-use vaire::persistence::{LoadOutcome, PersistenceError, PreferencesPort, PreferencesV3};
+use vaire::persistence::{LoadOutcome, PersistenceError, PreferencesPort, PreferencesV4};
 use vaire::platform::{BrowserError, BrowserOpener};
 use vaire::provider::ProviderId;
 

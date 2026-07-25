@@ -36,9 +36,9 @@ async fn missing_or_corrupt_cached_catalog_waits_for_exact_live_model_before_aut
         )
         .unwrap();
         let openrouter = OpenRouterService::new(client, credentials, store);
-        let mut preferences = PreferencesV3 {
+        let mut preferences = PreferencesV4 {
             active_provider: ProviderId::OpenRouter,
-            ..PreferencesV3::default()
+            ..PreferencesV4::default()
         };
         preferences.openrouter.selected_model_id = Some("vendor/model".to_owned());
         preferences.openrouter.enabled_model_ids = BTreeSet::from(["vendor/model".to_owned()]);
@@ -101,9 +101,9 @@ async fn refreshed_catalog_without_exact_saved_model_blocks_auto_resume_without_
     )
     .unwrap();
     let openrouter = OpenRouterService::new(client, credentials, store);
-    let mut preferences = PreferencesV3 {
+    let mut preferences = PreferencesV4 {
         active_provider: ProviderId::OpenRouter,
-        ..PreferencesV3::default()
+        ..PreferencesV4::default()
     };
     preferences.openrouter.selected_model_id = Some("vendor/model".to_owned());
     preferences.openrouter.enabled_model_ids =

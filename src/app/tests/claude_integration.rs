@@ -1,6 +1,6 @@
 use super::*;
 use crate::claude::{ClaudeModelMetadata, ClaudeSessionLifecycle, ClaudeTurnRecord};
-use crate::persistence::ClaudePreferencesV3;
+use crate::persistence::ClaudePreferencesV4;
 
 fn session_id(value: &str) -> ClaudeSessionId {
     value.parse().unwrap()
@@ -19,13 +19,13 @@ fn ready_claude_state(alias: ClaudeModelAlias) -> AppState {
             ..ClaudeState::default()
         },
         selected_model: Some(ModelKey::claude(alias.as_str()).unwrap()),
-        preferences: PreferencesV3 {
+        preferences: PreferencesV4 {
             active_provider: ProviderId::Claude,
-            claude: ClaudePreferencesV3 {
+            claude: ClaudePreferencesV4 {
                 selected_model_alias: Some(alias),
-                ..ClaudePreferencesV3::default()
+                ..ClaudePreferencesV4::default()
             },
-            ..PreferencesV3::default()
+            ..PreferencesV4::default()
         },
         ..AppState::default()
     };
@@ -76,11 +76,113 @@ fn saved_session(alias: ClaudeModelAlias) -> ClaudeSessionV1 {
 }
 
 #[test]
+fn claude_effort_survives_provider_switches_startup_and_failure_boundaries() {
+    let mut state = ready_claude_state(ClaudeModelAlias::Sonnet);
+    state.preferences.claude.selected_effort = Some(ClaudeEffort::XHigh);
+    state.preferences.codex.reasoning_effort = Some("high".to_owned());
+    let loaded = state.preferences.clone();
+    state.reduce(Action::Event(DomainEvent::PreferencesLoaded(loaded)));
+    assert_eq!(
+        state.preferences.claude.selected_effort,
+        Some(ClaudeEffort::XHigh)
+    );
+    state.models = vec![model("codex-model", true, &["high"], "high")];
+
+    let switched = state.reduce(Action::Intent(Intent::SelectProviderModel(
+        ModelKey::codex("codex-model").unwrap(),
+    )));
+    assert!(matches!(switched.as_slice(), [Effect::Persist(_)]));
+    assert_eq!(
+        state.preferences.claude.selected_effort,
+        Some(ClaudeEffort::XHigh)
+    );
+    assert_eq!(state.selected_reasoning.as_deref(), Some("high"));
+
+    state.reduce(Action::Intent(Intent::SelectProviderModel(
+        ModelKey::claude("sonnet").unwrap(),
+    )));
+    assert_eq!(
+        state.preferences.claude.selected_effort,
+        Some(ClaudeEffort::XHigh)
+    );
+    assert!(state.selected_reasoning.is_none());
+    assert_eq!(
+        state.preferences.codex.reasoning_effort.as_deref(),
+        Some("high")
+    );
+
+    state.reduce(Action::Event(DomainEvent::ClaudeStartup {
+        availability: ClaudeAvailability::Ready,
+        auth: ClaudeAuthStatus::Subscription,
+    }));
+    assert_eq!(
+        state.preferences.claude.selected_effort,
+        Some(ClaudeEffort::XHigh)
+    );
+
+    let old = session_id("00000000-0000-4000-8000-000000000001");
+    state.popup = conversation_popup(ThreadPickerState {
+        phase: ThreadPickerPhase::Resuming {
+            provider: ProviderId::Claude,
+            id: old.as_str().to_owned(),
+        },
+        threads: Vec::new(),
+        selected: 0,
+        confirmation: None,
+        message: None,
+    });
+    state.reduce(Action::Event(DomainEvent::ClaudeSessionSwitchFailed {
+        session_id: old.clone(),
+        message: "explicit resume failed".to_owned(),
+    }));
+    assert_eq!(
+        state.preferences.claude.selected_effort,
+        Some(ClaudeEffort::XHigh)
+    );
+    state.popup = None;
+    state
+        .preferences
+        .set_auto_resume_claude_session(Some(old.clone()));
+    state.reduce(Action::Event(DomainEvent::ClaudeResumeFailed {
+        session_id: old,
+        message: "resume failed".to_owned(),
+    }));
+    assert_eq!(
+        state.preferences.claude.selected_effort,
+        Some(ClaudeEffort::XHigh)
+    );
+
+    state.claude.conversation = ClaudeConversationState::None;
+    assert_eq!(
+        state.reduce(Action::Intent(Intent::NewThread)),
+        vec![Effect::StartNewClaudeSession]
+    );
+    state.reduce(Action::Event(DomainEvent::ClaudeNewSessionFailed(
+        "new failed".to_owned(),
+    )));
+    assert_eq!(
+        state.preferences.claude.selected_effort,
+        Some(ClaudeEffort::XHigh)
+    );
+
+    state.pending_new_claude_session = true;
+    state.reduce(Action::Event(DomainEvent::ClaudeSessionCreationUncertain {
+        session_id: session_id("00000000-0000-4000-8000-000000000002"),
+        message: "uncertain".to_owned(),
+    }));
+    assert_eq!(
+        state.preferences.claude.selected_effort,
+        Some(ClaudeEffort::XHigh)
+    );
+}
+
+#[test]
 fn changing_claude_alias_is_a_blank_boundary_and_clears_the_pointer() {
     let id = session_id("00000000-0000-4000-8000-000000000001");
     let mut state = ready_claude_state(ClaudeModelAlias::Sonnet);
     state.claude.conversation = ClaudeConversationState::Ready { id: id.clone() };
     state.preferences.set_auto_resume_claude_session(Some(id));
+    state.preferences.claude.selected_effort = Some(ClaudeEffort::High);
     state.transcript.push(TranscriptEntry {
         provider: ProviderId::Claude,
         role: TranscriptRole::Assistant,
@@ -101,6 +203,10 @@ fn changing_claude_alias_is_a_blank_boundary_and_clears_the_pointer() {
         state.preferences.claude.selected_model_alias,
         Some(ClaudeModelAlias::Opus)
     );
+    assert_eq!(
+        state.preferences.claude.selected_effort,
+        Some(ClaudeEffort::High)
+    );
     assert!(matches!(effects.as_slice(), [Effect::Persist(_)]));
 }
 
@@ -109,6 +215,7 @@ fn resume_restores_saved_alias_and_failed_partial_display_history() {
     let session = saved_session(ClaudeModelAlias::Haiku);
     let session_id = session.session_id.clone();
     let mut state = ready_claude_state(ClaudeModelAlias::Opus);
+    state.preferences.claude.selected_effort = Some(ClaudeEffort::Max);
     state.popup = conversation_popup(ThreadPickerState {
         phase: ThreadPickerPhase::Resuming {
             provider: ProviderId::Claude,
@@ -133,6 +240,10 @@ fn resume_restores_saved_alias_and_failed_partial_display_history() {
         state.preferences.claude.selected_model_alias,
         Some(ClaudeModelAlias::Haiku)
     );
+    assert_eq!(
+        state.preferences.claude.selected_effort,
+        Some(ClaudeEffort::Max)
+    );
     assert_eq!(state.transcript.len(), 5);
     assert_eq!(
         state.transcript[3].status,
@@ -150,11 +261,13 @@ fn resume_restores_saved_alias_and_failed_partial_display_history() {
 fn lazy_session_registration_preserves_pending_user_and_starting_state() {
     let id = session_id("00000000-0000-4000-8000-000000000001");
     let mut state = ready_claude_state(ClaudeModelAlias::Sonnet);
+    state.preferences.claude.selected_effort = Some(ClaudeEffort::XHigh);
 
     let send = state.reduce(Action::Intent(Intent::SendMessage("hello".to_owned())));
     assert!(matches!(
         send.as_slice(),
-        [Effect::SendClaudeMessage { text }] if text == "hello"
+        [Effect::SendClaudeMessage { text, effort: Some(ClaudeEffort::XHigh) }]
+            if text == "hello"
     ));
     assert_eq!(state.turn, TurnState::Starting);
     assert_eq!(state.transcript.len(), 1);
@@ -620,7 +733,7 @@ fn automatic_uncertain_restore_stays_blocked_and_failed_explicit_recovery_rebloc
     let send = explicit.reduce(Action::Intent(Intent::SendMessage("retry".to_owned())));
     assert!(matches!(
         send.as_slice(),
-        [Effect::SendClaudeMessage { text }] if text == "retry"
+        [Effect::SendClaudeMessage { text, effort: None }] if text == "retry"
     ));
     let recovery_turn = turn_id("00000000-0000-4000-8000-000000000099");
     explicit.reduce(Action::Event(DomainEvent::ClaudeTurnStarted {

@@ -2,7 +2,7 @@
 name: "rp-orchestrate-cli"
 description: "Plan, decompose, and delegate complex tasks across multiple agents using rpce-cli"
 repoprompt_managed: true
-repoprompt_skills_version: 61
+repoprompt_skills_version: 62
 repoprompt_variant: cli
 ---
 

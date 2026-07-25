@@ -1102,6 +1102,7 @@ mod process_boundary_tests {
         ClaudeInvocation::NewSession {
             session_id: session(),
             model: super::super::ClaudeModelAlias::Sonnet,
+            effort: None,
         }
     }
 

@@ -4,7 +4,7 @@ use crate::app::{
     ClaudeConversationState,
 };
 use crate::claude::{ClaudeAuthStatus, ClaudeModelMetadata};
-use crate::provider::{ModelKey, ProviderId};
+use crate::provider::{ClaudeEffort, ModelKey, ProviderId};
 
 fn claude_ready() -> AppState {
     let mut state = ready();
@@ -104,8 +104,14 @@ fn claude_header_empty_states_reasoning_and_models_are_provider_specific() {
     let rendered_header = header(&state, 120);
     assert!(rendered_header.contains("Claude"));
     assert!(rendered_header.contains("sonnet → claude-sonnet-resolved unsafe"));
-    assert!(rendered_header.contains("reasoning n/a"));
+    assert!(rendered_header.contains("effort default"));
     assert!(rendered_header.ends_with("Context --"));
+
+    state.preferences.claude.selected_effort = Some(ClaudeEffort::XHigh);
+    state.claude.resolved_model = None;
+    let narrow_header = header(&state, 76);
+    assert!(narrow_header.contains("effort xhigh"));
+    assert!(narrow_header.ends_with("Context --"));
 
     state.claude.auth = ClaudeAuthStatus::SignedOut;
     let signed_out = screen(&state, &UiState::default(), 90, 20);

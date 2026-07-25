@@ -13,8 +13,8 @@ use vaire::codex::transport::{AppServerTransport, ProcessSpec};
 use vaire::platform::validate_login_url;
 
 #[tokio::test]
-#[ignore = "requires an installed Claude Code CLI; checks version and auth help only, never login state"]
-async fn installed_claude_cli_exposes_supported_subscription_auth_commands() {
+#[ignore = "requires an installed Claude Code CLI; checks only --version and top-level --help"]
+async fn installed_claude_cli_exposes_supported_effort_values() {
     let executable = std::env::var_os("VAIRE_CLAUDE_BIN")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("claude"));
@@ -27,36 +27,37 @@ async fn installed_claude_cli_exposes_supported_subscription_auth_commands() {
         .await
         .unwrap();
 
-    for (args, expected) in [
-        (["auth", "login", "--help"], "--claudeai"),
-        (["auth", "logout", "--help"], "Log out"),
-    ] {
-        let mut command = tokio::process::Command::new(&executable);
-        for (name, _) in std::env::vars_os() {
-            let name_text = name.to_string_lossy();
-            if name_text.starts_with("ANTHROPIC_") || name_text.starts_with("CLAUDE") {
-                command.env_remove(name);
-            }
+    let mut command = tokio::process::Command::new(&executable);
+    for (name, _) in std::env::vars_os() {
+        let name_text = name.to_string_lossy();
+        if name_text.starts_with("ANTHROPIC_") || name_text.starts_with("CLAUDE") {
+            command.env_remove(name);
         }
-        let output = tokio::time::timeout(
-            Duration::from_secs(10),
-            command
-                .args(args)
-                .current_dir(temp.path())
-                .env("CLAUDE_CONFIG_DIR", &config_dir)
-                .env("NO_COLOR", "1")
-                .output(),
-        )
-        .await
-        .expect("Claude help command timed out")
-        .expect("Claude help command could not start");
-        assert!(output.status.success());
-        let help = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(help.contains(expected));
+    }
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        command
+            .arg("--help")
+            .current_dir(temp.path())
+            .env("CLAUDE_CONFIG_DIR", &config_dir)
+            .env("NO_COLOR", "1")
+            .output(),
+    )
+    .await
+    .expect("Claude top-level help command timed out")
+    .expect("Claude top-level help command could not start");
+    assert!(output.status.success());
+    let help = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(help.contains("--effort"));
+    let tokens = help
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .collect::<Vec<_>>();
+    for effort in ["low", "medium", "high", "xhigh", "max"] {
+        assert!(tokens.contains(&effort), "top-level help omitted {effort}");
     }
 }
 

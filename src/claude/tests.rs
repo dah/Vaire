@@ -122,6 +122,7 @@ fn fixed_aliases_and_argv_keep_prompt_and_authentication_out_of_arguments() {
         &ClaudeInvocation::NewSession {
             session_id: id,
             model: ClaudeModelAlias::Fable,
+            effort: Some(ClaudeEffort::XHigh),
         },
     );
     assert!(user.contains(&"--safe-mode".to_owned()));
@@ -129,6 +130,13 @@ fn fixed_aliases_and_argv_keep_prompt_and_authentication_out_of_arguments() {
     assert!(user.contains(&"--verbose".to_owned()));
     assert!(user.contains(&"--dangerously-skip-permissions".to_owned()));
     assert!(user.windows(2).any(|pair| pair == ["--model", "fable"]));
+    assert_eq!(
+        user.windows(2)
+            .filter(|pair| pair == &["--effort", "xhigh"])
+            .count(),
+        1
+    );
+    assert!(!user.contains(&"x_high".to_owned()));
     assert_eq!(
         user.iter()
             .filter(|argument| argument.as_str() == "--strict-mcp-config")
@@ -150,6 +158,154 @@ fn fixed_aliases_and_argv_keep_prompt_and_authentication_out_of_arguments() {
         CLAUDE_MODEL_ALIASES.map(claude_model_selector),
         ["default", "fable", "opus", "sonnet", "haiku"]
     );
+}
+
+#[test]
+fn effort_argv_is_exact_for_new_resume_and_provider_default() {
+    let root = TempDir::new().unwrap();
+    let policy = policy("/bin/false", root.path());
+    let id = session_id("00000000-0000-4000-8000-000000000031");
+    let cases = [
+        (
+            ClaudeInvocation::NewSession {
+                session_id: id.clone(),
+                model: ClaudeModelAlias::Sonnet,
+                effort: Some(ClaudeEffort::XHigh),
+            },
+            Some("xhigh"),
+            "--session-id",
+        ),
+        (
+            ClaudeInvocation::ResumeSession {
+                session_id: id.clone(),
+                model: ClaudeModelAlias::Opus,
+                effort: Some(ClaudeEffort::Max),
+            },
+            Some("max"),
+            "--resume",
+        ),
+        (
+            ClaudeInvocation::NewSession {
+                session_id: id.clone(),
+                model: ClaudeModelAlias::Default,
+                effort: None,
+            },
+            None,
+            "--session-id",
+        ),
+        (
+            ClaudeInvocation::ResumeSession {
+                session_id: id,
+                model: ClaudeModelAlias::Haiku,
+                effort: None,
+            },
+            None,
+            "--resume",
+        ),
+    ];
+
+    for (invocation, expected_effort, session_flag) in cases {
+        let args = argv_strings(&policy, &invocation);
+        assert_eq!(
+            args.iter()
+                .filter(|argument| argument.as_str() == session_flag)
+                .count(),
+            1
+        );
+        assert_eq!(
+            args.iter()
+                .filter(|argument| argument.as_str() == "--effort")
+                .count(),
+            usize::from(expected_effort.is_some())
+        );
+        if let Some(expected_effort) = expected_effort {
+            assert_eq!(
+                args.windows(2)
+                    .filter(|pair| pair == &["--effort", expected_effort])
+                    .count(),
+                1
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn service_preparation_carries_effort_through_fresh_established_and_uncertain_paths() {
+    let root = TempDir::new().unwrap();
+    let store: Arc<dyn ClaudeSessionStore> =
+        Arc::new(FileClaudeSessionStore::new(root.path().join("store")).unwrap());
+    let fresh_id = session_id("00000000-0000-4000-8000-000000000032");
+    let established_id = session_id("00000000-0000-4000-8000-000000000033");
+    let uncertain_id = session_id("00000000-0000-4000-8000-000000000034");
+    let mut established = ClaudeSessionV1::new(
+        established_id.clone(),
+        ClaudeModelAlias::Opus,
+        1,
+        "established",
+    );
+    established.lifecycle = ClaudeSessionLifecycle::Established;
+    let mut uncertain = ClaudeSessionV1::new(
+        uncertain_id.clone(),
+        ClaudeModelAlias::Haiku,
+        1,
+        "uncertain",
+    );
+    uncertain.lifecycle = ClaudeSessionLifecycle::CreationUncertain;
+    for session in [
+        ClaudeSessionV1::new(fresh_id.clone(), ClaudeModelAlias::Sonnet, 1, "fresh"),
+        established,
+        uncertain,
+    ] {
+        store.save_session(&session).unwrap();
+    }
+    let mut service = ClaudeService::new(policy("/bin/false", root.path()), Arc::clone(&store));
+    let cases = [
+        (
+            fresh_id.clone(),
+            ClaudeModelAlias::Sonnet,
+            Some(ClaudeEffort::Low),
+            ClaudeInvocation::NewSession {
+                session_id: fresh_id,
+                model: ClaudeModelAlias::Sonnet,
+                effort: Some(ClaudeEffort::Low),
+            },
+            false,
+        ),
+        (
+            established_id.clone(),
+            ClaudeModelAlias::Opus,
+            Some(ClaudeEffort::XHigh),
+            ClaudeInvocation::ResumeSession {
+                session_id: established_id,
+                model: ClaudeModelAlias::Opus,
+                effort: Some(ClaudeEffort::XHigh),
+            },
+            false,
+        ),
+        (
+            uncertain_id.clone(),
+            ClaudeModelAlias::Haiku,
+            Some(ClaudeEffort::Max),
+            ClaudeInvocation::ResumeSession {
+                session_id: uncertain_id,
+                model: ClaudeModelAlias::Haiku,
+                effort: Some(ClaudeEffort::Max),
+            },
+            true,
+        ),
+    ];
+
+    for (id, alias, effort, expected, expected_uncertain) in cases {
+        let prepared = service
+            .prepare_turn(id, alias, effort, "prompt".to_owned(), 2)
+            .await
+            .unwrap();
+        assert_eq!(prepared.invocation(), &expected);
+        assert_eq!(
+            service.abandon_prepared_turn(prepared, 3).await.unwrap(),
+            expected_uncertain
+        );
+    }
 }
 
 #[tokio::test]
@@ -692,7 +848,30 @@ async fn fake_process_streams_and_reaps_with_sanitized_inherited_environment() {
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\nread prompt\n[ -z \"$ANTHROPIC_TEST_SHOULD_SCRUB\" ] || exit 8\n[ \"$UNRELATED_SECRET\" = \"must-inherit\" ] || exit 9\n[ -z \"$ANTHROPIC_BASE_URL\" ] || exit 10\n[ -z \"$CLAUDE_TEST_SHOULD_SCRUB\" ] || exit 11\ncase \"$CLAUDE_CONFIG_DIR\" in */home) ;; *) exit 12 ;; esac\nprintf '%s\\n' '{init}' '{delta}' '{result}'\n"
+            r#"#!/bin/sh
+effort_count=0
+effort_value=
+while [ "$#" -gt 0 ]; do
+  [ "$1" != "hello" ] || exit 13
+  if [ "$1" = "--effort" ]; then
+    effort_count=$((effort_count + 1))
+    shift
+    [ "$#" -gt 0 ] || exit 14
+    effort_value=$1
+  fi
+  shift
+done
+[ "$effort_count" -eq 1 ] || exit 15
+[ "$effort_value" = "high" ] || exit 16
+IFS= read -r prompt
+[ "$prompt" = "hello" ] || exit 17
+[ -z "$ANTHROPIC_TEST_SHOULD_SCRUB" ] || exit 8
+[ "$UNRELATED_SECRET" = "must-inherit" ] || exit 9
+[ -z "$ANTHROPIC_BASE_URL" ] || exit 10
+[ -z "$CLAUDE_TEST_SHOULD_SCRUB" ] || exit 11
+case "$CLAUDE_CONFIG_DIR" in */home) ;; *) exit 12 ;; esac
+printf '%s\n' '{init}' '{delta}' '{result}'
+"#
         ),
     )
     .unwrap();
@@ -705,6 +884,7 @@ async fn fake_process_streams_and_reaps_with_sanitized_inherited_environment() {
     let invocation = ClaudeInvocation::NewSession {
         session_id: id.clone(),
         model: ClaudeModelAlias::Haiku,
+        effort: Some(ClaudeEffort::High),
     };
     let cancellation = tokio_util::sync::CancellationToken::new();
     let mut child = ClaudeChild::spawn(&policy, &invocation, id, "hello", &cancellation)
@@ -781,7 +961,13 @@ async fn service_completes_and_persists_only_successful_assistant_text() {
         .unwrap();
     let mut service = ClaudeService::new(policy(&script, root.path()), Arc::clone(&store));
     let prepared = service
-        .prepare_turn(id.clone(), ClaudeModelAlias::Sonnet, "hello".to_owned(), 2)
+        .prepare_turn(
+            id.clone(),
+            ClaudeModelAlias::Sonnet,
+            None,
+            "hello".to_owned(),
+            2,
+        )
         .await
         .unwrap();
     service.launch_prepared_turn(prepared, 3).await.unwrap();
@@ -825,7 +1011,13 @@ async fn service_correlates_spawn_failure_and_restores_fresh_lifecycle() {
         Arc::clone(&store),
     );
     let prepared = service
-        .prepare_turn(id.clone(), ClaudeModelAlias::Sonnet, "hello".to_owned(), 2)
+        .prepare_turn(
+            id.clone(),
+            ClaudeModelAlias::Sonnet,
+            None,
+            "hello".to_owned(),
+            2,
+        )
         .await
         .unwrap();
     service.launch_prepared_turn(prepared, 3).await.unwrap();
@@ -891,7 +1083,13 @@ async fn shutdown_drains_a_saturated_event_queue_before_awaiting_the_turn() {
         .unwrap();
     let mut service = ClaudeService::new(policy(&script, root.path()), Arc::clone(&store));
     let prepared = service
-        .prepare_turn(id.clone(), ClaudeModelAlias::Sonnet, "hello".to_owned(), 2)
+        .prepare_turn(
+            id.clone(),
+            ClaudeModelAlias::Sonnet,
+            None,
+            "hello".to_owned(),
+            2,
+        )
         .await
         .unwrap();
     service.launch_prepared_turn(prepared, 3).await.unwrap();
@@ -954,7 +1152,13 @@ async fn final_store_failure_never_emits_a_completed_authoritative_answer() {
         .unwrap();
     let mut service = ClaudeService::new(policy(&script, root.path()), Arc::clone(&store));
     let prepared = service
-        .prepare_turn(id.clone(), ClaudeModelAlias::Sonnet, "hello".to_owned(), 2)
+        .prepare_turn(
+            id.clone(),
+            ClaudeModelAlias::Sonnet,
+            None,
+            "hello".to_owned(),
+            2,
+        )
         .await
         .unwrap();
     service.launch_prepared_turn(prepared, 3).await.unwrap();
@@ -1037,7 +1241,13 @@ async fn interrupt_cancels_the_final_wait_after_terminal_stdout_closes() {
         .unwrap();
     let mut service = ClaudeService::new(policy(&script, root.path()), Arc::clone(&store));
     let prepared = service
-        .prepare_turn(id.clone(), ClaudeModelAlias::Sonnet, "hello".to_owned(), 2)
+        .prepare_turn(
+            id.clone(),
+            ClaudeModelAlias::Sonnet,
+            None,
+            "hello".to_owned(),
+            2,
+        )
         .await
         .unwrap();
     service.launch_prepared_turn(prepared, 3).await.unwrap();
@@ -1093,7 +1303,13 @@ async fn unverified_session_and_prepared_turn_commits_never_reach_process_launch
     ));
     service = ClaudeService::new(policy("/bin/false", root.path()), seeded.clone());
     assert!(service
-        .prepare_turn(id.clone(), ClaudeModelAlias::Sonnet, "hello".to_owned(), 2)
+        .prepare_turn(
+            id.clone(),
+            ClaudeModelAlias::Sonnet,
+            None,
+            "hello".to_owned(),
+            2,
+        )
         .await
         .is_err());
     let stored = seeded.load_session_for_update(&id).unwrap();
@@ -1117,6 +1333,7 @@ async fn unverified_session_and_prepared_turn_commits_never_reach_process_launch
         .prepare_turn(
             uncertain_id.clone(),
             ClaudeModelAlias::Sonnet,
+            None,
             "retry".to_owned(),
             4,
         )
@@ -1170,6 +1387,7 @@ async fn uncertain_resume_abandonment_and_preinit_failure_stay_uncertain() {
         .prepare_turn(
             id.clone(),
             ClaudeModelAlias::Sonnet,
+            None,
             "abandon".to_owned(),
             2,
         )
@@ -1181,7 +1399,13 @@ async fn uncertain_resume_abandonment_and_preinit_failure_stay_uncertain() {
     assert_eq!(stored.turns[0].outcome, ClaudeTurnOutcome::Interrupted);
 
     let prepared = service
-        .prepare_turn(id.clone(), ClaudeModelAlias::Sonnet, "retry".to_owned(), 4)
+        .prepare_turn(
+            id.clone(),
+            ClaudeModelAlias::Sonnet,
+            None,
+            "retry".to_owned(),
+            4,
+        )
         .await
         .unwrap();
     service.launch_prepared_turn(prepared, 5).await.unwrap();
@@ -1225,7 +1449,13 @@ async fn uncertain_resume_spawn_failure_is_correlated_and_reblocks() {
     );
 
     let prepared = service
-        .prepare_turn(id.clone(), ClaudeModelAlias::Sonnet, "retry".to_owned(), 2)
+        .prepare_turn(
+            id.clone(),
+            ClaudeModelAlias::Sonnet,
+            None,
+            "retry".to_owned(),
+            2,
+        )
         .await
         .unwrap();
     service.launch_prepared_turn(prepared, 3).await.unwrap();
@@ -1272,6 +1502,7 @@ async fn post_spawn_stdin_cancellation_marks_new_session_creation_uncertain() {
         .prepare_turn(
             id.clone(),
             ClaudeModelAlias::Sonnet,
+            None,
             "x".repeat(128 * 1024),
             2,
         )

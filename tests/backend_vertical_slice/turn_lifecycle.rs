@@ -27,7 +27,7 @@ IFS= read -r hold
     );
     let mut backend = BackendCoordinator::new(
         session(temp.path(), &body).await,
-        MemoryPreferences::new(PreferencesV3::default()),
+        MemoryPreferences::new(PreferencesV4::default()),
         RecordingBrowser::default(),
     );
     backend.startup().await.unwrap();
@@ -97,7 +97,7 @@ IFS= read -r hold
     let session = SessionService::new(transport, paths, FullAccessPolicy);
     let mut backend = BackendCoordinator::new(
         session,
-        MemoryPreferences::new(PreferencesV3::default()),
+        MemoryPreferences::new(PreferencesV4::default()),
         RecordingBrowser::default(),
     );
     backend.startup().await.unwrap();
@@ -150,7 +150,7 @@ IFS= read -r hold
     );
     let mut backend = BackendCoordinator::new(
         session(temp.path(), &body).await,
-        MemoryPreferences::new(PreferencesV3::default()),
+        MemoryPreferences::new(PreferencesV4::default()),
         RecordingBrowser::default(),
     );
     backend.startup().await.unwrap();

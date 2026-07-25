@@ -9,8 +9,8 @@ use crate::app::{
     ThreadState, TurnOutcome,
 };
 use crate::claude::{
-    ClaudeAuthStatus, ClaudeCliPolicy, ClaudeError, ClaudeFailureCategory, ClaudeFailureStage,
-    ClaudeService, ClaudeServiceEvent,
+    ClaudeAuthStatus, ClaudeCliPolicy, ClaudeEffort, ClaudeError, ClaudeFailureCategory,
+    ClaudeFailureStage, ClaudeService, ClaudeServiceEvent,
 };
 use crate::codex::protocol::CancelLoginAccountStatus;
 use crate::codex::protocol::{ProtocolEvent, TurnStatus};

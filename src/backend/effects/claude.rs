@@ -247,7 +247,11 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
         }
     }
 
-    pub(super) async fn send_claude_message_effect(&mut self, text: String) -> Vec<Effect> {
+    pub(super) async fn send_claude_message_effect(
+        &mut self,
+        text: String,
+        effort: Option<ClaudeEffort>,
+    ) -> Vec<Effect> {
         let auth = match &self.claude {
             Some(runtime) => inspect_runtime_auth(runtime).await,
             None => Err(claude_error(
@@ -351,7 +355,7 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
                             .collect::<Vec<_>>();
                         // The UUID registration and pointer are verified before the child can
                         // be prepared or launched.
-                        effects.push(Effect::SendClaudeMessage { text });
+                        effects.push(Effect::SendClaudeMessage { text, effort });
                         effects
                     }
                     Err(_) => self
@@ -385,7 +389,7 @@ impl<P: PreferencesPort, B: BrowserOpener> BackendCoordinator<P, B> {
         };
         let prepared = match runtime
             .service
-            .prepare_turn(session_id, alias, text, now_ms())
+            .prepare_turn(session_id, alias, effort, text, now_ms())
             .await
         {
             Ok(prepared) => prepared,

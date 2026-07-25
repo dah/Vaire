@@ -3,8 +3,9 @@ use crate::text::is_terminal_unsafe;
 
 use super::domain::{
     AccountScope, CodexPreferencesV2, LoadNotice, LoadOutcome, OpenRouterPreferencesV2,
-    PreferencesV1, PreferencesV2, PreferencesV3, LEGACY_PREFERENCES_VERSION,
+    PreferencesV1, PreferencesV2, PreferencesV3, PreferencesV4, LEGACY_PREFERENCES_VERSION,
     MAX_PREFERENCE_STRING_BYTES, PREFERENCES_VERSION, V2_PREFERENCES_VERSION,
+    V3_PREFERENCES_VERSION,
 };
 
 fn valid_preference_string(value: &str) -> bool {
@@ -96,7 +97,31 @@ pub(super) fn valid_v2(preferences: &PreferencesV2) -> bool {
     }
 }
 
-pub(super) fn valid_preferences(preferences: &PreferencesV3) -> bool {
+pub(super) fn valid_v3(preferences: &PreferencesV3) -> bool {
+    if preferences.version != V3_PREFERENCES_VERSION
+        || !valid_codex(&preferences.codex)
+        || !valid_openrouter(&preferences.openrouter)
+    {
+        return false;
+    }
+
+    match preferences.active_provider {
+        ProviderId::Codex => {
+            preferences.openrouter.auto_resume_conversation_id.is_none()
+                && preferences.claude.auto_resume_session_id.is_none()
+        }
+        ProviderId::OpenRouter => {
+            preferences.codex.auto_resume_thread_id.is_none()
+                && preferences.claude.auto_resume_session_id.is_none()
+        }
+        ProviderId::Claude => {
+            preferences.codex.auto_resume_thread_id.is_none()
+                && preferences.openrouter.auto_resume_conversation_id.is_none()
+        }
+    }
+}
+
+pub(super) fn valid_preferences(preferences: &PreferencesV4) -> bool {
     if preferences.version != PREFERENCES_VERSION
         || !valid_codex(&preferences.codex)
         || !valid_openrouter(&preferences.openrouter)
@@ -122,7 +147,7 @@ pub(super) fn valid_preferences(preferences: &PreferencesV3) -> bool {
 
 pub(super) fn corrupt_load_outcome() -> LoadOutcome {
     LoadOutcome {
-        preferences: PreferencesV3::default(),
+        preferences: PreferencesV4::default(),
         notice: Some(LoadNotice::Corrupt),
         may_overwrite: false,
         needs_save: false,

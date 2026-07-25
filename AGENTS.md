@@ -21,7 +21,7 @@ The following behavior is implemented and is a regression contract unless an exp
 - Do not add Windows support, Windows-specific code, or Windows CI.
 - Treat the Codex and Claude Code CLIs as installed runtime dependencies.
 - Require `codex-cli` 0.144.6 or newer and communicate with one long-lived `codex app-server` process over stdio.
-- Require Claude Code 2.1.178 or newer and use one directly spawned non-interactive stream-json child per Claude turn.
+- Require Claude Code 2.1.218 or newer and use one directly spawned non-interactive stream-json child per Claude turn.
 - Use the supported Codex ChatGPT sign-in flow so usage follows the user's ChatGPT subscription. Codex API-key authentication is not supported.
 - Use Claude Code's native `auth login --claudeai`, `auth status --json`, and `auth logout` flows so Claude usage follows the user's Claude.ai subscription. Claude Code owns browser login, token refresh, and macOS Keychain storage; Vairë must never receive, read, copy, persist, migrate, or delete those tokens.
 - Revalidate Claude native subscription auth immediately before every turn. A signed-out, unsupported, or unverifiable status blocks the turn.
@@ -90,7 +90,7 @@ Retain the plaintext-risk disclosure and Keychain-migration debt in future docum
 
 The milestone documented in `docs/plans/claude-code-provider-2026-07-24.md` is complete and part of the shipped regression baseline. Its durable contracts are:
 
-- use only the installed supported Claude Code CLI, version 2.1.178 or newer, with direct no-shell process spawning and bounded stream-json parsing;
+- use only the installed supported Claude Code CLI with direct no-shell process spawning and bounded stream-json parsing; this milestone originally established version 2.1.178, while the later reasoning-effort milestone below supersedes the current minimum with 2.1.218;
 - authenticate only through Claude Code's native Claude.ai subscription login/status/logout commands, never a Vairë-entered key or an inherited ambient Anthropic/Claude override;
 - leave OAuth tokens, refresh, browser login, and macOS Keychain storage entirely to Claude Code; never receive, inspect, copy, persist, migrate, or delete a Claude secret;
 - revalidate supported native subscription status before every Claude turn and fail closed when it is signed out, unsupported, or unverifiable;
@@ -100,10 +100,24 @@ The milestone documented in `docs/plans/claude-code-provider-2026-07-24.md` is c
 - run each turn from the persistent non-project conversation cwd with a dedicated owner-only Claude home, safe mode, disabled customizations/plugins/MCP/hooks/skills/Chrome/web tools/subagents, and the documented dangerous permission bypass;
 - treat this as unrestricted same-user execution rather than a sandbox or automatic approval, including the possibility that full-access commands reach Claude Code's Keychain-backed login or other credentials;
 - use explicit canonical UUIDs for new/resumed sessions, retain only Vairë-owned bounded display history, and never parse, enumerate, mutate, or delete Claude private transcript/session files;
-- expose only documented Claude aliases until authoritative stream metadata resolves the active model, start blank on every Claude alias change, and leave Claude reasoning effort/panel collection unsupported;
+- expose only documented Claude aliases until authoritative stream metadata resolves the active model and start blank on every Claude alias change; this milestone historically left Claude reasoning effort and panel collection unsupported, and the later reasoning-effort milestone below supersedes only the effort-selection part;
 - make Claude picker deletion registration/display-history removal only, with explicit confirmation wording and active-session protection;
 - preserve saved UUID and display history on resume failure, never silently create a replacement, and keep Codex/OpenRouter independently usable when Claude is absent or broken; and
 - keep normal tests offline with fake auth-status output, fake CLI children, temporary configuration directories, bounded malformed-stream fixtures, and explicit ignored installed-CLI smoke checks; never inspect Keychain or real Claude credentials.
+
+## Completed milestone: Claude reasoning effort
+
+The milestone documented in `docs/plans/claude-reasoning-effort-2026-07-24.md` is complete and supersedes the earlier Claude provider and CLI-compatibility plans only where they said Claude effort selection was unsupported. Its durable contracts are:
+
+- require Claude Code 2.1.218 or newer for the statically supported `--effort` contract;
+- keep one provider-wide optional typed effort with exactly `low`, `medium`, `high`, `xhigh`, and `max`; provider default is represented only by absence of the flag;
+- snapshot the selected effort when `Intent::SendMessage` creates `Effect::SendClaudeMessage`, then preserve that owned value through auth revalidation, lazy UUID creation, verified pointer commit, recursive requeue, service preparation, and launch without rereading preferences after an await;
+- append exactly one `--effort <value>` pair to every configured fresh or resumed Claude invocation and append neither item for provider default, while preserving direct spawn, prompt-on-stdin, empty strict MCP configuration, permission/tool flags, environment scrubbing, and all bounds;
+- preserve active/new/resumed/creation-uncertain session semantics when effort changes, keep `ClaudeSessionV1` and turn records unchanged, and never claim historical effort ownership;
+- display Vairë's current requested effort, not a verified effective effort; Claude Code may apply a model default or clamp an unsupported request;
+- let Claude `/reasoning` report or select `default`, `low`, `medium`, `high`, `xhigh`, or `max`, confirm that a successful selection applies to the next turn, and avoid persistence when the selection is already current;
+- keep `/thinking` separate: Claude reasoning output is still not collected, exposed, or inferred; and
+- keep normal tests offline and limit the ignored installed-CLI smoke to `--version` plus top-level `--help`, never auth/config/private sessions or a real turn.
 
 ## Completed milestone: richer interactive runtime
 
@@ -148,7 +162,7 @@ Normal text entered in the composer starts a turn in the active thread. Slash co
 - `/login browser` and `/login device` — direct Codex ChatGPT sign-in shortcuts.
 - `/logout` — open the provider popup and settle active work before signing out the selected provider. Claude logout invokes the native CLI and affects the installed Claude Code login outside Vairë too.
 - `/model` — open the searchable, scrollable, provider-labelled model picker. Cross-provider selection immediately starts blank; use `/resume` for history.
-- `/reasoning` — inspect or select a Codex reasoning level; OpenRouter and Claude reasoning effort are unsupported.
+- `/reasoning` — inspect or select a Codex reasoning level or Claude requested effort (`default`, `low`, `medium`, `high`, `xhigh`, `max`); OpenRouter reasoning is unsupported. Claude changes preserve the session and apply to the next turn.
 - `/new` — eagerly create and activate a fresh conversation for the active provider without deleting prior history.
 - `/resume` — open the unified provider-labelled Codex/OpenRouter/Claude conversation picker; this is the only explicit cross-provider history restoration path.
 - `/thinking` — toggle the right-side Reasoning panel of reasoning summaries or reasoning text emitted by app-server. Distinct from `/reasoning`, which selects the reasoning effort level.
@@ -165,7 +179,7 @@ The current key contract is:
 - `Escape` closes local help or errors, cancels a picker action, or interrupts the active turn.
 - `Ctrl-C` shuts down cleanly.
 
-The cyan header identifies the active provider and its provider-specific auth/conversation/model/reasoning state, plus right-aligned `Context N%`; it shows `Context --` when usable context-window data is unavailable. While a turn is active but no nonempty assistant text has arrived, a display-only animated squiggle appears in the conversation pane and disappears on the first text or terminal turn state. The Reasoning panel shows only emitted Codex reasoning; OpenRouter and Claude reasoning fields are not collected. Nonempty OpenRouter or Claude assistant text retained from a failed stream is restored through startup and `/resume` with explicit `FailedIncomplete` domain metadata and the visible label `Agent (incomplete; turn failed):`; it is display-only and never model context.
+The cyan header identifies the active provider and its provider-specific auth/conversation/model/reasoning state, including Claude's requested effort rather than any unverified effective/clamped effort, plus right-aligned `Context N%`; it shows `Context --` when usable context-window data is unavailable. While a turn is active but no nonempty assistant text has arrived, a display-only animated squiggle appears in the conversation pane and disappears on the first text or terminal turn state. The Reasoning panel shows only emitted Codex reasoning; OpenRouter and Claude reasoning fields are not collected. Nonempty OpenRouter or Claude assistant text retained from a failed stream is restored through startup and `/resume` with explicit `FailedIncomplete` domain metadata and the visible label `Agent (incomplete; turn failed):`; it is display-only and never model context.
 
 Do not silently create a replacement conversation when resume fails. Preserve the saved ID and history, enter an explicit blocking resume-failed state, and let the user choose `/resume` or `/new`. Codex account scope remains the normalized ChatGPT email; if app-server does not expose it, do not auto-resume or manually resume a saved Codex thread. The supported Claude auth status has no stable account identifier, so never auto-resume a saved Claude session at startup or after authentication; require explicit `/resume` or `/new`, and revalidate subscription auth before every turn. OpenRouter histories and Vairë-owned Claude registrations/display histories are validated local owner-only files. Claude registrations are same-user local records rather than provider-account-scoped records, and Claude-owned session files remain opaque. On a first run with no saved conversation, create the single working conversation when it is first needed.
 

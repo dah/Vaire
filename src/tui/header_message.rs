@@ -204,13 +204,18 @@ fn claude_status_text(state: &AppState) -> String {
         TurnState::Streaming { .. } => "stale Codex turn",
         TurnState::OpenRouterStreaming { .. } => "stale OpenRouter turn",
     };
+    let effort = state
+        .preferences
+        .claude
+        .selected_effort
+        .map_or("default", crate::provider::ClaudeEffort::as_str);
     let shutdown = if state.shutting_down {
         " • shutting down"
     } else {
         ""
     };
     sanitize_header_text(&format!(
-        " Claude Code • {provider_status} • {session} • {model}/reasoning n/a • {turn}{shutdown}"
+        " Claude Code • {provider_status} • {session} • {model}/effort {effort} • {turn}{shutdown}"
     ))
 }
 

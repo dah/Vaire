@@ -314,7 +314,7 @@ esac
         let root = tempfile::tempdir().unwrap();
         let executable = root.path().join("claude-outdated");
         let marker = root.path().join("outdated-login");
-        write_fake_claude(&executable, "2.1.177", &marker);
+        write_fake_claude(&executable, "2.1.217", &marker);
         let runtime = RuntimeHandle::spawn(config(root.path(), &executable));
 
         let result = runtime

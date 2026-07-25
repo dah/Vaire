@@ -12,12 +12,12 @@ use tokio::process::Command;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
-pub use crate::provider::ClaudeModelAlias;
 use crate::provider::ClaudeSessionId;
+pub use crate::provider::{ClaudeEffort, ClaudeModelAlias};
 
 use super::ClaudeCliAuthState;
 
-pub const TESTED_CLAUDE_VERSION: &str = "2.1.178";
+pub const TESTED_CLAUDE_VERSION: &str = "2.1.218";
 const MAX_VERSION_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_AUTH_STATUS_OUTPUT_BYTES: usize = 64 * 1024;
 pub(super) const SUBSCRIPTION_SETTINGS: &str = r#"{"forceLoginMethod":"claudeai"}"#;
@@ -40,10 +40,12 @@ pub enum ClaudeInvocation {
     NewSession {
         session_id: ClaudeSessionId,
         model: ClaudeModelAlias,
+        effort: Option<ClaudeEffort>,
     },
     ResumeSession {
         session_id: ClaudeSessionId,
         model: ClaudeModelAlias,
+        effort: Option<ClaudeEffort>,
     },
 }
 
@@ -98,15 +100,23 @@ impl ClaudeCliPolicy {
             OsString::from("false"),
         ];
         match invocation {
-            ClaudeInvocation::NewSession { session_id, model } => {
-                add_user_turn_policy(&mut args, *model);
+            ClaudeInvocation::NewSession {
+                session_id,
+                model,
+                effort,
+            } => {
+                add_user_turn_policy(&mut args, *model, *effort);
                 args.extend([
                     OsString::from("--session-id"),
                     OsString::from(session_id.as_str()),
                 ]);
             }
-            ClaudeInvocation::ResumeSession { session_id, model } => {
-                add_user_turn_policy(&mut args, *model);
+            ClaudeInvocation::ResumeSession {
+                session_id,
+                model,
+                effort,
+            } => {
+                add_user_turn_policy(&mut args, *model, *effort);
                 args.extend([
                     OsString::from("--resume"),
                     OsString::from(session_id.as_str()),
@@ -117,7 +127,11 @@ impl ClaudeCliPolicy {
     }
 }
 
-fn add_user_turn_policy(args: &mut Vec<OsString>, model: ClaudeModelAlias) {
+fn add_user_turn_policy(
+    args: &mut Vec<OsString>,
+    model: ClaudeModelAlias,
+    effort: Option<ClaudeEffort>,
+) {
     args.extend([
         OsString::from("--dangerously-skip-permissions"),
         OsString::from("--permission-mode"),
@@ -129,6 +143,9 @@ fn add_user_turn_policy(args: &mut Vec<OsString>, model: ClaudeModelAlias) {
         OsString::from("--model"),
         OsString::from(claude_model_selector(model)),
     ]);
+    if let Some(effort) = effort {
+        args.extend([OsString::from("--effort"), OsString::from(effort.as_str())]);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]

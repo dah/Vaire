@@ -2,7 +2,7 @@
 name: "rp-review-cli"
 description: "Code review workflow using rpce-cli git tool and context_builder"
 repoprompt_managed: true
-repoprompt_skills_version: 61
+repoprompt_skills_version: 62
 repoprompt_variant: cli
 ---
 

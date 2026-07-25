@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Clone)]
-pub(super) struct MemoryPreferences(pub(super) Arc<Mutex<PreferencesV3>>);
+pub(super) struct MemoryPreferences(pub(super) Arc<Mutex<PreferencesV4>>);
 
 impl PreferencesPort for MemoryPreferences {
     fn load(&self) -> Result<LoadOutcome, PersistenceError> {
@@ -13,7 +13,7 @@ impl PreferencesPort for MemoryPreferences {
         })
     }
 
-    fn save(&self, preferences: &PreferencesV3) -> Result<(), PersistenceError> {
+    fn save(&self, preferences: &PreferencesV4) -> Result<(), PersistenceError> {
         *self.0.lock().unwrap() = preferences.clone();
         Ok(())
     }
@@ -21,7 +21,7 @@ impl PreferencesPort for MemoryPreferences {
 
 #[derive(Clone)]
 pub(super) struct ReadOnlyPreferences {
-    pub(super) value: PreferencesV3,
+    pub(super) value: PreferencesV4,
     pub(super) saves: Arc<Mutex<usize>>,
 }
 
@@ -35,7 +35,7 @@ impl PreferencesPort for ReadOnlyPreferences {
         })
     }
 
-    fn save(&self, _preferences: &PreferencesV3) -> Result<(), PersistenceError> {
+    fn save(&self, _preferences: &PreferencesV4) -> Result<(), PersistenceError> {
         *self.saves.lock().unwrap() += 1;
         Ok(())
     }
@@ -132,10 +132,10 @@ pub(super) fn openrouter_service(
     )
 }
 
-pub(super) fn openrouter_preferences(model_id: &str) -> PreferencesV3 {
-    let mut preferences = PreferencesV3 {
+pub(super) fn openrouter_preferences(model_id: &str) -> PreferencesV4 {
+    let mut preferences = PreferencesV4 {
         active_provider: ProviderId::OpenRouter,
-        ..PreferencesV3::default()
+        ..PreferencesV4::default()
     };
     preferences.openrouter.selected_model_id = Some(model_id.to_owned());
     preferences.openrouter.enabled_model_ids = BTreeSet::from([model_id.to_owned()]);
@@ -196,7 +196,7 @@ pub(super) async fn persist_failed_partial(
     model_id: &str,
     user_text: &str,
     partial: &str,
-) -> PreferencesV3 {
+) -> PreferencesV4 {
     let (base, _requests, server) =
         scripted_openrouter(failed_partial_responses(model_id, partial)).await;
     let credentials = Arc::new(FakeCredentialStore::with_openrouter_key(

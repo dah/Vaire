@@ -98,6 +98,49 @@ impl FromStr for ClaudeModelAlias {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeEffort {
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl ClaudeEffort {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
+impl fmt::Display for ClaudeEffort {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ClaudeEffort {
+    type Err = ProviderIdentityError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::XHigh),
+            "max" => Ok(Self::Max),
+            _ => Err(ProviderIdentityError::InvalidClaudeEffort),
+        }
+    }
+}
+
 macro_rules! openrouter_id {
     ($name:ident, $prefix:literal) => {
         #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -355,6 +398,8 @@ pub enum ProviderIdentityError {
     InvalidClaudeId,
     #[error("invalid Claude model alias")]
     InvalidClaudeModelAlias,
+    #[error("invalid Claude effort")]
+    InvalidClaudeEffort,
 }
 
 #[cfg(test)]
@@ -434,6 +479,50 @@ mod tests {
             serde_json::to_string(&ProviderId::Claude).unwrap(),
             "\"claude\""
         );
+    }
+
+    #[test]
+    fn claude_efforts_have_exact_lowercase_strings_and_strict_serde() {
+        for (effort, expected, serde_name) in [
+            (ClaudeEffort::Low, "low", "low"),
+            (ClaudeEffort::Medium, "medium", "medium"),
+            (ClaudeEffort::High, "high", "high"),
+            (ClaudeEffort::XHigh, "xhigh", "x_high"),
+            (ClaudeEffort::Max, "max", "max"),
+        ] {
+            assert_eq!(effort.as_str(), expected);
+            assert_eq!(effort.to_string(), expected);
+            assert_eq!(expected.parse::<ClaudeEffort>().unwrap(), effort);
+            let encoded = serde_json::to_string(&effort).unwrap();
+            assert_eq!(encoded, format!("\"{serde_name}\""));
+            assert_eq!(
+                serde_json::from_str::<ClaudeEffort>(&encoded).unwrap(),
+                effort
+            );
+        }
+
+        for invalid in [
+            "",
+            "Low",
+            "x-high",
+            "x_high",
+            "ultracode",
+            "default",
+            "minimal",
+        ] {
+            assert!(invalid.parse::<ClaudeEffort>().is_err());
+        }
+        for invalid in [
+            "",
+            "Low",
+            "x-high",
+            "xhigh",
+            "ultracode",
+            "default",
+            "minimal",
+        ] {
+            assert!(serde_json::from_str::<ClaudeEffort>(&format!("\"{invalid}\"")).is_err());
+        }
     }
 
     #[test]

@@ -28,7 +28,7 @@ IFS= read -r hold
     let opened = browser.urls.clone();
     let mut backend = BackendCoordinator::new(
         session(temp.path(), &body).await,
-        MemoryPreferences::new(PreferencesV3::default()),
+        MemoryPreferences::new(PreferencesV4::default()),
         browser,
     );
     backend.startup().await.unwrap();
@@ -98,7 +98,7 @@ IFS= read -r hold
     let opened = browser.urls.clone();
     let mut backend = BackendCoordinator::new(
         session(temp.path(), &body).await,
-        MemoryPreferences::new(PreferencesV3::default()),
+        MemoryPreferences::new(PreferencesV4::default()),
         browser,
     );
 
@@ -167,7 +167,7 @@ IFS= read -r hold
     let opened = browser.urls.clone();
     let mut backend = BackendCoordinator::new(
         session(temp.path(), &body).await,
-        MemoryPreferences::new(PreferencesV3::default()),
+        MemoryPreferences::new(PreferencesV4::default()),
         browser,
     );
 
@@ -231,7 +231,7 @@ IFS= read -r hold
     );
     let mut backend = BackendCoordinator::new(
         session(temp.path(), &body).await,
-        MemoryPreferences::new(PreferencesV3::default()),
+        MemoryPreferences::new(PreferencesV4::default()),
         FailingBrowser,
     );
 
@@ -273,7 +273,7 @@ IFS= read -r hold
     );
     let mut backend = BackendCoordinator::new(
         session(temp.path(), &body).await,
-        MemoryPreferences::new(PreferencesV3::default()),
+        MemoryPreferences::new(PreferencesV4::default()),
         RecordingBrowser::default(),
     );
 

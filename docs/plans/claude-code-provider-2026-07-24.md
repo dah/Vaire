@@ -3,6 +3,13 @@
 Date: 2026-07-24  
 Status: complete
 
+> **Historical superseding note (2026-07-24):** This plan accurately records the original Claude
+> provider milestone, whose minimum was 2.1.178 and which deliberately left effort selection out of
+> scope. The completed `claude-reasoning-effort-2026-07-24.md` milestone supersedes only those two
+> points: the current minimum is 2.1.218 and Claude `/reasoning` now selects a provider-wide
+> requested effort for the next turn. The original session, auth, safety, and reasoning-panel
+> boundaries below remain historical and durable.
+
 ## Decision
 
 Vairë will add Claude Code as its third and final supported provider alongside Codex app-server and OpenRouter. The product continues to expose exactly one active provider, conversation, and turn.

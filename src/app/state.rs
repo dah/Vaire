@@ -18,7 +18,7 @@ pub struct AppState {
     pub transcript_dropped_prefix_bytes: BTreeMap<(String, String), TranscriptTruncation>,
     pub popup: Option<PopupState>,
     pub thinking: ThinkingState,
-    pub preferences: PreferencesV3,
+    pub preferences: PreferencesV4,
     pub notice: Option<String>,
     /// The account identity captured when an eager `/new` operation began.
     /// The outer option distinguishes no request from a request made while the
@@ -48,7 +48,7 @@ impl Default for AppState {
             transcript_dropped_prefix_bytes: BTreeMap::new(),
             popup: None,
             thinking: ThinkingState::default(),
-            preferences: PreferencesV3::default(),
+            preferences: PreferencesV4::default(),
             notice: None,
             pending_new_thread_scope: None,
             pending_new_claude_session: false,

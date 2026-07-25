@@ -4,7 +4,7 @@ use super::{
     MAX_TRACKED_COMPLETED_ITEMS_PER_TURN, MAX_TRACKED_COMPLETED_ITEM_ID_BYTES,
 };
 use crate::persistence::{
-    FilePreferences, LoadNotice, LoadOutcome, PersistenceError, PreferencesPort, PreferencesV3,
+    FilePreferences, LoadNotice, LoadOutcome, PersistenceError, PreferencesPort, PreferencesV4,
 };
 use crate::platform::{BrowserError, BrowserOpener};
 use std::sync::{Arc, Mutex};
@@ -99,13 +99,13 @@ impl BrowserOpener for NoopBrowser {
 
 #[derive(Clone)]
 struct UnverifiedPreferences {
-    saved: Arc<Mutex<PreferencesV3>>,
+    saved: Arc<Mutex<PreferencesV4>>,
 }
 
 impl UnverifiedPreferences {
     fn new() -> Self {
         Self {
-            saved: Arc::new(Mutex::new(PreferencesV3::default())),
+            saved: Arc::new(Mutex::new(PreferencesV4::default())),
         }
     }
 }
@@ -120,14 +120,14 @@ impl PreferencesPort for UnverifiedPreferences {
         })
     }
 
-    fn save(&self, preferences: &PreferencesV3) -> Result<(), PersistenceError> {
+    fn save(&self, preferences: &PreferencesV4) -> Result<(), PersistenceError> {
         *self.saved.lock().unwrap() = preferences.clone();
         Ok(())
     }
 
     fn save_with_commit(
         &self,
-        preferences: &PreferencesV3,
+        preferences: &PreferencesV4,
     ) -> Result<crate::storage::CommitStatus, PersistenceError> {
         self.save(preferences)?;
         Ok(crate::storage::CommitStatus::CommittedUnverified)
@@ -138,7 +138,7 @@ impl PreferencesPort for UnverifiedPreferences {
 async fn future_preferences_remain_byte_for_byte_unchanged_through_all_backend_writes() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("preferences.json");
-    let original = b"{\"version\":99,\"future\":{\"preserve\":true}}\n";
+    let original = b"{\"version\":5,\"future\":{\"preserve\":true}}\n";
     std::fs::write(&path, original).unwrap();
     let preferences = FilePreferences::new(&path);
     let loaded = preferences.load().unwrap();
@@ -148,7 +148,7 @@ async fn future_preferences_remain_byte_for_byte_unchanged_through_all_backend_w
         BackendCoordinator::without_codex(preferences, NoopBrowser, "Codex unavailable".to_owned());
     backend.startup().await.unwrap();
     backend
-        .execute_pending(vec![Effect::Persist(PreferencesV3::default())])
+        .execute_pending(vec![Effect::Persist(PreferencesV4::default())])
         .await
         .unwrap();
     backend.shutdown().await.unwrap();
@@ -157,7 +157,7 @@ async fn future_preferences_remain_byte_for_byte_unchanged_through_all_backend_w
 }
 
 #[tokio::test]
-async fn v1_preferences_are_still_resaved_through_the_load_derived_gate() {
+async fn v1_preferences_are_resaved_as_v4_through_the_load_derived_gate() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("preferences.json");
     std::fs::write(
@@ -184,7 +184,7 @@ async fn v1_preferences_are_still_resaved_through_the_load_derived_gate() {
 
     let migrated: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(migrated["version"], 3);
+    assert_eq!(migrated["version"], 4);
     assert_eq!(migrated["codex"]["auto_resume_thread_id"], "thr-v1");
 }
 
@@ -277,18 +277,62 @@ exit 1
     executable
 }
 
+fn fake_claude_subscription_records_effort_then_fail(
+    root: &std::path::Path,
+    name: &str,
+    marker: &std::path::Path,
+) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let executable = root.join(name);
+    std::fs::write(
+        &executable,
+        format!(
+            r#"#!/bin/sh
+case " $* " in
+  *" auth status --json "*)
+    printf '%s\n' '{{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}}'
+    exit 0
+    ;;
+esac
+effort_count=0
+effort_value=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--effort" ]; then
+    effort_count=$((effort_count + 1))
+    shift
+    effort_value=$1
+  fi
+  shift
+done
+printf '%s:%s\n' "$effort_count" "$effort_value" > '{}'
+exit 1
+"#,
+            marker.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    executable
+}
+
 #[tokio::test]
-async fn lazy_claude_send_persists_uuid_before_launch_and_abandons_failed_preparation() {
+async fn lazy_claude_send_preserves_effort_through_auth_and_registration_then_settles_terminally() {
     use crate::app::{ClaudeAvailability, ClaudeConversationState, TurnState};
     use crate::claude::{
-        ClaudeService, ClaudeSessionStore, ClaudeTurnOutcome, FileClaudeSessionStore,
+        ClaudeEffort, ClaudeService, ClaudeSessionStore, ClaudeTurnOutcome, FileClaudeSessionStore,
     };
     use crate::provider::{ClaudeModelAlias, ProviderId};
 
     let temp = tempfile::tempdir().unwrap();
     let file_store = Arc::new(FileClaudeSessionStore::new(temp.path().join("sessions")).unwrap());
     let store: Arc<dyn ClaudeSessionStore> = file_store.clone();
-    let executable = fake_claude_subscription_then_fail(temp.path(), "subscription-then-fail");
+    let effort_marker = temp.path().join("turn-effort");
+    let executable = fake_claude_subscription_records_effort_then_fail(
+        temp.path(),
+        "subscription-then-fail",
+        &effort_marker,
+    );
     let policy = fake_claude_policy(temp.path(), executable);
     let service = ClaudeService::new(policy.clone(), store);
     let mut backend = BackendCoordinator::without_codex(
@@ -301,6 +345,7 @@ async fn lazy_claude_send_persists_uuid_before_launch_and_abandons_failed_prepar
     backend.state.active_provider = ProviderId::Claude;
     backend.state.preferences.active_provider = ProviderId::Claude;
     backend.state.preferences.claude.selected_model_alias = Some(ClaudeModelAlias::Default);
+    backend.state.preferences.claude.selected_effort = Some(ClaudeEffort::Max);
     backend.state.claude.availability = ClaudeAvailability::Ready;
     backend.state.claude.auth = crate::claude::ClaudeAuthStatus::Subscription;
     backend.state.claude.conversation = ClaudeConversationState::None;
@@ -309,9 +354,22 @@ async fn lazy_claude_send_persists_uuid_before_launch_and_abandons_failed_prepar
     backend
         .execute_pending(vec![Effect::SendClaudeMessage {
             text: "hello".to_owned(),
+            effort: Some(ClaudeEffort::XHigh),
         }])
         .await
         .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !effort_marker.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("lazy Claude child must record its snapshotted effort");
+    assert_eq!(
+        std::fs::read_to_string(&effort_marker).unwrap(),
+        "1:xhigh\n"
+    );
 
     let session_id = backend
         .state
@@ -328,16 +386,29 @@ async fn lazy_claude_send_persists_uuid_before_launch_and_abandons_failed_prepar
         persisted.claude.auto_resume_session_id.as_ref(),
         Some(&session_id)
     );
-    let session = file_store.load_session(&session_id).unwrap();
+    let session = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let session = file_store.load_session(&session_id).unwrap();
+            if session
+                .turns
+                .first()
+                .is_some_and(|turn| !matches!(turn.outcome, ClaudeTurnOutcome::InProgress))
+            {
+                break session;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("failed lazy Claude child must settle its turn record");
     assert_eq!(session.turns.len(), 1);
     assert_eq!(
         session.lifecycle,
         crate::claude::ClaudeSessionLifecycle::CreationUncertain
     );
-    assert_eq!(session.turns[0].outcome, ClaudeTurnOutcome::Interrupted);
-    assert!(!matches!(
+    assert!(matches!(
         session.turns[0].outcome,
-        ClaudeTurnOutcome::InProgress
+        ClaudeTurnOutcome::Interrupted | ClaudeTurnOutcome::Failed
     ));
 
     backend.state.claude.conversation = ClaudeConversationState::ResumeFailed {
@@ -381,6 +452,7 @@ async fn unverified_claude_pointer_commit_blocks_first_child_launch() {
     backend
         .execute_pending(vec![Effect::SendClaudeMessage {
             text: "hello".to_owned(),
+            effort: None,
         }])
         .await
         .unwrap();
@@ -521,9 +593,9 @@ async fn claude_startup_requires_explicit_resume_when_account_scope_is_unavailab
     let session_id: ClaudeSessionId = "00000000-0000-4000-8000-000000000077".parse().unwrap();
     let preferences_path = temp.path().join("preferences.json");
     let preferences = FilePreferences::new(&preferences_path);
-    let mut saved = PreferencesV3 {
+    let mut saved = PreferencesV4 {
         active_provider: ProviderId::Claude,
-        ..PreferencesV3::default()
+        ..PreferencesV4::default()
     };
     saved.claude.selected_model_alias = Some(ClaudeModelAlias::Default);
     saved.claude.auto_resume_session_id = Some(session_id.clone());
@@ -841,6 +913,7 @@ async fn claude_send_revalidates_system_subscription_before_launch() {
     backend
         .execute_pending(vec![Effect::SendClaudeMessage {
             text: "must not launch".to_owned(),
+            effort: Some(crate::claude::ClaudeEffort::Low),
         }])
         .await
         .unwrap();

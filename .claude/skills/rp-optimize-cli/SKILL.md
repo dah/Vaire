@@ -2,7 +2,7 @@
 name: "rp-optimize-cli"
 description: "Iterative performance optimization loop using rpce-cli: instrument with debug-only metrics, establish a baseline, then plan → delegate one optimize+harden cycle → re-measure → ask oracle for next plan, looping until the oracle is satisfied or the target metric is met"
 repoprompt_managed: true
-repoprompt_skills_version: 61
+repoprompt_skills_version: 62
 repoprompt_variant: cli
 ---
 

@@ -5,9 +5,9 @@ use crate::claude::{
 use crate::command::HELP_TEXT;
 #[cfg(test)]
 use crate::persistence::CodexPreferencesV2;
-use crate::persistence::{AccountScope, PreferencesV3};
+use crate::persistence::{AccountScope, PreferencesV4};
 use crate::provider::{
-    ClaudeModelAlias, ClaudeSessionId, ClaudeTurnId, ConversationRef, ModelKey,
+    ClaudeEffort, ClaudeModelAlias, ClaudeSessionId, ClaudeTurnId, ConversationRef, ModelKey,
     OpenRouterConversationId, OpenRouterTurnId, ProviderId, TurnRef,
 };
 use crate::text::sanitize_terminal_text;
